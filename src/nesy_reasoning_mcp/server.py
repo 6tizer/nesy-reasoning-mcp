@@ -12,7 +12,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool
 
 from nesy_reasoning_mcp import __version__
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.store import RelationStoreProtocol, create_relation_store
 from nesy_reasoning_mcp.tools import call_tool, get_tools
 
 
@@ -20,16 +20,16 @@ from nesy_reasoning_mcp.tools import call_tool, get_tools
 class ServerState:
     """Server lifespan state."""
 
-    store: RelationStore
+    store: RelationStoreProtocol
 
 
 @asynccontextmanager
 async def lifespan(_server: Server[ServerState]) -> AsyncIterator[ServerState]:
     """Create per-process server state."""
-    yield ServerState(store=RelationStore())
+    yield ServerState(store=create_relation_store())
 
 
-def create_server(store: RelationStore | None = None) -> Server[ServerState]:
+def create_server(store: RelationStoreProtocol | None = None) -> Server[ServerState]:
     """Create and configure the NeSy Reasoning MCP server."""
     server: Server[ServerState] = Server(
         "nesy-reasoning",

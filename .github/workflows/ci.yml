@@ -74,7 +74,9 @@ jobs:
         run: uv sync --locked
 
       - name: Validate example MCP config
-        run: uv run python -m json.tool examples/mcp-config.json > /dev/null
+        run: |
+          uv run python -m json.tool examples/mcp-config.json > /dev/null
+          uv run python -m json.tool examples/nesy-config.json > /dev/null
 
       - name: Stdio server exits cleanly on EOF
         run: printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio
@@ -99,7 +101,7 @@ jobs:
                   async with ClientSession(read, write) as session:
                       await session.initialize()
                       tools = await session.list_tools()
-                      assert len(tools.tools) == 7
+                      assert len(tools.tools) == 9
                       await session.call_tool(
                           "nesy.assert_exclusive",
                           {
@@ -132,8 +134,59 @@ jobs:
                       checked = await session.call_tool("nesy.check_contradictions", {})
                       assert checked.structuredContent["has_contradictions"] is True
                       assert checked.structuredContent["contradictions"][0]["type"] == "exclusive_targets"
+                      exported = await session.call_tool("nesy.export_relations", {"destination": "inline"})
+                      assert exported.structuredContent["relation_count"] == 2
+                      loaded = await session.call_tool(
+                          "nesy.load_relations",
+                          {
+                              "source_type": "inline",
+                              "data": exported.structuredContent["data"],
+                              "validate_only": True,
+                              "check_contradictions": False,
+                          },
+                      )
+                      assert loaded.structuredContent["loaded_relations"] == 2
 
           anyio.run(main)
+          PY
+
+      - name: Persistence smoke
+        env:
+          PYTHONPATH: src
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
+          from nesy_reasoning_mcp.schemas import RelationInput, RelationType
+          from nesy_reasoning_mcp.store import JsonRelationStore, SqliteRelationStore
+
+          with TemporaryDirectory() as tmp:
+              base = Path(tmp)
+              sqlite_config = NesyConfig(
+                  storage=StorageConfig(
+                      backend="sqlite",
+                      sqlite_path=str(base / "nesy.db"),
+                  )
+              )
+              sqlite_store = SqliteRelationStore(sqlite_config)
+              sqlite_store.assert_relations([
+                  RelationInput(source="A", target="B", relation_type=RelationType.SUFFICIENT)
+              ])
+              assert SqliteRelationStore(sqlite_config).list_relations()[0].target == "B"
+
+              json_config = NesyConfig(
+                  storage=StorageConfig(
+                      backend="json",
+                      json_path=str(base / "relations.json"),
+                  )
+              )
+              json_store = JsonRelationStore(json_config)
+              json_store.assert_relations([
+                  RelationInput(source="C", target="D", relation_type=RelationType.SUFFICIENT)
+              ])
+              assert JsonRelationStore(json_config).list_relations()[0].target == "D"
           PY
 
       - name: Build package

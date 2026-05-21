@@ -2,7 +2,7 @@
 
 Deterministic neuro-symbolic reasoning MCP server.
 
-v0.3 provides an in-memory MCP stdio server with:
+v0.4 provides a local MCP stdio server with memory, JSON, and SQLite storage:
 
 - `nesy.assert_relations`
 - `nesy.list_relations`
@@ -11,6 +11,8 @@ v0.3 provides an in-memory MCP stdio server with:
 - `nesy.verify_chain`
 - `nesy.assert_exclusive`
 - `nesy.check_contradictions`
+- `nesy.load_relations`
+- `nesy.export_relations`
 
 ## Development
 
@@ -30,6 +32,13 @@ For version planning and contribution gates, see:
 
 ```bash
 uv run nesy-reasoning-mcp --transport stdio
+```
+
+Optional persistent storage:
+
+```bash
+NESY_STORAGE_BACKEND=sqlite NESY_SQLITE_PATH=~/.nesy-reasoning/nesy.db \
+  uv run nesy-reasoning-mcp --transport stdio
 ```
 
 ## Install As MCP Server

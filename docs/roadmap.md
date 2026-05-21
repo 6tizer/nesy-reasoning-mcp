@@ -5,14 +5,16 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.3 is the current implementation baseline:
+v0.4 is the current implementation baseline:
 
 - MCP stdio server.
-- In-memory store.
+- Memory, JSON, and SQLite stores.
 - Relation assert/list/clear.
 - Classification and chain verification.
 - Explicit exclusive groups.
 - Explicit exclusivity-based contradiction checks.
+- Relation load/export with allowed roots.
+- Write-operation audit log.
 - Local install docs and CI smoke coverage.
 
 ## Version Gates

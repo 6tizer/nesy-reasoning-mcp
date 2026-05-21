@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import ValidationError
 
+from nesy_reasoning_mcp.file_access import (
+    read_allowed_relation_file,
+    write_allowed_relation_file,
+)
 from nesy_reasoning_mcp.reasoning import (
     build_graph,
     classify_reachability,
@@ -29,8 +34,15 @@ from nesy_reasoning_mcp.schemas import (
     Diagnostic,
     ExclusiveGroupRecord,
     ExpectedRelation,
+    ExportDestination,
+    ExportFormat,
+    ExportRelationsInput,
     ListRelationsInput,
+    LoadRelationsInput,
+    LoadSourceType,
+    RelationFilter,
     RelationRecord,
+    RelationSetData,
     VerifyChainInput,
 )
 from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
@@ -42,6 +54,8 @@ CLASSIFY = "nesy.classify"
 VERIFY_CHAIN = "nesy.verify_chain"
 ASSERT_EXCLUSIVE = "nesy.assert_exclusive"
 CHECK_CONTRADICTIONS = "nesy.check_contradictions"
+LOAD_RELATIONS = "nesy.load_relations"
+EXPORT_RELATIONS = "nesy.export_relations"
 
 
 def get_tools() -> list[Tool]:
@@ -108,6 +122,26 @@ def get_tools() -> list[Tool]:
             inputSchema=CheckContradictionsInput.model_json_schema(),
             outputSchema=_check_contradictions_output_schema(),
         ),
+        Tool(
+            name=LOAD_RELATIONS,
+            title="Load Relations",
+            description=(
+                "Load relation records and exclusive groups from inline JSON or an "
+                "allowed local file."
+            ),
+            inputSchema=LoadRelationsInput.model_json_schema(),
+            outputSchema=_load_relations_output_schema(),
+        ),
+        Tool(
+            name=EXPORT_RELATIONS,
+            title="Export Relations",
+            description=(
+                "Export relation records and exclusive groups as JSON or JSONL, inline "
+                "or to an allowed local file."
+            ),
+            inputSchema=ExportRelationsInput.model_json_schema(),
+            outputSchema=_export_relations_output_schema(),
+        ),
     ]
 
 
@@ -121,6 +155,8 @@ async def call_tool(name: str, arguments: dict[str, Any], store: RelationStore) 
         VERIFY_CHAIN: verify_chain,
         ASSERT_EXCLUSIVE: assert_exclusive,
         CHECK_CONTRADICTIONS: check_contradictions,
+        LOAD_RELATIONS: load_relations,
+        EXPORT_RELATIONS: export_relations,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -128,6 +164,7 @@ async def call_tool(name: str, arguments: dict[str, Any], store: RelationStore) 
 
     try:
         structured = await handler(arguments, store)
+        _record_audit_if_needed(name, arguments, structured, store)
         return make_result(structured, is_error=structured.get("status") == "error")
     except ValidationError as exc:
         structured = _validation_error_content(exc)
@@ -214,7 +251,11 @@ async def list_relations(arguments: dict[str, Any], store: RelationStore) -> dic
 async def clear_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
     """Handle `nesy.clear_relations`."""
     payload = ClearRelationsInput.model_validate(arguments)
-    if payload.scope == "all" and not payload.dry_run:
+    if (
+        payload.scope == "all"
+        and not payload.dry_run
+        and not store.config.security.allow_scope_all_clear
+    ):
         diagnostic = Diagnostic(
             level="error",
             code="SCOPE_ALL_CLEAR_DISABLED",
@@ -409,6 +450,148 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStore) -> dict[
     return _searched_chain_result(payload, index.graph_stats, classification, fwd_paths, rev_paths)
 
 
+async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+    """Handle `nesy.load_relations`."""
+    payload = LoadRelationsInput.model_validate(arguments)
+    if payload.source_type == LoadSourceType.RESOURCE_URI:
+        return _load_error(
+            "RESOURCE_URI_NOT_IMPLEMENTED_IN_V04",
+            "resource_uri loading is not implemented in v0.4.",
+            store,
+        )
+
+    try:
+        data, source_trace = _load_relation_set_data(payload, store)
+    except (OSError, ValueError, ValidationError) as exc:
+        return _load_error("LOAD_RELATIONS_FAILED", str(exc), store)
+
+    incoming_relations = _relations_for_store(data.relations, payload.store_id)
+    incoming_groups = _groups_for_store(data.exclusive_groups, payload.store_id)
+    contradictions: list[dict[str, Any]] = []
+    if payload.check_contradictions:
+        stored_relations = store.list_relations()
+        stored_groups = store.list_exclusive_groups()
+        if payload.mode.value == "replace_store":
+            stored_relations = [
+                relation for relation in stored_relations if relation.store_id != payload.store_id
+            ]
+            stored_groups = [group for group in stored_groups if group.store_id != payload.store_id]
+        check_relations = [*stored_relations, *incoming_relations]
+        contradictions, _context_separated = find_exclusive_contradictions(
+            check_relations,
+            [*stored_groups, *incoming_groups],
+            context_filter=ContextFilter(store_id=payload.store_id),
+            max_depth=8,
+        )
+
+    try:
+        loaded_relations, loaded_groups, updated_relations, updated_groups = store.import_records(
+            incoming_relations,
+            incoming_groups,
+            mode=payload.mode.value,
+            store_id=payload.store_id,
+            dry_run=payload.validate_only,
+        )
+    except Exception as exc:
+        return _load_error("LOAD_RELATIONS_FAILED", str(exc), store)
+    return {
+        "status": "warning" if contradictions else "ok",
+        "loaded_relations": loaded_relations,
+        "loaded_exclusive_groups": loaded_groups,
+        "updated_relations": updated_relations,
+        "updated_exclusive_groups": updated_groups,
+        "rejected": 0,
+        "conflicts": contradictions,
+        "validate_only": payload.validate_only,
+        "diagnostics": [],
+        "trace": [
+            *source_trace,
+            (
+                "Validated relation set without changing store."
+                if payload.validate_only
+                else f"Loaded relation set with mode={payload.mode.value}."
+            ),
+        ],
+        "graph_stats": store.graph_stats().model_dump(mode="json"),
+    }
+
+
+async def export_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+    """Handle `nesy.export_relations`."""
+    payload = ExportRelationsInput.model_validate(arguments)
+    relations = store.list_relations(payload.filter, limit=None)
+    exclusive_groups = (
+        [
+            group
+            for group in store.list_exclusive_groups()
+            if _exclusive_group_matches_filter(group, payload.filter)
+        ]
+        if payload.include_exclusive_groups
+        else []
+    )
+    exported = _relation_set_export(
+        relations,
+        exclusive_groups,
+        include_metadata=payload.include_metadata,
+    )
+    text = _serialize_relation_set(exported, payload.format)
+    byte_count = len(text.encode("utf-8"))
+
+    if payload.destination == ExportDestination.INLINE:
+        if byte_count > payload.max_inline_bytes:
+            return _export_error(
+                "INLINE_EXPORT_TOO_LARGE",
+                "Inline export exceeds max_inline_bytes.",
+                store,
+                payload.format,
+            )
+        return {
+            "status": "ok",
+            "format": payload.format.value,
+            "relation_count": len(relations),
+            "exclusive_group_count": len(exclusive_groups),
+            "data": exported if payload.format == ExportFormat.JSON else text,
+            "path": None,
+            "bytes": byte_count,
+            "diagnostics": [],
+            "trace": [f"Exported {len(relations)} relation(s) inline."],
+            "graph_stats": store.graph_stats().model_dump(mode="json"),
+        }
+
+    if payload.path is None:
+        return _export_error(
+            "EXPORT_PATH_REQUIRED",
+            "path is required when destination=file.",
+            store,
+            payload.format,
+        )
+    if Path(payload.path).expanduser().suffix != f".{payload.format.value}":
+        return _export_error(
+            "EXPORT_EXTENSION_MISMATCH",
+            "Export path suffix must match requested format.",
+            store,
+            payload.format,
+        )
+
+    try:
+        real_path = write_allowed_relation_file(payload.path, store.config, text)
+    except (OSError, ValueError) as exc:
+        return _export_error("EXPORT_RELATIONS_FAILED", str(exc), store, payload.format)
+
+    return {
+        "status": "ok",
+        "format": payload.format.value,
+        "relation_count": len(relations),
+        "exclusive_group_count": len(exclusive_groups),
+        "data": None,
+        "path": str(real_path),
+        "bytes": byte_count,
+        "diagnostics": [],
+        "trace": [f"Exported {len(relations)} relation(s) to {real_path}."],
+        "graph_stats": store.graph_stats().model_dump(mode="json"),
+    }
+
+
 def make_result(structured: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
     """Build an MCP CallToolResult with mirrored JSON text content."""
     return CallToolResult(
@@ -416,6 +599,188 @@ def make_result(structured: dict[str, Any], *, is_error: bool = False) -> CallTo
         structuredContent=structured,
         isError=is_error,
     )
+
+
+def _load_relation_set_data(
+    payload: LoadRelationsInput,
+    store: RelationStore,
+) -> tuple[RelationSetData, list[str]]:
+    if payload.source_type == LoadSourceType.INLINE:
+        if payload.data is None:
+            raise ValueError("data is required when source_type=inline")
+        return payload.data, ["Read inline relation set."]
+
+    if payload.source_type == LoadSourceType.FILE:
+        if payload.path is None:
+            raise ValueError("path is required when source_type=file")
+        real_path, text = read_allowed_relation_file(payload.path, store.config)
+        return _parse_relation_set_text(text, real_path.suffix), [
+            f"Read relation set from {real_path}."
+        ]
+
+    raise ValueError(f"unsupported source_type: {payload.source_type.value}")
+
+
+def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
+    if suffix == ".json":
+        return RelationSetData.model_validate(json.loads(text))
+    if suffix == ".jsonl":
+        relations = []
+        exclusive_groups = []
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            item = json.loads(stripped)
+            item_type = item.get("type")
+            record = item.get("record", item)
+            if item_type == "exclusive_group" or "members" in record:
+                exclusive_groups.append(record)
+            elif item_type == "relation" or "relation_type" in record:
+                relations.append(record)
+            else:
+                raise ValueError(f"line {line_number} is not a relation or exclusive group")
+        return RelationSetData.model_validate(
+            {"relations": relations, "exclusive_groups": exclusive_groups}
+        )
+    raise ValueError("only .json and .jsonl files are allowed")
+
+
+def _relation_set_export(
+    relations: list[RelationRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
+    *,
+    include_metadata: bool,
+) -> dict[str, Any]:
+    relation_items = [_record_dump(record) for record in relations]
+    group_items = [_exclusive_group_dump(group) for group in exclusive_groups]
+    if not include_metadata:
+        for item in relation_items:
+            item.pop("metadata", None)
+            item.pop("provenance", None)
+        for item in group_items:
+            item.pop("metadata", None)
+    return {
+        "version": "2.0",
+        "relations": relation_items,
+        "exclusive_groups": group_items,
+    }
+
+
+def _serialize_relation_set(data: dict[str, Any], export_format: ExportFormat) -> str:
+    if export_format == ExportFormat.JSON:
+        return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+    lines = []
+    lines.extend(
+        json.dumps({"type": "relation", "record": relation}, ensure_ascii=False, sort_keys=True)
+        for relation in data["relations"]
+    )
+    lines.extend(
+        json.dumps(
+            {"type": "exclusive_group", "record": group},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for group in data["exclusive_groups"]
+    )
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _exclusive_group_matches_filter(
+    group: ExclusiveGroupRecord,
+    relation_filter: RelationFilter,
+) -> bool:
+    if relation_filter.context_id is not None and group.context_id != relation_filter.context_id:
+        return False
+    if relation_filter.store_id is not None and group.store_id != relation_filter.store_id:
+        return False
+    return not (
+        relation_filter.domain is not None
+        and group.metadata.get("domain") != relation_filter.domain
+    )
+
+
+def _relations_for_store(
+    relations: list[RelationRecord],
+    store_id: str,
+) -> list[RelationRecord]:
+    return [relation.model_copy(update={"store_id": store_id}) for relation in relations]
+
+
+def _groups_for_store(
+    groups: list[ExclusiveGroupRecord],
+    store_id: str,
+) -> list[ExclusiveGroupRecord]:
+    return [group.model_copy(update={"store_id": store_id}) for group in groups]
+
+
+def _load_error(code: str, message: str, store: RelationStore) -> dict[str, Any]:
+    diagnostic = Diagnostic(level="error", code=code, message=message)
+    return {
+        "status": "error",
+        "loaded_relations": 0,
+        "loaded_exclusive_groups": 0,
+        "updated_relations": 0,
+        "updated_exclusive_groups": 0,
+        "rejected": 0,
+        "conflicts": [],
+        "validate_only": False,
+        "diagnostics": [diagnostic.model_dump(mode="json")],
+        "trace": ["Rejected relation load."],
+        "graph_stats": store.graph_stats().model_dump(mode="json"),
+    }
+
+
+def _export_error(
+    code: str,
+    message: str,
+    store: RelationStore,
+    export_format: ExportFormat,
+) -> dict[str, Any]:
+    diagnostic = Diagnostic(level="error", code=code, message=message)
+    return {
+        "status": "error",
+        "format": export_format.value,
+        "relation_count": 0,
+        "exclusive_group_count": 0,
+        "data": None,
+        "path": None,
+        "bytes": 0,
+        "diagnostics": [diagnostic.model_dump(mode="json")],
+        "trace": ["Rejected relation export."],
+        "graph_stats": store.graph_stats().model_dump(mode="json"),
+    }
+
+
+def _record_audit_if_needed(
+    name: str,
+    arguments: dict[str, Any],
+    structured: dict[str, Any],
+    store: RelationStore,
+) -> None:
+    if not _should_audit(name, arguments):
+        return
+    store.record_audit(
+        event_type="tool_call",
+        tool_name=name,
+        arguments=arguments,
+        result_status=str(structured.get("status", "unknown")),
+        metadata={"is_error": structured.get("status") == "error"},
+    )
+
+
+def _should_audit(name: str, arguments: dict[str, Any]) -> bool:
+    if name == ASSERT_RELATIONS:
+        return not bool(arguments.get("dry_run", False))
+    if name == ASSERT_EXCLUSIVE:
+        return True
+    if name == CLEAR_RELATIONS:
+        return not bool(arguments.get("dry_run", False))
+    if name == LOAD_RELATIONS:
+        return not bool(arguments.get("validate_only", False))
+    if name == EXPORT_RELATIONS:
+        return arguments.get("destination") == "file"
+    return False
 
 
 def _validation_error_content(exc: ValidationError) -> dict[str, Any]:
@@ -830,5 +1195,46 @@ def _check_contradictions_output_schema() -> dict[str, Any]:
         "type": "object",
         "properties": props,
         "required": ["status", "has_contradictions", "contradictions"],
+        "additionalProperties": False,
+    }
+
+
+def _load_relations_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "loaded_relations": {"type": "integer"},
+            "loaded_exclusive_groups": {"type": "integer"},
+            "updated_relations": {"type": "integer"},
+            "updated_exclusive_groups": {"type": "integer"},
+            "rejected": {"type": "integer"},
+            "conflicts": {"type": "array"},
+            "validate_only": {"type": "boolean"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "loaded_relations", "loaded_exclusive_groups", "rejected"],
+        "additionalProperties": False,
+    }
+
+
+def _export_relations_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "format": {"type": "string", "enum": ["json", "jsonl"]},
+            "relation_count": {"type": "integer"},
+            "exclusive_group_count": {"type": "integer"},
+            "data": {"type": ["object", "string", "null"]},
+            "path": {"type": ["string", "null"]},
+            "bytes": {"type": "integer"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "format", "relation_count", "exclusive_group_count"],
         "additionalProperties": False,
     }

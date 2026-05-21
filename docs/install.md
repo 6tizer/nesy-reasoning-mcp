@@ -60,14 +60,65 @@ Then restart or reload the MCP client.
 - `nesy.verify_chain`
 - `nesy.assert_exclusive`
 - `nesy.check_contradictions`
+- `nesy.load_relations`
+- `nesy.export_relations`
+
+## Persistent Storage
+
+Default storage is process memory. Restarting the server clears state unless you
+choose a persistent backend.
+
+SQLite:
+
+```json
+{
+  "env": {
+    "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src",
+    "NESY_STORAGE_BACKEND": "sqlite",
+    "NESY_SQLITE_PATH": "/Users/mac-mini/.nesy-reasoning/nesy.db",
+    "NESY_ALLOWED_ROOTS": "/Users/mac-mini/Documents/nesy-reasoning-mcp,/Users/mac-mini/.nesy-reasoning/relation_sets"
+  }
+}
+```
+
+JSON file:
+
+```json
+{
+  "env": {
+    "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src",
+    "NESY_CONFIG": "/Users/mac-mini/.nesy-reasoning/config.json"
+  }
+}
+```
+
+Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
+
+```json
+{
+  "storage": {
+    "backend": "json",
+    "json_path": "/Users/mac-mini/.nesy-reasoning/relations.json"
+  },
+  "security": {
+    "allowed_roots": [
+      "/Users/mac-mini/Documents/nesy-reasoning-mcp",
+      "/Users/mac-mini/.nesy-reasoning/relation_sets"
+    ],
+    "max_file_size_bytes": 5242880
+  }
+}
+```
+
+File load/export only accepts `.json` and `.jsonl` inside `allowed_roots`.
 
 ## Current Limits
 
-- State is in memory only.
-- Restarting the MCP server clears all relations.
+- Default state is in memory only.
+- SQLite and JSON backends are local-only.
 - Contradiction detection only uses explicit exclusive groups.
 - No counterfactual reasoning yet.
-- No SQLite or file import/export yet.
+- No HTTP daemon or hook bridge yet.
 
 ## Troubleshooting
 

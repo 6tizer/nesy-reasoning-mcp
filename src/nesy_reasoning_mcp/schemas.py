@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_PROPOSITION_LENGTH = 512
 MAX_ASSERT_RELATIONS = 500
+MAX_LOAD_RELATIONS = 50_000
 DEFAULT_CONTEXT_ID = "default"
 DEFAULT_STORE_ID = "default"
 
@@ -71,6 +72,36 @@ class ContradictionMode(StrEnum):
     GRAPH = "graph"
     FACTS = "facts"
     COMBINED = "combined"
+
+
+class LoadSourceType(StrEnum):
+    """Supported relation import sources."""
+
+    INLINE = "inline"
+    FILE = "file"
+    RESOURCE_URI = "resource_uri"
+
+
+class LoadMode(StrEnum):
+    """Supported relation import merge modes."""
+
+    APPEND = "append"
+    UPSERT = "upsert"
+    REPLACE_STORE = "replace_store"
+
+
+class ExportFormat(StrEnum):
+    """Supported relation export formats."""
+
+    JSON = "json"
+    JSONL = "jsonl"
+
+
+class ExportDestination(StrEnum):
+    """Supported relation export destinations."""
+
+    INLINE = "inline"
+    FILE = "file"
 
 
 class Polarity(StrEnum):
@@ -293,6 +324,47 @@ class ClearRelationsInput(BaseModel):
     filter: RelationFilter = Field(default_factory=RelationFilter)
     include_exclusive_groups: bool = False
     dry_run: bool = False
+
+
+class RelationSetData(BaseModel):
+    """Portable relation set payload for load/export."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = "2.0"
+    stores: list[dict[str, Any]] = Field(default_factory=list)
+    relations: list[RelationRecord] = Field(default_factory=list, max_length=MAX_LOAD_RELATIONS)
+    exclusive_groups: list[ExclusiveGroupRecord] = Field(default_factory=list)
+    context_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LoadRelationsInput(BaseModel):
+    """Input for `nesy.load_relations`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: LoadSourceType
+    data: RelationSetData | None = None
+    path: str | None = None
+    resource_uri: str | None = None
+    mode: LoadMode = LoadMode.APPEND
+    store_id: str = DEFAULT_STORE_ID
+    validate_only: bool = False
+    check_contradictions: bool = True
+
+
+class ExportRelationsInput(BaseModel):
+    """Input for `nesy.export_relations`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    format: ExportFormat = ExportFormat.JSON
+    filter: RelationFilter = Field(default_factory=RelationFilter)
+    include_exclusive_groups: bool = True
+    include_metadata: bool = True
+    destination: ExportDestination = ExportDestination.INLINE
+    path: str | None = None
+    max_inline_bytes: int = Field(default=100_000, ge=1000, le=1_000_000)
 
 
 class AssertExclusiveInput(BaseModel):
