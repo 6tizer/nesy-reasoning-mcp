@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "nesy-reasoning": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/mac-mini/Documents/nesy-reasoning-mcp",
+        "run",
+        "nesy-reasoning-mcp",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src"
+      }
+    }
+  }
+}
