@@ -1,0 +1,30 @@
+name: Version plan
+description: Track one planned version from scope to release.
+title: "[version] v0.x "
+labels: ["type:planning"]
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: In-scope tools, behavior, and config.
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: Explicit non-goals for this version.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ] Local verification passes.
+        - [ ] CI passes.
+        - [ ] Docs updated.
+        - [ ] MCP smoke updated.
+    validations:
+      required: true

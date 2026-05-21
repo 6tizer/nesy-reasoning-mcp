@@ -16,9 +16,15 @@ v0.3 provides an in-memory MCP stdio server with:
 
 ```bash
 uv sync
+uv run ruff format --check .
 uv run pytest
 uv run ruff check .
 ```
+
+For version planning and contribution gates, see:
+
+- [docs/roadmap.md](docs/roadmap.md)
+- [docs/development.md](docs/development.md)
 
 ## Run
 
