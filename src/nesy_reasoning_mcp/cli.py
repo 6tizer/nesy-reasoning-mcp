@@ -8,7 +8,7 @@ import sys
 import anyio
 
 from nesy_reasoning_mcp.audit_cli import run_audit_cli
-from nesy_reasoning_mcp.evaluation import run_eval_cli, run_llm_eval_cli
+from nesy_reasoning_mcp.evaluation import run_agent_eval_cli, run_eval_cli, run_llm_eval_cli
 from nesy_reasoning_mcp.hooks import run_pretooluse_hook, run_stop_hook
 from nesy_reasoning_mcp.http_server import run_http_server
 from nesy_reasoning_mcp.server import run_stdio_server
@@ -86,6 +86,53 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Optional benchmark case id. May be repeated.",
     )
+    eval_agent_parser = eval_subparsers.add_parser("agent", help="Run Agent mode matrix eval.")
+    eval_agent_parser.add_argument(
+        "--fixture",
+        default="benchmarks/fixtures/core.json",
+        help="Benchmark fixture JSON path.",
+    )
+    eval_agent_parser.add_argument(
+        "--runner",
+        choices=["deterministic", "openai"],
+        default="deterministic",
+        help="Agent eval runner.",
+    )
+    eval_agent_parser.add_argument(
+        "--model",
+        default="gpt-5.2",
+        help="Provider model name for runner=openai.",
+    )
+    eval_agent_parser.add_argument(
+        "--mode",
+        action="append",
+        choices=[
+            "no_mcp",
+            "tool_descriptions_only",
+            "classify_only",
+            "classify_verify",
+            "full_mcp",
+        ],
+        default=[],
+        help="Optional Agent mode. May be repeated.",
+    )
+    eval_agent_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Evaluation report output format.",
+    )
+    eval_agent_parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional output path. Defaults to stdout.",
+    )
+    eval_agent_parser.add_argument(
+        "--case-id",
+        action="append",
+        default=[],
+        help="Optional benchmark case id. May be repeated.",
+    )
     parser.add_argument(
         "--transport",
         choices=["stdio", "http"],
@@ -114,6 +161,8 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(run_eval_cli(args))
         if args.eval_command == "llm":
             sys.exit(run_llm_eval_cli(args))
+        if args.eval_command == "agent":
+            sys.exit(run_agent_eval_cli(args))
         parser.error("eval command requires a subcommand")
 
     try:

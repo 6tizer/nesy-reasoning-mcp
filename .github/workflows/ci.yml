@@ -42,6 +42,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Type check
+        run: uv run mypy src/nesy_reasoning_mcp
+
   test:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -112,6 +115,8 @@ jobs:
         run: |
           env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json > /tmp/nesy-eval.json
           uv run python -m json.tool /tmp/nesy-eval.json > /dev/null
+          env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json > /tmp/nesy-agent-eval.json
+          uv run python -m json.tool /tmp/nesy-agent-eval.json > /dev/null
 
       - name: Stdio server exits cleanly on EOF
         run: printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio

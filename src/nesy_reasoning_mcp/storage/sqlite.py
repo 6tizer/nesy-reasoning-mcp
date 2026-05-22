@@ -525,7 +525,7 @@ class SqliteRelationStore:
         )
 
     def _insert_exclusive_groups(self, records: Iterable[ExclusiveGroupRecord]) -> None:
-        rows = []
+        rows: list[tuple[str, str, str, str, str, int, str | None, str, str]] = []
         for record in records:
             rows.extend(
                 (

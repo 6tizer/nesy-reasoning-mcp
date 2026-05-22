@@ -10,11 +10,14 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     SummarizeGraphInput,
 )
-from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
+from nesy_reasoning_mcp.store import RelationStoreProtocol, graph_stats_for
 from nesy_reasoning_mcp.tool_common import _exclusive_group_compatible_with_context_filter
 
 
-async def summarize_graph(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def summarize_graph(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
     """Handle `nesy.summarize_graph`."""
     payload = SummarizeGraphInput.model_validate(arguments)
     all_relations = store.list_relations()

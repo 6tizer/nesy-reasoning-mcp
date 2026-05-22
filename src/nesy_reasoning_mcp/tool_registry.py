@@ -21,7 +21,7 @@ from nesy_reasoning_mcp.schemas import (
     SummarizeGraphInput,
     VerifyChainInput,
 )
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_common import _record_audit_if_needed
 from nesy_reasoning_mcp.tool_counterfactual import counterfactual
 from nesy_reasoning_mcp.tool_io import export_relations, load_relations
@@ -170,9 +170,16 @@ def get_tools() -> list[Tool]:
     ]
 
 
-async def call_tool(name: str, arguments: dict[str, Any], store: RelationStore) -> CallToolResult:
+async def call_tool(
+    name: str,
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> CallToolResult:
     """Dispatch a tool call and return a complete MCP CallToolResult."""
-    handlers: dict[str, Callable[[dict[str, Any], RelationStore], Awaitable[dict[str, Any]]]] = {
+    handlers: dict[
+        str,
+        Callable[[dict[str, Any], RelationStoreProtocol], Awaitable[dict[str, Any]]],
+    ] = {
         ASSERT_RELATIONS: assert_relations,
         LIST_RELATIONS: list_relations,
         CLEAR_RELATIONS: clear_relations,

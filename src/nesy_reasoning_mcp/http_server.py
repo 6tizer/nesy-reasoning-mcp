@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from hmac import compare_digest
 from typing import Any
@@ -64,7 +64,7 @@ class HttpGuardMiddleware:
             max_body_bytes=self.config.http.max_body_bytes,
         )
 
-        async def guarded_send(message: dict[str, Any]) -> None:
+        async def guarded_send(message: MutableMapping[str, Any]) -> None:
             nonlocal sent_start
             if message["type"] == "http.response.start":
                 sent_start = True
@@ -241,10 +241,10 @@ def _body_limited_receive(
     receive: Receive,
     *,
     max_body_bytes: int,
-) -> Callable[[], Awaitable[dict[str, Any]]]:
+) -> Callable[[], Awaitable[MutableMapping[str, Any]]]:
     received = 0
 
-    async def limited_receive() -> dict[str, Any]:
+    async def limited_receive() -> MutableMapping[str, Any]:
         nonlocal received
         message = await receive()
         if message["type"] == "http.request":

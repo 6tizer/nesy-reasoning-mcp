@@ -20,7 +20,7 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     RelationType,
 )
-from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
+from nesy_reasoning_mcp.store import RelationStoreProtocol, graph_stats_for
 from nesy_reasoning_mcp.tool_common import (
     _contradiction_trace,
     _exclusive_group_dump,
@@ -30,7 +30,10 @@ from nesy_reasoning_mcp.tool_common import (
 )
 
 
-async def assert_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def assert_relations(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
     """Handle `nesy.assert_relations`."""
     payload = AssertRelationsInput.model_validate(arguments)
     records, updated = store.assert_relations(
@@ -146,7 +149,7 @@ def _equivalent_normalization(
     return diagnostics, trace
 
 
-async def list_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def list_relations(arguments: dict[str, Any], store: RelationStoreProtocol) -> dict[str, Any]:
     """Handle `nesy.list_relations`."""
     payload = ListRelationsInput.model_validate(arguments)
     relations = store.list_relations(payload.filter, limit=payload.limit)
@@ -170,7 +173,10 @@ async def list_relations(arguments: dict[str, Any], store: RelationStore) -> dic
     }
 
 
-async def clear_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def clear_relations(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
     """Handle `nesy.clear_relations`."""
     payload = ClearRelationsInput.model_validate(arguments)
     if (
@@ -212,7 +218,10 @@ async def clear_relations(arguments: dict[str, Any], store: RelationStore) -> di
     }
 
 
-async def assert_exclusive(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def assert_exclusive(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
     """Handle `nesy.assert_exclusive`."""
     payload = AssertExclusiveInput.model_validate(arguments)
     records, updated = store.assert_exclusive(payload.groups)
@@ -230,7 +239,10 @@ async def assert_exclusive(arguments: dict[str, Any], store: RelationStore) -> d
     }
 
 
-async def check_contradictions(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def check_contradictions(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
     """Handle `nesy.check_contradictions`."""
     payload = CheckContradictionsInput.model_validate(arguments)
     fact_records = _temporary_fact_records(payload)

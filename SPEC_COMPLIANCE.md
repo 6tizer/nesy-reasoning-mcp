@@ -12,7 +12,7 @@ Status for `nesy-reasoning-mcp-spec-v2.md` at v1.0.
 | Phase 4: counterfactual | Complete | open-world defaults, guarded closed-world upgrades, alternative path handling, independence-aware `still_possible`. |
 | Phase 5: persistence and import/export | Complete | memory/JSON/SQLite stores, load/export, allowed roots, audit log. |
 | Phase 6: graph summary and hooks | Complete | `nesy.summarize_graph`, Stop hook, PreToolUse hook, shared SQLite/JSON/HTTP state options, timeout and fallback. |
-| Phase 7: evaluation and ablation | Complete | offline fixture, deterministic MCP score, static ablations, optional live OpenAI LLM-only baseline, failure-to-regression workflow. |
+| Phase 7: evaluation and ablation | Complete | offline fixture, deterministic MCP score, Agent tool-access matrix, static ablations, optional live OpenAI LLM/Agent runs, failure-to-regression workflow. |
 
 ## Security
 
@@ -44,9 +44,11 @@ v1.0 release candidates must pass:
 uv sync --locked
 uv run ruff format --check .
 uv run ruff check .
+uv run mypy src/nesy_reasoning_mcp
 uv run pytest
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
 ```
 
 CI must remain deterministic and must not require `OPENAI_API_KEY`. Live LLM
-evaluation is manual and opt-in.
+and live Agent evaluation are manual and opt-in.

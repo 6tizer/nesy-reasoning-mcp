@@ -46,6 +46,14 @@ def test_internal_test_wrapper_shell_syntax() -> None:
         subprocess.run(["bash", "-n", str(EXAMPLES / name)], check=True)
 
 
+def test_internal_test_report_template_mentions_agent_eval_and_mypy() -> None:
+    text = (ROOT / "docs" / "internal-test-report-template.md").read_text(encoding="utf-8")
+
+    assert "uv run mypy src/nesy_reasoning_mcp" in text
+    assert "nesy-reasoning-mcp eval agent" in text
+    assert "PostToolBatch hook is not part of v1.0 internal testing" in text
+
+
 def test_agent_instructions_nesy_facts_example_is_relation_input() -> None:
     text = (EXAMPLES / "agent-instructions.md").read_text(encoding="utf-8")
     start = "<!-- NESY_FACTS_EXAMPLE_START -->"

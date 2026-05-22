@@ -13,7 +13,7 @@ from nesy_reasoning_mcp.schemas import (
     RelationFilter,
     RelationRecord,
 )
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_names import (
     ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
@@ -94,7 +94,7 @@ def _record_audit_if_needed(
     name: str,
     arguments: dict[str, Any],
     structured: dict[str, Any],
-    store: RelationStore,
+    store: RelationStoreProtocol,
 ) -> None:
     if not _should_audit(name, arguments):
         return

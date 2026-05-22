@@ -16,11 +16,11 @@ from nesy_reasoning_mcp.schemas import (
     RelationType,
     WorldMode,
 )
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_independence import _path_independence_from_if_not
 
 
-async def counterfactual(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def counterfactual(arguments: dict[str, Any], store: RelationStoreProtocol) -> dict[str, Any]:
     """Handle `nesy.counterfactual`."""
     payload = CounterfactualInput.model_validate(arguments)
     index = build_graph(store.list_relations(), payload.context_filter)

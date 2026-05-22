@@ -26,7 +26,7 @@ from nesy_reasoning_mcp.schemas import (
     RelationSetData,
     RelationType,
 )
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_common import (
     _exclusive_group_dump,
     _exclusive_group_matches_filter,
@@ -39,7 +39,7 @@ from nesy_reasoning_mcp.tool_common import (
 )
 
 
-async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def load_relations(arguments: dict[str, Any], store: RelationStoreProtocol) -> dict[str, Any]:
     """Handle `nesy.load_relations`."""
     try:
         migrated_arguments, migration_diagnostics = _migrate_load_arguments(arguments)
@@ -103,7 +103,10 @@ async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dic
     }
 
 
-async def export_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+async def export_relations(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
     """Handle `nesy.export_relations`."""
     payload = ExportRelationsInput.model_validate(arguments)
     relations = store.list_relations(payload.filter, limit=None)
@@ -197,7 +200,7 @@ async def export_relations(arguments: dict[str, Any], store: RelationStore) -> d
 
 def _load_relation_set_data(
     payload: LoadRelationsInput,
-    store: RelationStore,
+    store: RelationStoreProtocol,
 ) -> tuple[RelationSetData, list[str], list[Diagnostic]]:
     if payload.source_type == LoadSourceType.INLINE:
         if payload.data is None:
@@ -221,7 +224,7 @@ def _load_relation_set_data(
     raise ValueError(f"unsupported source_type: {payload.source_type.value}")
 
 
-def _read_resource_uri(resource_uri: str, store: RelationStore) -> tuple[Path, str]:
+def _read_resource_uri(resource_uri: str, store: RelationStoreProtocol) -> tuple[Path, str]:
     parsed = urlparse(resource_uri)
     if parsed.scheme != "file":
         raise ValueError(f"resource_uri supports local file:// URIs only: {parsed.scheme}")
@@ -415,7 +418,7 @@ def _context_metadata_for_export(
 def _serialize_relation_set(data: dict[str, Any], export_format: ExportFormat) -> str:
     if export_format == ExportFormat.JSON:
         return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
-    lines = []
+    lines: list[str] = []
     lines.extend(
         json.dumps({"type": "relation", "record": relation}, ensure_ascii=False, sort_keys=True)
         for relation in data["relations"]
@@ -451,7 +454,7 @@ def _serialize_relation_set(data: dict[str, Any], export_format: ExportFormat) -
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _load_error(code: str, message: str, store: RelationStore) -> dict[str, Any]:
+def _load_error(code: str, message: str, store: RelationStoreProtocol) -> dict[str, Any]:
     diagnostic = Diagnostic(level="error", code=code, message=message)
     return {
         "status": "error",
@@ -471,7 +474,7 @@ def _load_error(code: str, message: str, store: RelationStore) -> dict[str, Any]
 def _export_error(
     code: str,
     message: str,
-    store: RelationStore,
+    store: RelationStoreProtocol,
     export_format: ExportFormat,
 ) -> dict[str, Any]:
     diagnostic = Diagnostic(level="error", code=code, message=message)

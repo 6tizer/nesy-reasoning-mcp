@@ -8,7 +8,12 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
-from nesy_reasoning_mcp.evaluation import BenchmarkFixture, run_eval_file, run_llm_eval_file
+from nesy_reasoning_mcp.evaluation import (
+    BenchmarkFixture,
+    run_agent_eval_file,
+    run_eval_file,
+    run_llm_eval_file,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "benchmarks" / "fixtures" / "core.json"
@@ -142,6 +147,102 @@ def test_eval_cli_outputs_parseable_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_eval_deterministic_matrix_scores_core_fixture() -> None:
+    report = await run_agent_eval_file(FIXTURE_PATH)
+
+    assert report["status"] == "pass"
+    assert report["runner"] == "deterministic"
+    assert report["modes"] == [
+        "no_mcp",
+        "tool_descriptions_only",
+        "classify_only",
+        "classify_verify",
+        "full_mcp",
+    ]
+    assert report["mode_scores"]["full_mcp"] == 1.0
+    assert report["mode_scores"]["classify_only"] == pytest.approx(3 / 9)
+    assert report["mode_scores"]["classify_verify"] == pytest.approx(4 / 9)
+    assert report["error_type_counts"]["tool_unavailable"] == 11
+    full_mcp_cases = [item for item in report["cases"] if item["mode"] == "full_mcp"]
+    assert len(full_mcp_cases) == 9
+    assert all(item["passed"] for item in full_mcp_cases)
+
+
+@pytest.mark.asyncio
+async def test_agent_eval_mode_and_case_filter() -> None:
+    report = await run_agent_eval_file(
+        FIXTURE_PATH,
+        modes=["classify_only"],
+        case_ids=["verify_best_chain"],
+    )
+
+    assert report["status"] == "fail"
+    assert report["modes"] == ["classify_only"]
+    assert report["mode_scores"]["classify_only"] == 0.0
+    assert report["cases"][0]["case_id"] == "verify_best_chain"
+    assert report["cases"][0]["error_type"] == "tool_unavailable"
+
+
+def test_agent_eval_cli_returns_failure_for_selected_failed_mode() -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "eval",
+            "agent",
+            "--fixture",
+            str(FIXTURE_PATH),
+            "--mode",
+            "classify_only",
+            "--case-id",
+            "verify_best_chain",
+            "--format",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    report = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert report["status"] == "fail"
+    assert report["cases"][0]["error_type"] == "tool_unavailable"
+    assert completed.stderr == ""
+
+
+def test_agent_eval_cli_outputs_parseable_json() -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "eval",
+            "agent",
+            "--fixture",
+            str(FIXTURE_PATH),
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    report = json.loads(completed.stdout)
+    assert report["status"] == "pass"
+    assert report["mode_scores"]["full_mcp"] == 1.0
+    assert completed.stderr == ""
+
+
+@pytest.mark.asyncio
 async def test_llm_eval_requires_openai_api_key() -> None:
     with pytest.raises(ValueError, match="OPENAI_API_KEY is required"):
         await run_llm_eval_file(
@@ -240,3 +341,117 @@ def test_llm_eval_cli_missing_key_returns_error() -> None:
     assert completed.returncode == 2
     assert completed.stdout == ""
     assert "OPENAI_API_KEY is required" in completed.stderr
+
+
+@pytest.mark.asyncio
+async def test_agent_eval_openai_requires_api_key() -> None:
+    with pytest.raises(ValueError, match="OPENAI_API_KEY is required"):
+        await run_agent_eval_file(
+            FIXTURE_PATH,
+            runner="openai",
+            model="test-model",
+            modes=["full_mcp"],
+            case_ids=["classify_direct_sufficient"],
+            env={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_eval_openai_missing_optional_dependency_is_clear(monkeypatch) -> None:
+    def fail_client(api_key: str):
+        raise ValueError("openai package is required for live eval")
+
+    monkeypatch.setattr("nesy_reasoning_mcp.evaluation._openai_client", fail_client)
+
+    with pytest.raises(ValueError, match="openai package is required for live eval"):
+        await run_agent_eval_file(
+            FIXTURE_PATH,
+            runner="openai",
+            model="test-model",
+            modes=["full_mcp"],
+            case_ids=["classify_direct_sufficient"],
+            env={"OPENAI_API_KEY": "secret"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_eval_openai_mocked_tool_call_scores() -> None:
+    tool_action = json.dumps(
+        {
+            "action": "call_tool",
+            "tool_name": "nesy.classify",
+            "tool_input": {"source": "A", "target": "B"},
+        }
+    )
+    final_action = json.dumps(
+        {
+            "action": "final",
+            "prediction": {
+                "status": "ok",
+                "classification": "sufficient",
+                "source_implies_target": {"proven": True},
+                "trace": ["used MCP tool result"],
+            },
+        }
+    )
+
+    report = await run_agent_eval_file(
+        FIXTURE_PATH,
+        runner="openai",
+        model="test-model",
+        modes=["full_mcp"],
+        case_ids=["classify_direct_sufficient"],
+        env={"OPENAI_API_KEY": "secret"},
+        client_factory=_fake_client_factory([tool_action, final_action]),
+    )
+
+    serialized = json.dumps(report)
+    assert report["status"] == "pass"
+    assert report["mode_scores"]["full_mcp"] == 1.0
+    assert report["cases"][0]["passed"] is True
+    assert report["cases"][0]["tool_calls"][0]["tool_name"] == "nesy.classify"
+    assert "secret" not in serialized
+    assert "OPENAI_API_KEY" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_agent_eval_openai_bad_json_marks_case_failed() -> None:
+    report = await run_agent_eval_file(
+        FIXTURE_PATH,
+        runner="openai",
+        model="test-model",
+        modes=["full_mcp"],
+        case_ids=["classify_direct_sufficient"],
+        env={"OPENAI_API_KEY": "secret"},
+        client_factory=_fake_client_factory(["not json"]),
+    )
+
+    assert report["status"] == "fail"
+    assert report["mode_scores"]["full_mcp"] == 0.0
+    assert report["cases"][0]["error_type"] == "invalid_agent_json"
+    assert report["error_type_counts"]["invalid_agent_json"] == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_eval_openai_disallowed_tool_is_reported() -> None:
+    disallowed_action = json.dumps(
+        {
+            "action": "call_tool",
+            "tool_name": "nesy.verify_chain",
+            "tool_input": {"source": "A", "target": "C"},
+        }
+    )
+
+    report = await run_agent_eval_file(
+        FIXTURE_PATH,
+        runner="openai",
+        model="test-model",
+        modes=["classify_only"],
+        case_ids=["verify_best_chain"],
+        env={"OPENAI_API_KEY": "secret"},
+        client_factory=_fake_client_factory([disallowed_action]),
+    )
+
+    assert report["status"] == "fail"
+    assert report["cases"][0]["error_type"] == "tool_unavailable"
+    assert report["error_type_counts"]["tool_unavailable"] == 1

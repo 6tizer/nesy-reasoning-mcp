@@ -11,7 +11,8 @@ v1.0 provides:
 - Classification, chain verification, contradiction checks, graph summaries, and
   counterfactual analysis.
 - Claude Code Stop and PreToolUse hook helpers.
-- Offline benchmark evaluation and optional live OpenAI LLM baseline evaluation.
+- Offline benchmark evaluation, Agent mode-matrix evaluation, and optional live
+  OpenAI manual evaluation.
 - Security docs, audit logging, and SPEC compliance tracking.
 - Local audit inspection CLI, legacy relation-set import aliases, and tunable
   PreToolUse summary recall.
@@ -118,14 +119,22 @@ env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
 
 Live eval is manual-only. CI runs offline fixtures and never requires an API key.
 
+Agent mode-matrix evaluation:
+
+```bash
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
+```
+
 ## Development
 
 ```bash
 uv sync --locked
 uv run ruff format --check .
 uv run ruff check .
+uv run mypy src/nesy_reasoning_mcp
 uv run pytest
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
 ```
 
 ## Documentation
@@ -136,6 +145,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtu
 - [Evaluation](docs/evaluation.md)
 - [Security](docs/security.md)
 - [Internal Testing](docs/internal-testing.md)
+- [Internal Test Report Template](docs/internal-test-report-template.md)
 - [Install as MCP server](docs/install.md)
 
 Example configs:
