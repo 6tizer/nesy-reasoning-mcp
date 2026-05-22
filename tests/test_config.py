@@ -10,6 +10,7 @@ def test_config_defaults_to_memory_and_allowed_roots(tmp_path: Path) -> None:
     assert config.storage.backend == StorageBackend.MEMORY
     assert str(tmp_path) in config.security.allowed_roots
     assert normalized_allowed_roots(config)[0] == tmp_path.resolve()
+    assert config.security.allow_hidden_relation_paths is False
 
 
 def test_config_file_and_env_override(tmp_path: Path) -> None:
@@ -19,7 +20,10 @@ def test_config_file_and_env_override(tmp_path: Path) -> None:
         json.dumps(
             {
                 "storage": {"backend": "json", "json_path": str(tmp_path / "data.json")},
-                "security": {"allowed_roots": [str(tmp_path / "from_config")]},
+                "security": {
+                    "allowed_roots": [str(tmp_path / "from_config")],
+                    "allow_hidden_relation_paths": False,
+                },
             }
         ),
         encoding="utf-8",
@@ -31,6 +35,7 @@ def test_config_file_and_env_override(tmp_path: Path) -> None:
             "NESY_STORAGE_BACKEND": "sqlite",
             "NESY_SQLITE_PATH": str(db_path),
             "NESY_ALLOWED_ROOTS": f"{tmp_path / 'a'},{tmp_path / 'b'}",
+            "NESY_ALLOW_HIDDEN_RELATION_PATHS": "true",
             "NESY_LOG_LEVEL": "debug",
         },
         cwd=tmp_path,
@@ -40,6 +45,7 @@ def test_config_file_and_env_override(tmp_path: Path) -> None:
     assert config.storage.sqlite_path == str(db_path)
     assert config.storage.json_path == str(tmp_path / "data.json")
     assert config.security.allowed_roots == [str(tmp_path / "a"), str(tmp_path / "b")]
+    assert config.security.allow_hidden_relation_paths is True
     assert config.logging.level == "debug"
 
 

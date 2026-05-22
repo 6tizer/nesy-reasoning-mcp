@@ -13,6 +13,7 @@ body:
         - v0.6 HTTP daemon/counterfactual
         - v0.7 independence/resource URI
         - v0.8 evaluation/security docs
+        - v0.9 file access security
         - later
     validations:
       required: true

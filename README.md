@@ -2,7 +2,7 @@
 
 Deterministic neuro-symbolic reasoning MCP server.
 
-v0.8 provides a local MCP server with stdio and authenticated Streamable HTTP
+v0.9 provides a local MCP server with stdio and authenticated Streamable HTTP
 transports, memory/JSON/SQLite storage, and Claude Code hook helpers:
 
 - `nesy.assert_relations`
