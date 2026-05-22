@@ -16,5 +16,10 @@
   "logging": {
     "level": "info",
     "audit_log": true
+  },
+  "hook": {
+    "timeout_seconds": 5,
+    "fail_closed": false,
+    "context_from_session": false
   }
 }

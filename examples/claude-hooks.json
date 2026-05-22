@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|Read|Grep|Glob|WebSearch|WebFetch|mcp__nesy-reasoning__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NESY_CONFIG=/Users/mac-mini/.nesy-reasoning/nesy-config.json uv --directory /Users/mac-mini/Documents/nesy-reasoning-mcp run nesy-reasoning-mcp hook pretooluse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NESY_CONFIG=/Users/mac-mini/.nesy-reasoning/nesy-config.json uv --directory /Users/mac-mini/Documents/nesy-reasoning-mcp run nesy-reasoning-mcp hook stop"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -9,7 +9,7 @@ from nesy_reasoning_mcp.tools import ASSERT_RELATIONS
 
 
 @pytest.mark.asyncio
-async def test_tools_list_returns_nine_tools_with_schemas() -> None:
+async def test_tools_list_returns_ten_tools_with_schemas() -> None:
     server = create_server(RelationStore())
     handler = server.request_handlers[ListToolsRequest]
     result = await handler(ListToolsRequest(method="tools/list"))
@@ -25,6 +25,7 @@ async def test_tools_list_returns_nine_tools_with_schemas() -> None:
         "nesy.check_contradictions",
         "nesy.load_relations",
         "nesy.export_relations",
+        "nesy.summarize_graph",
     ]
     assert all(tool.inputSchema for tool in tools)
     assert all(tool.outputSchema for tool in tools)
@@ -59,6 +60,6 @@ def test_initialization_options_exposes_tools_capability() -> None:
     options = initialization_options(server)
 
     assert options.server_name == "nesy-reasoning"
-    assert options.server_version == "0.4.0"
+    assert options.server_version == "0.5.0"
     assert options.capabilities.tools is not None
     assert options.capabilities.tools.listChanged is False
