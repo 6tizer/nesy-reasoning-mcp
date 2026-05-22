@@ -1,115 +1,213 @@
 # NeSy Reasoning MCP
 
-Deterministic neuro-symbolic reasoning MCP server for structured causal,
-dependency, contradiction, and counterfactual checks.
+[![CI](https://github.com/6tizer/nesy-reasoning-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/6tizer/nesy-reasoning-mcp/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11--3.14-blue)
+![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20Streamable%20HTTP-green)
+![Version](https://img.shields.io/badge/version-1.0.0-informational)
 
-v1.0 provides:
+English | [简体中文](README.zh-CN.md)
 
-- MCP stdio and authenticated local Streamable HTTP transports.
-- Memory, JSON, and SQLite relation stores.
-- Relation assertion, listing, clearing, import, and export.
-- Classification, chain verification, contradiction checks, graph summaries, and
-  counterfactual analysis.
-- Claude Code Stop and PreToolUse hook helpers.
-- Offline benchmark evaluation, Agent mode-matrix evaluation, and optional live
-  OpenAI manual evaluation.
-- Security docs, audit logging, and SPEC compliance tracking.
-- Local audit inspection CLI, legacy relation-set import aliases, and tunable
-  PreToolUse summary recall.
+A local MCP server that gives AI agents deterministic reasoning memory:
+structured relation storage, causal classification, chain verification,
+contradiction checks, graph summaries, and counterfactual analysis.
 
-## Tools
+It does not try to replace the LLM. The LLM can propose structured facts; this
+server checks them with a small, testable symbolic engine.
 
-- `nesy.assert_relations`
-- `nesy.list_relations`
-- `nesy.clear_relations`
-- `nesy.classify`
-- `nesy.verify_chain`
-- `nesy.assert_exclusive`
-- `nesy.check_contradictions`
-- `nesy.load_relations`
-- `nesy.export_relations`
-- `nesy.summarize_graph`
-- `nesy.counterfactual`
+## What It Gives An Agent
 
-## Install
+- **Long-lived reasoning memory**: keep structured relations in SQLite or JSON
+  instead of losing them when a chat or MCP process restarts.
+- **Deterministic logic checks**: classify whether `A` is sufficient,
+  necessary, equivalent, contradictory, or unknown relative to `B`.
+- **Verifiable chains**: prove or reject multi-hop implication paths such as
+  `A -> B -> C`.
+- **Contradiction guardrails**: detect explicit exclusives, direct opposition,
+  cycles to negation, and soft confidence tension.
+- **Counterfactual analysis**: ask what remains possible when a proposition is
+  assumed false under open-world or guarded closed-world semantics.
+- **Hook integration**: inject compact graph summaries before tools run and
+  block final answers that include hard contradictions in explicit `NESY_FACTS`.
+
+## Quick Start
+
+Install from a local checkout:
 
 ```bash
 uv sync
 ```
 
-For optional live OpenAI baseline evaluation:
-
-```bash
-uv sync --extra eval
-```
-
-## Quick Start
-
-Run as a stdio MCP server:
+Run the stdio MCP server:
 
 ```bash
 uv run nesy-reasoning-mcp --transport stdio
 ```
 
-Run as an authenticated local HTTP daemon:
+Use persistent SQLite storage:
+
+```bash
+mkdir -p ~/.nesy-reasoning
+NESY_STORAGE_BACKEND=sqlite NESY_SQLITE_PATH=~/.nesy-reasoning/nesy.db \
+  uv run nesy-reasoning-mcp --transport stdio
+```
+
+Run the authenticated local Streamable HTTP daemon:
 
 ```bash
 NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
 ```
 
-Use persistent SQLite storage:
+Verify the deterministic benchmark:
 
 ```bash
-NESY_STORAGE_BACKEND=sqlite NESY_SQLITE_PATH=~/.nesy-reasoning/nesy.db \
-  uv run nesy-reasoning-mcp --transport stdio
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
+  --fixture benchmarks/fixtures/core.json \
+  --format json
 ```
 
-Run hook helpers:
+## MCP Client Config
+
+Use this stdio config as a starting point:
+
+```json
+{
+  "mcpServers": {
+    "nesy-reasoning": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/nesy-reasoning-mcp",
+        "run",
+        "nesy-reasoning-mcp",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "PYTHONPATH": "/path/to/nesy-reasoning-mcp/src",
+        "NESY_STORAGE_BACKEND": "sqlite",
+        "NESY_SQLITE_PATH": "~/.nesy-reasoning/nesy.db"
+      }
+    }
+  }
+}
+```
+
+More examples:
+
+- [examples/mcp-config.json](examples/mcp-config.json)
+- [examples/nesy-config.json](examples/nesy-config.json)
+- [examples/claude-hooks.json](examples/claude-hooks.json)
+- [examples/internal-test](examples/internal-test/README.md)
+
+## Minimal Reasoning Example
+
+Assert two sufficient relations:
+
+```json
+{
+  "relations": [
+    {"source": "A", "target": "B", "relation_type": "sufficient"},
+    {"source": "B", "target": "C", "relation_type": "sufficient"}
+  ]
+}
+```
+
+Then ask `nesy.classify` for `A` and `C`. The server derives `A -> C` and
+returns `classification="sufficient"` with a traceable path.
+
+If `B` and `C` are declared exclusive and the graph proves both from the same
+source, `nesy.check_contradictions` reports a hard contradiction. The Stop hook
+can block a final answer when the answer includes conflicting structured
+`NESY_FACTS`.
+
+## Tools
+
+| Tool | Purpose | Mutates State |
+|---|---|---:|
+| `nesy.assert_relations` | Add or update structured relations. | Yes |
+| `nesy.list_relations` | List stored relations and derived implication edges. | No |
+| `nesy.clear_relations` | Clear a context, store, filter, or allowed scope. | Yes |
+| `nesy.classify` | Classify source/target relation by graph reachability. | No |
+| `nesy.verify_chain` | Verify explicit or searched implication paths. | No |
+| `nesy.assert_exclusive` | Declare mutually exclusive propositions. | Yes |
+| `nesy.check_contradictions` | Check graph, facts, or combined contradictions. | No |
+| `nesy.load_relations` | Load relation sets from inline data, files, or safe local `file://` URIs. | Yes |
+| `nesy.export_relations` | Export relation sets inline or to allowed files. | Optional |
+| `nesy.summarize_graph` | Return a compact deterministic graph summary. | No |
+| `nesy.counterfactual` | Analyze what changes if a proposition is assumed false. | No |
+
+## Storage And Transports
+
+Storage backends:
+
+- `memory`: useful for short tests; state is lost on restart.
+- `json`: local file persistence for simple single-user workflows.
+- `sqlite`: recommended for long-lived local memory and hook/MCP sharing.
+
+Transports:
+
+- `stdio`: default MCP server mode.
+- `http`: authenticated local Streamable HTTP daemon.
+
+HTTP mode binds locally by default and requires `NESY_LOCAL_TOKEN`.
+
+## Hooks
+
+The CLI includes Claude Code hook helpers:
 
 ```bash
 uv run nesy-reasoning-mcp hook pretooluse
 uv run nesy-reasoning-mcp hook stop
 ```
 
-Hook use should share SQLite, JSON storage, or HTTP daemon state with the MCP
-server. Process memory cannot be shared between stdio MCP and hook processes.
+- **PreToolUse** injects a compact graph summary as additional context.
+- **Stop** checks the current graph or an explicit `NESY_FACTS:` JSON array in
+  the final answer.
 
-For the recommended internal-test SQLite profile, use
-[Internal Testing](docs/internal-testing.md).
+Hooks run in separate processes, so they should use SQLite, JSON, or the same
+HTTP daemon. Process memory is not shared between stdio MCP and hook processes.
 
-## Relation Sets And Security
+## Security Model
 
-Relation sets can include explicit `independence_records`; `nesy.classify` uses
-them to prove `proven_not_necessary`, and `nesy.counterfactual` uses them to keep
-independent alternatives in `still_possible`.
+This project is local-first:
 
-`nesy.load_relations` and `nesy.export_relations` accept `.json` and `.jsonl`
-inside configured `allowed_roots`. Local `file://` resource URI loads are also
-restricted to `allowed_roots`. Hidden relation paths are blocked by default unless
-`security.allow_hidden_relation_paths=true` or
-`NESY_ALLOW_HIDDEN_RELATION_PATHS=true` is set.
+- HTTP mode uses a local bearer token.
+- File load/export is restricted to configured `allowed_roots`.
+- Hidden relation paths are blocked by default unless explicitly enabled.
+- Mutating tools record audit entries when audit logging is enabled.
+- Destructive or file-writing tools should still require confirmation in the MCP
+  client or wrapper policy.
 
-HTTP mode binds locally by default and requires `NESY_LOCAL_TOKEN`. File tools and
-state-mutating tools should still be treated as user-confirmation operations in
-MCP clients or wrappers.
-
-Inspect audit history from the configured store:
+Inspect audit history:
 
 ```bash
 NESY_CONFIG=/path/to/nesy-config.json uv run nesy-reasoning-mcp audit list --format json
 ```
 
+See [docs/security.md](docs/security.md) for details.
+
 ## Evaluation
 
-Deterministic offline benchmark:
+Offline deterministic evaluation:
 
 ```bash
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
+  --fixture benchmarks/fixtures/core.json \
+  --format json
 ```
 
-Optional live OpenAI LLM-only baseline:
+Agent mode-matrix evaluation:
 
 ```bash
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent \
+  --fixture benchmarks/fixtures/core.json \
+  --format json
+```
+
+Optional live OpenAI evaluation is manual-only and never required by CI:
+
+```bash
+uv sync --extra eval
 export OPENAI_API_KEY='<set outside the repo>'
 env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
   --fixture benchmarks/fixtures/core.json \
@@ -117,13 +215,16 @@ env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
   --format json
 ```
 
-Live eval is manual-only. CI runs offline fixtures and never requires an API key.
+## Boundaries
 
-Agent mode-matrix evaluation:
-
-```bash
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
-```
+- No automatic natural-language relation extraction.
+- No hosted multi-user auth.
+- No Postgres/team graph backend yet.
+- No remote MCP resource fetching; `resource_uri` is limited to safe local
+  `file://` loads.
+- No PostToolBatch hook in v1.0.
+- This is a reasoning aid, not a replacement for domain experts in legal,
+  medical, financial, or safety-critical decisions.
 
 ## Development
 
@@ -141,16 +242,9 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fix
 
 - [Full specification](docs/spec-v2.md)
 - [SPEC compliance](SPEC_COMPLIANCE.md)
+- [Install as MCP server](docs/install.md)
+- [Internal testing profile](docs/internal-testing.md)
+- [Security](docs/security.md)
+- [Evaluation](docs/evaluation.md)
 - [Roadmap](docs/roadmap.md)
 - [Development](docs/development.md)
-- [Evaluation](docs/evaluation.md)
-- [Security](docs/security.md)
-- [Internal Testing](docs/internal-testing.md)
-- [Internal Test Report Template](docs/internal-test-report-template.md)
-- [Install as MCP server](docs/install.md)
-
-Example configs:
-
-- [examples/mcp-config.json](examples/mcp-config.json)
-- [examples/claude-hooks.json](examples/claude-hooks.json)
-- [examples/nesy-config.json](examples/nesy-config.json)
