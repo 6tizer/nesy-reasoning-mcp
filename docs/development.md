@@ -57,6 +57,7 @@ Each version should have one primary goal.
 - Keep stdout clean in stdio mode.
 - Keep HTTP mode authenticated with `NESY_LOCAL_TOKEN`.
 - Keep offline evaluation deterministic and free of API-key requirements.
+- Keep live LLM evaluation manual-only and out of default CI.
 
 ## Adding A Tool
 
@@ -99,6 +100,7 @@ Rules:
 - Update README and docs for changed tools or config.
 - Run full local gate.
 - Run the offline benchmark fixture.
+- Optionally run `eval llm` with `OPENAI_API_KEY` for manual baseline checks.
 - Confirm GitHub Actions passes.
 - Build package with `rm -rf dist && uv build`.
 - Attach artifacts only when cutting a GitHub release.

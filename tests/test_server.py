@@ -61,6 +61,6 @@ def test_initialization_options_exposes_tools_capability() -> None:
     options = initialization_options(server)
 
     assert options.server_name == "nesy-reasoning"
-    assert options.server_version == "0.9.0"
+    assert options.server_version == "1.0.0"
     assert options.capabilities.tools is not None
     assert options.capabilities.tools.listChanged is False

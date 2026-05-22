@@ -189,15 +189,24 @@ Default hook behavior is fail-open with a stderr warning. Set
 - HTTP daemon auth is a local bearer token, not multi-user auth.
 - No regex or LLM natural-language extraction in hooks yet.
 
-## Offline Evaluation
+## Evaluation
 
-v0.8 includes deterministic benchmark fixtures:
+v1.0 includes deterministic benchmark fixtures:
 
 ```bash
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
 ```
 
 The default evaluator does not call a real LLM and does not require API keys.
+Optional live OpenAI baseline evaluation is manual-only:
+
+```bash
+uv sync --extra eval
+export OPENAI_API_KEY='<set outside the repo>'
+env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
+  --fixture benchmarks/fixtures/core.json \
+  --case-id classify_direct_sufficient
+```
 
 ## Troubleshooting
 
