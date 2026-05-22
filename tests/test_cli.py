@@ -16,4 +16,5 @@ def test_help_writes_no_stdout_banner() -> None:
     )
 
     assert "usage: nesy-reasoning-mcp" in completed.stdout
+    assert "http" in completed.stdout
     assert completed.stderr == ""

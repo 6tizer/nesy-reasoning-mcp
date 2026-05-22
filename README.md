@@ -2,8 +2,8 @@
 
 Deterministic neuro-symbolic reasoning MCP server.
 
-v0.5 provides a local MCP stdio server with memory, JSON, and SQLite storage,
-plus Claude Code hook helpers:
+v0.6 provides a local MCP server with stdio and authenticated Streamable HTTP
+transports, memory/JSON/SQLite storage, and Claude Code hook helpers:
 
 - `nesy.assert_relations`
 - `nesy.list_relations`
@@ -15,6 +15,7 @@ plus Claude Code hook helpers:
 - `nesy.load_relations`
 - `nesy.export_relations`
 - `nesy.summarize_graph`
+- `nesy.counterfactual`
 
 ## Development
 
@@ -36,6 +37,12 @@ For version planning and contribution gates, see:
 uv run nesy-reasoning-mcp --transport stdio
 ```
 
+Authenticated local HTTP daemon:
+
+```bash
+NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
+```
+
 Optional persistent storage:
 
 ```bash
@@ -51,12 +58,13 @@ uv run nesy-reasoning-mcp hook stop
 ```
 
 Hook use should share SQLite or JSON storage with the MCP server. Process memory
-cannot be shared between stdio MCP and hook processes.
+cannot be shared between stdio MCP and hook processes. HTTP daemon mode can also
+keep one long-running in-process store for multiple MCP clients.
 
 ## Install As MCP Server
 
 See [docs/install.md](docs/install.md) for Claude Desktop, Codex, Cursor, or any MCP client
-that supports stdio servers.
+that supports stdio or Streamable HTTP servers.
 
 Example configs:
 

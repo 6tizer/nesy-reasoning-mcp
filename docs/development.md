@@ -18,6 +18,12 @@ uv run pytest
 printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio
 ```
 
+HTTP smoke requires a local token:
+
+```bash
+NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
+```
+
 ## Branch Workflow
 
 Use short-lived branches:
@@ -48,6 +54,7 @@ Each version should have one primary goal.
 - Keep `structuredContent` and `content[0].text` mirrored for every tool result.
 - Keep business constants and tool names single-sourced in code.
 - Keep stdout clean in stdio mode.
+- Keep HTTP mode authenticated with `NESY_LOCAL_TOKEN`.
 
 ## Adding A Tool
 

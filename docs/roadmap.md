@@ -5,12 +5,14 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.5 is the current implementation baseline:
+v0.6 is the current implementation baseline:
 
 - MCP stdio server.
+- Authenticated local Streamable HTTP daemon.
 - Memory, JSON, and SQLite stores.
 - Relation assert/list/clear.
 - Classification and chain verification.
+- Counterfactual reasoning with open-world and guarded closed-world modes.
 - Explicit exclusive groups.
 - Explicit exclusivity-based contradiction checks.
 - Relation load/export with allowed roots.
@@ -94,9 +96,10 @@ Out of scope:
 - LLM-based extraction from assistant text.
 - HTTP daemon.
 
-## v0.6: Local HTTP Daemon
+## v0.6: Local HTTP Daemon And Counterfactual
 
-Goal: allow MCP clients and hooks to share one long-running service.
+Goal: allow MCP clients to share one long-running service and add conservative
+counterfactual reasoning.
 
 Tracking issue: https://github.com/6tizer/nesy-reasoning-mcp/issues/1
 
@@ -106,32 +109,9 @@ Scope:
 - Add local token auth.
 - Add config file support through `NESY_CONFIG`.
 - Add health endpoint.
-- Keep stdio transport working.
-
-Acceptance:
-
-- stdio and HTTP expose same tool behavior.
-- Local token required for HTTP.
-- No stdout logging in stdio mode.
-- Hooks can call shared daemon without owning store lifecycle.
-
-Out of scope:
-
-- Multi-user auth.
-- Hosted service.
-
-## v0.7: Counterfactual Reasoning
-
-Goal: implement SPEC counterfactual queries with explicit world assumptions.
-
-Tracking issue: https://github.com/6tizer/nesy-reasoning-mcp/issues/3
-
-Scope:
-
-- Add counterfactual input schemas.
+- Add `nesy.counterfactual`.
 - Support open-world and closed-world modes.
-- Support explicit intervention facts.
-- Return trace, assumptions, and unknown reasons.
+- Keep stdio transport working.
 
 Public tools:
 
@@ -139,9 +119,37 @@ Public tools:
 
 Acceptance:
 
-- Open-world mode does not infer negation from missing facts.
-- Closed-world mode requires explicit completeness boundary.
-- Cycles and conflicting interventions produce diagnostics.
+- stdio and HTTP expose same tool behavior.
+- Local token required for HTTP.
+- Open-world counterfactual mode does not infer negation from missing facts.
+- Closed-world counterfactual upgrades require explicit completeness metadata.
+- No stdout logging in stdio mode.
+
+Out of scope:
+
+- Multi-user auth.
+- Hosted service.
+- LLM-based extraction from assistant text.
+
+## v0.7: Next Reasoning Expansion
+
+Goal: expand reasoning coverage after HTTP and counterfactual are stable.
+
+Tracking issue: https://github.com/6tizer/nesy-reasoning-mcp/issues/3
+
+Scope:
+
+- Richer contradiction classes beyond explicit exclusives.
+- Optional dedicated independence records/tools.
+- Better evaluation fixtures.
+
+Public tools:
+
+- TBD
+
+Acceptance:
+
+- Scope must be narrowed before implementation.
 
 ## Later
 
