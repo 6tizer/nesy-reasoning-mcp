@@ -34,6 +34,132 @@ async def test_load_relations_validate_only_does_not_change_store() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_relations_inline_migrates_legacy_fields() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [
+                    {
+                        "from": "A",
+                        "to": "B",
+                        "type": "sufficient",
+                        "temporal_delay": "P1D",
+                    }
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    relation = store.list_relations()[0]
+    assert result.isError is False
+    assert result.structuredContent["diagnostics"][0]["code"] == "LEGACY_FIELDS_MIGRATED"
+    assert relation.source == "A"
+    assert relation.target == "B"
+    assert relation.relation_type == "sufficient"
+    assert relation.temporal == {"delay": "P1D"}
+
+    exported = await call_tool(EXPORT_RELATIONS, {"destination": "inline"}, store)
+    exported_relation = exported.structuredContent["data"]["relations"][0]
+    assert "from" not in exported_relation
+    assert "to" not in exported_relation
+    assert "type" not in exported_relation
+    assert "temporal_delay" not in exported_relation
+
+
+@pytest.mark.asyncio
+async def test_load_relations_json_file_migrates_legacy_fields(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    path = allowed / "relations.json"
+    path.write_text(
+        json.dumps({"relations": [{"from": "A", "to": "B", "type": "equivalent"}]}),
+        encoding="utf-8",
+    )
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "file",
+            "path": str(path),
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    relation = store.list_relations()[0]
+    assert result.isError is False
+    assert result.structuredContent["diagnostics"][0]["code"] == "LEGACY_FIELDS_MIGRATED"
+    assert relation.source == "A"
+    assert relation.target == "B"
+    assert relation.relation_type == "equivalent"
+
+
+@pytest.mark.asyncio
+async def test_load_relations_jsonl_migrates_legacy_fields(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    path = allowed / "relations.jsonl"
+    path.write_text(
+        json.dumps({"from": "A", "to": "B", "type": "necessary"}) + "\n",
+        encoding="utf-8",
+    )
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "file",
+            "path": str(path),
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    relation = store.list_relations()[0]
+    assert result.isError is False
+    assert result.structuredContent["diagnostics"][0]["code"] == "LEGACY_FIELDS_MIGRATED"
+    assert relation.source == "A"
+    assert relation.target == "B"
+    assert relation.relation_type == "necessary"
+
+
+@pytest.mark.asyncio
+async def test_load_relations_rejects_conflicting_legacy_fields() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [
+                    {
+                        "source": "A",
+                        "from": "X",
+                        "target": "B",
+                        "relation_type": "sufficient",
+                    }
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent["diagnostics"][0]["code"] == "LOAD_RELATIONS_FAILED"
+    assert "legacy field conflict" in result.structuredContent["diagnostics"][0]["message"]
+    assert store.list_relations() == []
+
+
+@pytest.mark.asyncio
 async def test_export_inline_roundtrip_through_load() -> None:
     store = RelationStore()
     await call_tool(
@@ -349,7 +475,9 @@ async def test_load_relations_resource_uri_rejects_unsupported_scheme(tmp_path: 
 
     assert result.isError is True
     assert result.structuredContent["diagnostics"][0]["code"] == "LOAD_RELATIONS_FAILED"
-    assert "not supported in v0.7" in result.structuredContent["diagnostics"][0]["message"]
+    message = result.structuredContent["diagnostics"][0]["message"]
+    assert "local file:// URIs only" in message
+    assert "v0.7" not in message
 
 
 @pytest.mark.asyncio
