@@ -8,6 +8,7 @@ from nesy_reasoning_mcp.reasoning import (
     build_graph,
     classify_reachability,
     expected_relation_matches,
+    find_classification_contradiction,
     path_to_dict,
 )
 from nesy_reasoning_mcp.schemas import (
@@ -49,6 +50,25 @@ async def classify(arguments: dict[str, Any], store: RelationStore) -> dict[str,
         direct_only=payload.require_direct,
     )
     classification = classify_reachability(fwd_paths, rev_paths)
+    contradiction = find_classification_contradiction(
+        store.list_relations(),
+        exclusive_groups,
+        source=payload.source,
+        target=payload.target,
+        context_filter=payload.context_filter,
+        max_depth=payload.max_depth,
+        confidence_policy=payload.confidence_policy,
+        direct_only=payload.require_direct,
+    )
+    diagnostics = []
+    contradiction_trace = []
+    if contradiction is not None:
+        classification = Classification.CONTRADICTORY
+        diagnostics.append(_classification_contradiction_diagnostic(contradiction))
+        contradiction_trace.append(
+            "Found source-to-target path plus path to exclusive sibling "
+            f"{contradiction.conflicting_target} in group {contradiction.exclusive_group_id}."
+        )
 
     return {
         "status": "ok",
@@ -72,14 +92,15 @@ async def classify(arguments: dict[str, Any], store: RelationStore) -> dict[str,
         ),
         "direct_relations": index.direct_relations_between(payload.source, payload.target),
         "paths": _classify_paths(fwd_paths, rev_paths, payload.include_paths),
-        "diagnostics": [],
+        "diagnostics": diagnostics,
         "trace": _classify_trace(
             payload.source,
             payload.target,
             classification,
             fwd_paths,
             rev_paths,
-        ),
+        )
+        + contradiction_trace,
         "graph_stats": index.graph_stats,
     }
 
@@ -266,6 +287,18 @@ def _classify_paths(fwd_paths: list, rev_paths: list, include_paths: bool) -> li
         for path in rev_paths
     )
     return paths
+
+
+def _classification_contradiction_diagnostic(contradiction: Any) -> dict[str, Any]:
+    return Diagnostic(
+        level="warning",
+        code="CONTRADICTORY_CLASSIFICATION",
+        message=(
+            f"Source implies target {contradiction.target} and mutually exclusive target "
+            f"{contradiction.conflicting_target}."
+        ),
+        related_ids=contradiction.fact_ids,
+    ).model_dump(mode="json")
 
 
 def _classify_trace(

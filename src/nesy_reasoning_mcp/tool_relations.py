@@ -17,6 +17,8 @@ from nesy_reasoning_mcp.schemas import (
     ContradictionMode,
     Diagnostic,
     ListRelationsInput,
+    RelationRecord,
+    RelationType,
 )
 from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
 from nesy_reasoning_mcp.tool_common import (
@@ -31,47 +33,37 @@ from nesy_reasoning_mcp.tool_common import (
 async def assert_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
     """Handle `nesy.assert_relations`."""
     payload = AssertRelationsInput.model_validate(arguments)
-    if payload.mode == "upsert":
-        diagnostic = Diagnostic(
-            level="error",
-            code="UPSERT_NOT_IMPLEMENTED",
-            message="This server currently supports append and replace_same_pair only.",
-        )
-        return {
-            "status": "error",
-            "added": 0,
-            "updated": 0,
-            "rejected": len(payload.relations),
-            "relation_ids": [],
-            "contradictions": [],
-            "diagnostics": [diagnostic.model_dump(mode="json")],
-            "trace": ["Rejected mode=upsert."],
-            "graph_stats": store.graph_stats().model_dump(mode="json"),
-        }
-
     records, updated = store.assert_relations(
         payload.relations,
         mode=payload.mode,
         dry_run=payload.dry_run,
     )
     contradictions: list[dict[str, Any]] = []
-    diagnostics = []
+    current_relations = store.list_relations()
+    effective_relations = (
+        _relations_after_assert(current_relations, records, payload.mode)
+        if payload.dry_run
+        else current_relations
+    )
+    diagnostics: list[Diagnostic] = []
+    merge_trace: list[str] = []
+    if payload.merge_equivalent:
+        merge_diagnostics, merge_trace = _equivalent_normalization(effective_relations)
+        diagnostics.extend(merge_diagnostics)
     if payload.check_contradictions:
-        check_relations = store.list_relations()
-        if payload.dry_run:
-            check_relations = [*check_relations, *records]
         contradictions, _context_separated = find_exclusive_contradictions(
-            check_relations,
+            effective_relations,
             store.list_exclusive_groups(),
             context_filter=ContextFilter(),
             max_depth=8,
         )
 
-    trace = [_normalization_trace(record) for record in records]
+    trace = [*[_normalization_trace(record) for record in records], *merge_trace]
+    added = len(records) - updated if payload.mode == "upsert" else len(records)
     return {
         "status": "warning" if contradictions else "ok",
-        "added": len(records),
-        "updated": updated if payload.mode == "replace_same_pair" else 0,
+        "added": added,
+        "updated": updated if payload.mode in {"replace_same_pair", "upsert"} else 0,
         "rejected": 0,
         "relation_ids": [record.id for record in records],
         "contradictions": contradictions,
@@ -79,6 +71,79 @@ async def assert_relations(arguments: dict[str, Any], store: RelationStore) -> d
         "trace": trace,
         "graph_stats": store.graph_stats().model_dump(mode="json"),
     }
+
+
+def _relations_after_assert(
+    current: list[RelationRecord],
+    records: list[RelationRecord],
+    mode: str,
+) -> list[RelationRecord]:
+    if mode == "append":
+        return [*current, *records]
+    if mode == "replace_same_pair":
+        replace_keys = {
+            (record.source, record.target, record.context_id, record.store_id) for record in records
+        }
+        return [
+            relation
+            for relation in current
+            if (relation.source, relation.target, relation.context_id, relation.store_id)
+            not in replace_keys
+        ] + records
+    if mode == "upsert":
+        relations = list(current)
+        positions = {relation.id: index for index, relation in enumerate(relations)}
+        for record in records:
+            if record.id in positions:
+                relations[positions[record.id]] = record
+            else:
+                positions[record.id] = len(relations)
+                relations.append(record)
+        return relations
+    raise ValueError(f"unsupported assert mode: {mode}")
+
+
+def _equivalent_normalization(
+    relations: list[RelationRecord],
+) -> tuple[list[Diagnostic], list[str]]:
+    grouped: dict[tuple[str, str, str, str], dict[RelationType, list[str]]] = {}
+    for relation in relations:
+        if relation.relation_type not in {RelationType.SUFFICIENT, RelationType.NECESSARY}:
+            continue
+        key = (relation.source, relation.target, relation.context_id, relation.store_id)
+        grouped.setdefault(key, {}).setdefault(relation.relation_type, []).append(relation.id)
+
+    diagnostics: list[Diagnostic] = []
+    trace: list[str] = []
+    for source, target, context_id, store_id in sorted(grouped):
+        relation_ids_by_type = grouped[(source, target, context_id, store_id)]
+        if not {
+            RelationType.SUFFICIENT,
+            RelationType.NECESSARY,
+        }.issubset(relation_ids_by_type):
+            continue
+        related_ids = sorted(
+            [
+                *relation_ids_by_type[RelationType.SUFFICIENT],
+                *relation_ids_by_type[RelationType.NECESSARY],
+            ]
+        )
+        diagnostics.append(
+            Diagnostic(
+                level="info",
+                code="MERGE_EQUIVALENT_NORMALIZED",
+                message=(
+                    "sufficient and necessary evidence for the same pair is normalized as "
+                    "equivalent in the canonical graph."
+                ),
+                related_ids=related_ids,
+            )
+        )
+        trace.append(
+            "normalized sufficient+necessary evidence for "
+            f"({source}, {target}) in context={context_id}, store={store_id} as equivalent."
+        )
+    return diagnostics, trace
 
 
 async def list_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
@@ -182,6 +247,7 @@ async def check_contradictions(arguments: dict[str, Any], store: RelationStore) 
         groups,
         payload.context_filter,
         max_depth=payload.max_depth,
+        include_soft=payload.include_soft,
     )
     compatible_relations = relations_compatible_with_filter(relations, payload.context_filter)
     graph_stats = graph_stats_for(

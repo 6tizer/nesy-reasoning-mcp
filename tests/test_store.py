@@ -74,6 +74,80 @@ def test_dry_run_does_not_change_store() -> None:
     assert store.list_relations() == []
 
 
+def test_upsert_updates_same_id_and_appends_new_records() -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    records, updated = store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="C",
+                relation_type=RelationType.NECESSARY,
+            ),
+            RelationInput(
+                id="rel_new",
+                source="D",
+                target="E",
+                relation_type=RelationType.SUFFICIENT,
+            ),
+        ],
+        mode="upsert",
+    )
+
+    assert [record.id for record in records] == ["rel_keep", "rel_new"]
+    assert updated == 1
+    listed = store.list_relations()
+    assert len(listed) == 2
+    assert {record.id: record.target for record in listed} == {
+        "rel_keep": "C",
+        "rel_new": "E",
+    }
+
+
+def test_upsert_dry_run_does_not_change_store() -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    records, updated = store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="C",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="upsert",
+        dry_run=True,
+    )
+
+    assert [record.id for record in records] == ["rel_keep"]
+    assert updated == 1
+    listed = store.list_relations()
+    assert len(listed) == 1
+    assert listed[0].target == "B"
+
+
 def test_replace_same_pair_only_matches_pair_context_store() -> None:
     store = RelationStore()
     store.assert_relations(
@@ -143,6 +217,42 @@ def test_sqlite_store_persists_relations_and_exclusive_groups(tmp_path) -> None:
     assert reloaded.list_exclusive_groups()[0].members == ["B", "C"]
 
 
+def test_sqlite_upsert_persists_updated_relation(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    records, updated = store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="C",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="upsert",
+    )
+    reloaded = SqliteRelationStore(config)
+
+    assert [record.id for record in records] == ["rel_keep"]
+    assert updated == 1
+    assert len(reloaded.list_relations()) == 1
+    assert reloaded.list_relations()[0].target == "C"
+    assert reloaded.list_relations()[0].relation_type == RelationType.NECESSARY
+
+
 def test_create_relation_store_uses_sqlite_backend(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
@@ -166,6 +276,40 @@ def test_json_store_persists_relations(tmp_path) -> None:
 
     assert reloaded.list_relations()[0].source == "A"
     assert reloaded.implication_edges()[0].consequent == "B"
+
+
+def test_json_upsert_persists_updated_relation(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    _records, updated = store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="C",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="upsert",
+    )
+    reloaded = JsonRelationStore(config)
+
+    assert updated == 1
+    assert len(reloaded.list_relations()) == 1
+    assert reloaded.list_relations()[0].target == "C"
 
 
 def test_memory_import_records_keeps_context_metadata() -> None:

@@ -269,6 +269,42 @@ def test_stop_hook_context_separated_conflict_does_not_block(tmp_path: Path) -> 
     assert json.loads(stdout.getvalue()) == {}
 
 
+def test_stop_hook_soft_confidence_tension_does_not_block(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    writer = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    writer.assert_relations(
+        [
+            RelationInput(
+                id="rel_low",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+                confidence=0.2,
+            ),
+            RelationInput(
+                id="rel_high",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+                confidence=0.8,
+            ),
+        ]
+    )
+    stdout = StringIO()
+
+    run_stop_hook(
+        stdin=StringIO(json.dumps({"last_assistant_message": "No facts."})),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    assert json.loads(stdout.getvalue()) == {}
+
+
 def test_stop_hook_invalid_facts_fail_open_by_default() -> None:
     stdout = StringIO()
     stderr = StringIO()

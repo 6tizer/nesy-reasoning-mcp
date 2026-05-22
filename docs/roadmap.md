@@ -263,4 +263,4 @@ Acceptance:
 - Natural-language relation extraction.
 - Optional Postgres backend.
 - Team/server deployment model.
-- Richer contradiction classes beyond explicit exclusives.
+- Natural-language contradiction extraction and domain-specific contradiction classes.

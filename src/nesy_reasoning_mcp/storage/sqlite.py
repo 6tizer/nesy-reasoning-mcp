@@ -35,6 +35,7 @@ from nesy_reasoning_mcp.storage.common import (
     _merge_import,
     _relation_for_store,
     _relation_from_row,
+    _upsert_relations,
     graph_stats_for,
 )
 
@@ -62,7 +63,21 @@ class SqliteRelationStore:
         records = [RelationRecord.from_input(item) for item in inputs]
         updated = 0
 
-        if mode == "replace_same_pair":
+        if mode == "upsert":
+            merged, updated = _upsert_relations(self.list_relations(), records)
+            if not dry_run:
+                try:
+                    self._replace_all_records(
+                        merged,
+                        self.list_exclusive_groups(),
+                        self.list_independence_records(),
+                        self.context_metadata(),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+        elif mode == "replace_same_pair":
             replace_keys = {
                 (record.source, record.target, record.context_id, record.store_id)
                 for record in records
@@ -83,7 +98,10 @@ class SqliteRelationStore:
                         (source, target, context_id, store_id),
                     )
 
-        if not dry_run:
+        elif mode != "append":
+            raise ValueError(f"unsupported assert mode: {mode}")
+
+        if not dry_run and mode != "upsert":
             try:
                 self._insert_relations(records)
                 self._conn.commit()

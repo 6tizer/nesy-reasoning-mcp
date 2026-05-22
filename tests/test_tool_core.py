@@ -7,6 +7,7 @@ from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tools import (
     ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
+    CLASSIFY,
     CLEAR_RELATIONS,
     LIST_RELATIONS,
     call_tool,
@@ -68,21 +69,171 @@ async def test_invalid_input_returns_error_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upsert_mode_is_rejected_in_v01() -> None:
+async def test_assert_relations_upsert_updates_same_id() -> None:
     store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_keep",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                }
+            ]
+        },
+        store,
+    )
+
     result = await call_tool(
         ASSERT_RELATIONS,
         {
-            "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+            "relations": [
+                {
+                    "id": "rel_keep",
+                    "source": "A",
+                    "target": "C",
+                    "relation_type": "necessary",
+                },
+                {"source": "D", "target": "E", "relation_type": "sufficient"},
+            ],
             "mode": "upsert",
         },
         store,
     )
 
-    assert result.isError is True
-    assert result.structuredContent["rejected"] == 1
-    assert result.structuredContent["diagnostics"][0]["code"] == "UPSERT_NOT_IMPLEMENTED"
-    assert store.list_relations() == []
+    assert result.isError is False
+    assert result.structuredContent["added"] == 1
+    assert result.structuredContent["updated"] == 1
+    assert result.structuredContent["rejected"] == 0
+    assert len(store.list_relations()) == 2
+    assert {record.id: record.target for record in store.list_relations()}["rel_keep"] == "C"
+
+
+@pytest.mark.asyncio
+async def test_assert_relations_upsert_dry_run_does_not_change_store() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_keep",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                }
+            ]
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_keep",
+                    "source": "A",
+                    "target": "C",
+                    "relation_type": "necessary",
+                }
+            ],
+            "mode": "upsert",
+            "dry_run": True,
+        },
+        store,
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["added"] == 0
+    assert result.structuredContent["updated"] == 1
+    assert len(store.list_relations()) == 1
+    assert store.list_relations()[0].target == "B"
+
+
+@pytest.mark.asyncio
+async def test_merge_equivalent_reports_normalization_without_synthetic_record() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_sufficient",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                }
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_necessary",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "necessary",
+                }
+            ],
+            "check_contradictions": False,
+            "merge_equivalent": True,
+        },
+        store,
+    )
+    classification = await call_tool(CLASSIFY, {"source": "A", "target": "B"}, store)
+
+    assert result.structuredContent["diagnostics"][0]["code"] == ("MERGE_EQUIVALENT_NORMALIZED")
+    assert result.structuredContent["diagnostics"][0]["level"] == "info"
+    assert len(store.list_relations()) == 2
+    assert classification.structuredContent["classification"] == "equivalent"
+
+
+@pytest.mark.asyncio
+async def test_merge_equivalent_false_skips_normalization_diagnostic() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_sufficient",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                }
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_necessary",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "necessary",
+                }
+            ],
+            "check_contradictions": False,
+            "merge_equivalent": False,
+        },
+        store,
+    )
+
+    assert result.structuredContent["diagnostics"] == []
+    assert len(store.list_relations()) == 2
 
 
 @pytest.mark.asyncio
