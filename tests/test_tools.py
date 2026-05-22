@@ -226,6 +226,14 @@ async def test_export_inline_roundtrip_through_load() -> None:
                         "context_id": "ctx",
                     }
                 ],
+                "independence_records": [
+                    {
+                        "id": "ind_c_a",
+                        "left": "C",
+                        "right": "A",
+                        "context_id": "ctx",
+                    }
+                ],
                 "context_metadata": {"ctx": {"causal_completeness": True}},
             },
             "check_contradictions": False,
@@ -252,7 +260,47 @@ async def test_export_inline_roundtrip_through_load() -> None:
     assert loaded.structuredContent["loaded_exclusive_groups"] == 1
     assert new_store.list_relations()[0].source == "A"
     assert new_store.list_exclusive_groups()[0].members == ["B", "C"]
+    assert new_store.list_independence_records()[0].id == "ind_c_a"
     assert new_store.context_metadata() == {"ctx": {"causal_completeness": True}}
+
+
+@pytest.mark.asyncio
+async def test_export_jsonl_roundtrip_includes_independence_records(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+                "independence_records": [{"id": "ind_c_a", "left": "C", "right": "A"}],
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    exported = await call_tool(
+        EXPORT_RELATIONS,
+        {"destination": "file", "format": "jsonl", "path": str(allowed / "relations.jsonl")},
+        store,
+    )
+    new_store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+    loaded = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "file",
+            "path": str(allowed / "relations.jsonl"),
+            "check_contradictions": False,
+        },
+        new_store,
+    )
+
+    assert exported.isError is False
+    assert loaded.isError is False
+    assert new_store.list_independence_records()[0].id == "ind_c_a"
 
 
 @pytest.mark.asyncio
@@ -300,6 +348,45 @@ async def test_load_relations_upsert_updates_same_id() -> None:
     assert result.structuredContent["updated_relations"] == 1
     assert len(store.list_relations()) == 1
     assert store.list_relations()[0].target == "C"
+
+
+@pytest.mark.asyncio
+async def test_load_relations_upsert_updates_independence_same_pair() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "independence_records": [
+                    {"id": "ind_old", "left": "C", "right": "A", "confidence": 0.5}
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "mode": "upsert",
+            "data": {
+                "independence_records": [
+                    {"id": "ind_new", "left": "A", "right": "C", "confidence": 0.9}
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    records = store.list_independence_records()
+    assert result.isError is False
+    assert len(records) == 1
+    assert records[0].id == "ind_new"
+    assert records[0].confidence == 0.9
 
 
 @pytest.mark.asyncio
@@ -390,6 +477,51 @@ async def test_load_and_export_file_enforce_allowed_roots(tmp_path: Path) -> Non
     assert rejected_export.isError is True
     assert rejected_export.structuredContent["diagnostics"][0]["code"] == "EXPORT_RELATIONS_FAILED"
     assert not (outside / "export.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_load_relations_resource_uri_file_uses_allowed_roots(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    relation_file = allowed / "relations.json"
+    relation_file.write_text(
+        json.dumps({"relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}]}),
+        encoding="utf-8",
+    )
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "resource_uri",
+            "resource_uri": relation_file.resolve().as_uri(),
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["loaded_relations"] == 1
+    assert store.list_relations()[0].source == "A"
+
+
+@pytest.mark.asyncio
+async def test_load_relations_resource_uri_rejects_unsupported_scheme(tmp_path: Path) -> None:
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(tmp_path)])))
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "resource_uri",
+            "resource_uri": "https://example.test/relations.json",
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent["diagnostics"][0]["code"] == "LOAD_RELATIONS_FAILED"
+    assert "not supported in v0.7" in result.structuredContent["diagnostics"][0]["message"]
 
 
 @pytest.mark.asyncio
@@ -680,6 +812,32 @@ async def test_alternative_sufficient_cause_does_not_prove_not_necessary() -> No
 
 
 @pytest.mark.asyncio
+async def test_classify_independent_counterexample_proves_not_necessary() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [
+                    {"source": "A", "target": "B", "relation_type": "sufficient"},
+                    {"source": "C", "target": "B", "relation_type": "sufficient"},
+                ],
+                "independence_records": [{"id": "ind_c_a", "left": "C", "right": "A"}],
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CLASSIFY, {"source": "A", "target": "B"}, store)
+
+    assert result.structuredContent["classification"] == "sufficient"
+    assert result.structuredContent["necessity_status"]["status"] == "proven_not_necessary"
+    assert result.structuredContent["necessity_status"]["counterexample"] == "C"
+
+
+@pytest.mark.asyncio
 async def test_cycle_search_does_not_loop() -> None:
     store = RelationStore()
     await call_tool(
@@ -874,6 +1032,37 @@ async def test_counterfactual_independent_alternative_is_still_possible() -> Non
                     "metadata": {"independent_of": ["A"]},
                 },
             ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(COUNTERFACTUAL, {"if_not": "A", "targets": ["B"]}, store)
+
+    assert result.structuredContent["possibly_blocked"] == []
+    assert result.structuredContent["still_possible"][0]["target"] == "B"
+    assert (
+        result.structuredContent["still_possible"][0]["alternative_paths"][0][
+            "independence_from_if_not"
+        ]
+        == "proven"
+    )
+
+
+@pytest.mark.asyncio
+async def test_counterfactual_formal_independence_record_is_still_possible() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [
+                    {"source": "A", "target": "B", "relation_type": "sufficient"},
+                    {"source": "C", "target": "B", "relation_type": "sufficient"},
+                ],
+                "independence_records": [{"id": "ind_c_a", "left": "C", "right": "A"}],
+            },
             "check_contradictions": False,
         },
         store,

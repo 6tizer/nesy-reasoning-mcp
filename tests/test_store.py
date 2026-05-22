@@ -1,6 +1,7 @@
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
+    IndependenceRecord,
     RelationInput,
     RelationRecord,
     RelationType,
@@ -181,6 +182,24 @@ def test_memory_import_records_keeps_context_metadata() -> None:
     assert store.context_metadata() == {"ctx": {"causal_completeness": True}}
 
 
+def test_memory_import_records_keeps_independence_records() -> None:
+    store = RelationStore()
+
+    store.import_records(
+        [],
+        [],
+        [IndependenceRecord(id="ind_keep", left="C", right="A", context_id="ctx")],
+        mode="append",
+        store_id="default",
+    )
+
+    records = store.list_independence_records()
+    assert len(records) == 1
+    assert records[0].id == "ind_keep"
+    assert records[0].left == "C"
+    assert records[0].right == "A"
+
+
 def test_sqlite_store_persists_context_metadata(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
@@ -199,6 +218,27 @@ def test_sqlite_store_persists_context_metadata(tmp_path) -> None:
     assert reloaded.context_metadata() == {"ctx": {"causal_completeness": True}}
 
 
+def test_sqlite_store_persists_independence_records(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.import_records(
+        [],
+        [],
+        [IndependenceRecord(id="ind_keep", left="C", right="A", context_id="ctx")],
+        mode="append",
+        store_id="default",
+    )
+
+    reloaded = SqliteRelationStore(config)
+
+    records = reloaded.list_independence_records()
+    assert len(records) == 1
+    assert records[0].id == "ind_keep"
+    assert records[0].context_id == "ctx"
+
+
 def test_json_store_persists_context_metadata(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
@@ -215,6 +255,27 @@ def test_json_store_persists_context_metadata(tmp_path) -> None:
     reloaded = JsonRelationStore(config)
 
     assert reloaded.context_metadata() == {"ctx": {"causal_completeness": True}}
+
+
+def test_json_store_persists_independence_records(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.import_records(
+        [],
+        [],
+        [IndependenceRecord(id="ind_keep", left="C", right="A", context_id="ctx")],
+        mode="append",
+        store_id="default",
+    )
+
+    reloaded = JsonRelationStore(config)
+
+    records = reloaded.list_independence_records()
+    assert len(records) == 1
+    assert records[0].left == "C"
+    assert records[0].right == "A"
 
 
 def test_create_relation_store_uses_json_backend(tmp_path) -> None:

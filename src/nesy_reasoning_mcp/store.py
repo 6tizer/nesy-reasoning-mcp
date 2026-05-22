@@ -19,6 +19,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
     ExclusiveGroupRecord,
     GraphStats,
+    IndependenceRecord,
     RelationFilter,
     RelationInput,
     RelationRecord,
@@ -92,6 +93,9 @@ class RelationStoreProtocol(Protocol):
     def list_exclusive_groups(self) -> list[ExclusiveGroupRecord]:
         """List all stored exclusive groups."""
 
+    def list_independence_records(self) -> list[IndependenceRecord]:
+        """List all stored independence records."""
+
     def clear_relations(
         self,
         *,
@@ -134,6 +138,7 @@ class RelationStoreProtocol(Protocol):
         self,
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
+        independence_records: Iterable[IndependenceRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -150,6 +155,7 @@ class MemoryRelationStore:
         self.config = config or load_config()
         self._relations: list[RelationRecord] = []
         self._exclusive_groups: list[ExclusiveGroupRecord] = []
+        self._independence_records: list[IndependenceRecord] = []
         self._audit_log: list[AuditEntry] = []
         self._context_metadata: dict[str, Any] = {}
 
@@ -228,6 +234,10 @@ class MemoryRelationStore:
         """List all stored exclusive groups."""
         return list(self._exclusive_groups)
 
+    def list_independence_records(self) -> list[IndependenceRecord]:
+        """List all stored independence records."""
+        return list(self._independence_records)
+
     def clear_relations(
         self,
         *,
@@ -246,6 +256,7 @@ class MemoryRelationStore:
                 self._relations.clear()
                 if include_exclusive_groups:
                     self._exclusive_groups.clear()
+                self._independence_records.clear()
                 self._context_metadata.clear()
             return removed, removed_groups
 
@@ -274,6 +285,17 @@ class MemoryRelationStore:
                 self._exclusive_groups = [
                     group for group in self._exclusive_groups if not group_matches_clear(group)
                 ]
+            self._independence_records = [
+                item
+                for item in self._independence_records
+                if not _independence_matches_scope(
+                    item,
+                    scope,
+                    store_id,
+                    context_id,
+                    relation_filter,
+                )
+            ]
             if scope == "context":
                 self._context_metadata.pop(context_id, None)
         return removed, removed_groups
@@ -337,6 +359,7 @@ class MemoryRelationStore:
         self,
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
+        independence_records: Iterable[IndependenceRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -346,11 +369,22 @@ class MemoryRelationStore:
         """Import validated records into memory."""
         incoming_relations = [_relation_for_store(record, store_id) for record in relations]
         incoming_groups = [_group_for_store(group, store_id) for group in exclusive_groups]
-        merged_relations, merged_groups, updated_relations, updated_groups = _merge_import(
+        incoming_independence = [
+            _independence_for_store(record, store_id) for record in independence_records
+        ]
+        (
+            merged_relations,
+            merged_groups,
+            merged_independence,
+            updated_relations,
+            updated_groups,
+        ) = _merge_import(
             self._relations,
             self._exclusive_groups,
+            self._independence_records,
             incoming_relations,
             incoming_groups,
+            incoming_independence,
             mode=mode,
             store_id=store_id,
         )
@@ -361,6 +395,7 @@ class MemoryRelationStore:
         if not dry_run:
             self._relations = merged_relations
             self._exclusive_groups = merged_groups
+            self._independence_records = merged_independence
             self._context_metadata = merged_metadata
         return len(incoming_relations), len(incoming_groups), updated_relations, updated_groups
 
@@ -506,6 +541,18 @@ class SqliteRelationStore:
             item["members"].append(row["member"])
         return [ExclusiveGroupRecord(**item) for item in grouped.values()]
 
+    def list_independence_records(self) -> list[IndependenceRecord]:
+        """List all stored independence records."""
+        rows = self._conn.execute(
+            """
+            SELECT id, left_value, right_value, relation, confidence, context_id, store_id,
+                   metadata_json, created_at, updated_at
+            FROM independence_records
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+        return [_independence_from_row(row) for row in rows]
+
     def clear_relations(
         self,
         *,
@@ -524,6 +571,7 @@ class SqliteRelationStore:
                 self._conn.execute("DELETE FROM relations")
                 if include_exclusive_groups:
                     self._conn.execute("DELETE FROM exclusive_groups")
+                self._conn.execute("DELETE FROM independence_records")
                 self._conn.execute("DELETE FROM context_metadata")
                 self._conn.commit()
             return removed, removed_groups
@@ -543,17 +591,24 @@ class SqliteRelationStore:
 
         relations = self.list_relations()
         groups = self.list_exclusive_groups()
+        independence_records = self.list_independence_records()
         remove_ids = [relation.id for relation in relations if predicate(relation)]
         remove_group_keys = [
             (group.group_id, group.context_id, group.store_id)
             for group in groups
             if group_matches_clear(group)
         ]
+        remove_independence_ids = [
+            item.id
+            for item in independence_records
+            if _independence_matches_scope(item, scope, store_id, context_id, relation_filter)
+        ]
 
         if not dry_run:
             self._delete_relation_ids(remove_ids)
             if include_exclusive_groups:
                 self._delete_group_keys(remove_group_keys)
+            self._delete_independence_ids(remove_independence_ids)
             if scope == "context":
                 self._conn.execute(
                     "DELETE FROM context_metadata WHERE context_id = ?",
@@ -664,6 +719,7 @@ class SqliteRelationStore:
         self,
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
+        independence_records: Iterable[IndependenceRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -673,11 +729,22 @@ class SqliteRelationStore:
         """Import validated records into SQLite."""
         incoming_relations = [_relation_for_store(record, store_id) for record in relations]
         incoming_groups = [_group_for_store(group, store_id) for group in exclusive_groups]
-        merged_relations, merged_groups, updated_relations, updated_groups = _merge_import(
+        incoming_independence = [
+            _independence_for_store(record, store_id) for record in independence_records
+        ]
+        (
+            merged_relations,
+            merged_groups,
+            merged_independence,
+            updated_relations,
+            updated_groups,
+        ) = _merge_import(
             self.list_relations(),
             self.list_exclusive_groups(),
+            self.list_independence_records(),
             incoming_relations,
             incoming_groups,
+            incoming_independence,
             mode=mode,
             store_id=store_id,
         )
@@ -690,6 +757,7 @@ class SqliteRelationStore:
                 self._replace_all_records(
                     merged_relations,
                     merged_groups,
+                    merged_independence,
                     merged_metadata,
                 )
                 self._conn.commit()
@@ -748,6 +816,23 @@ class SqliteRelationStore:
             CREATE TABLE IF NOT EXISTS context_metadata (
               context_id TEXT PRIMARY KEY,
               metadata_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS independence_records (
+              id TEXT PRIMARY KEY,
+              left_value TEXT NOT NULL,
+              right_value TEXT NOT NULL,
+              relation TEXT NOT NULL DEFAULT 'independent_of' CHECK (
+                relation = 'independent_of'
+              ),
+              confidence REAL NOT NULL DEFAULT 1.0 CHECK (
+                confidence >= 0 AND confidence <= 1
+              ),
+              context_id TEXT NOT NULL DEFAULT 'default',
+              store_id TEXT NOT NULL DEFAULT 'default',
+              metadata_json TEXT,
+              created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
             """
@@ -813,6 +898,32 @@ class SqliteRelationStore:
             rows,
         )
 
+    def _insert_independence_records(self, records: Iterable[IndependenceRecord]) -> None:
+        self._conn.executemany(
+            """
+            INSERT INTO independence_records (
+                id, left_value, right_value, relation, confidence, context_id, store_id,
+                metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    record.id,
+                    record.left,
+                    record.right,
+                    record.relation,
+                    record.confidence,
+                    record.context_id,
+                    record.store_id,
+                    _dumps(record.metadata),
+                    record.created_at,
+                    record.updated_at,
+                )
+                for record in records
+            ],
+        )
+
     def _delete_relation_ids(self, relation_ids: Iterable[str]) -> None:
         self._conn.executemany(
             "DELETE FROM relations WHERE id = ?",
@@ -828,17 +939,26 @@ class SqliteRelationStore:
             list(group_keys),
         )
 
+    def _delete_independence_ids(self, record_ids: Iterable[str]) -> None:
+        self._conn.executemany(
+            "DELETE FROM independence_records WHERE id = ?",
+            [(record_id,) for record_id in record_ids],
+        )
+
     def _replace_all_records(
         self,
         relations: Iterable[RelationRecord],
         groups: Iterable[ExclusiveGroupRecord],
+        independence_records: Iterable[IndependenceRecord],
         context_metadata: dict[str, Any],
     ) -> None:
         self._conn.execute("DELETE FROM relations")
         self._conn.execute("DELETE FROM exclusive_groups")
+        self._conn.execute("DELETE FROM independence_records")
         self._conn.execute("DELETE FROM context_metadata")
         self._insert_relations(relations)
         self._insert_exclusive_groups(groups)
+        self._insert_independence_records(independence_records)
         self._insert_context_metadata(context_metadata)
 
     def _insert_context_metadata(self, context_metadata: dict[str, Any]) -> None:
@@ -934,6 +1054,7 @@ class JsonRelationStore(MemoryRelationStore):
         self,
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
+        independence_records: Iterable[IndependenceRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -944,6 +1065,7 @@ class JsonRelationStore(MemoryRelationStore):
         result = super().import_records(
             relations,
             exclusive_groups,
+            independence_records,
             mode=mode,
             store_id=store_id,
             context_metadata=context_metadata,
@@ -965,6 +1087,9 @@ class JsonRelationStore(MemoryRelationStore):
         self._exclusive_groups = [
             ExclusiveGroupRecord.model_validate(item) for item in data.get("exclusive_groups", [])
         ]
+        self._independence_records = [
+            IndependenceRecord.model_validate(item) for item in data.get("independence_records", [])
+        ]
         self._audit_log = [_audit_from_dict(item) for item in data.get("audit_log", [])]
         self._context_metadata = data.get("context_metadata", {})
 
@@ -973,6 +1098,9 @@ class JsonRelationStore(MemoryRelationStore):
             "version": "2.0",
             "relations": [record.model_dump(mode="json") for record in self._relations],
             "exclusive_groups": [group.model_dump(mode="json") for group in self._exclusive_groups],
+            "independence_records": [
+                record.model_dump(mode="json") for record in self._independence_records
+            ],
             "audit_log": [entry.to_dict() for entry in self._audit_log],
             "context_metadata": self._context_metadata,
         }
@@ -1064,6 +1192,37 @@ def _group_matches_scope(
     return False
 
 
+def _independence_matches_scope(
+    record: IndependenceRecord,
+    scope: str,
+    store_id: str,
+    context_id: str,
+    relation_filter: RelationFilter,
+) -> bool:
+    if scope == "store":
+        return record.store_id == store_id
+    if scope == "context":
+        return record.store_id == store_id and record.context_id == context_id
+    if scope == "filter":
+        pair = {record.left, record.right}
+        if relation_filter.store_id is not None and record.store_id != relation_filter.store_id:
+            return False
+        if (
+            relation_filter.context_id is not None
+            and record.context_id != relation_filter.context_id
+        ):
+            return False
+        if relation_filter.source is not None and relation_filter.source not in pair:
+            return False
+        if relation_filter.target is not None and relation_filter.target not in pair:
+            return False
+        return not (
+            relation_filter.domain is not None
+            and record.metadata.get("domain") != relation_filter.domain
+        )
+    return False
+
+
 def _edge(
     relation: RelationRecord,
     antecedent: str,
@@ -1109,15 +1268,30 @@ def _group_for_store(group: ExclusiveGroupRecord, store_id: str) -> ExclusiveGro
     return group.model_copy(update={"store_id": store_id})
 
 
+def _independence_for_store(
+    record: IndependenceRecord,
+    store_id: str,
+) -> IndependenceRecord:
+    return record.model_copy(update={"store_id": store_id})
+
+
 def _merge_import(
     current_relations: Iterable[RelationRecord],
     current_groups: Iterable[ExclusiveGroupRecord],
+    current_independence: Iterable[IndependenceRecord],
     incoming_relations: list[RelationRecord],
     incoming_groups: list[ExclusiveGroupRecord],
+    incoming_independence: list[IndependenceRecord],
     *,
     mode: str,
     store_id: str,
-) -> tuple[list[RelationRecord], list[ExclusiveGroupRecord], int, int]:
+) -> tuple[
+    list[RelationRecord],
+    list[ExclusiveGroupRecord],
+    list[IndependenceRecord],
+    int,
+    int,
+]:
     if mode == "append":
         relations = [*current_relations, *incoming_relations]
         updated_relations = 0
@@ -1137,7 +1311,13 @@ def _merge_import(
         mode=mode,
         store_id=store_id,
     )
-    return relations, groups, updated_relations, updated_groups
+    independence = _merge_independence_records(
+        current_independence,
+        incoming_independence,
+        mode=mode,
+        store_id=store_id,
+    )
+    return relations, groups, independence, updated_relations, updated_groups
 
 
 def _upsert_relations(
@@ -1185,6 +1365,46 @@ def _merge_groups(
     return groups, updated
 
 
+def _merge_independence_records(
+    current_records: Iterable[IndependenceRecord],
+    incoming_records: Iterable[IndependenceRecord],
+    *,
+    mode: str,
+    store_id: str,
+) -> list[IndependenceRecord]:
+    if mode == "replace_store":
+        records = [record for record in current_records if record.store_id != store_id]
+    else:
+        records = list(current_records)
+    positions = {record.id: index for index, record in enumerate(records)}
+    pair_positions = {
+        _independence_key(record): index for index, record in enumerate(records) if mode != "append"
+    }
+    for record in incoming_records:
+        if mode == "upsert" and record.id in positions:
+            index = positions[record.id]
+            pair_positions.pop(_independence_key(records[index]), None)
+            records[index] = record
+            pair_positions[_independence_key(record)] = index
+            continue
+        key = _independence_key(record)
+        if mode == "upsert" and key in pair_positions:
+            index = pair_positions[key]
+            positions.pop(records[index].id, None)
+            records[index] = record
+            positions[record.id] = index
+            continue
+        positions[record.id] = len(records)
+        pair_positions[key] = len(records)
+        records.append(record)
+    return records
+
+
+def _independence_key(record: IndependenceRecord) -> tuple[str, str, str, str]:
+    left, right = sorted((record.left, record.right))
+    return left, right, record.context_id, record.store_id
+
+
 def _merge_context_metadata(
     current_metadata: dict[str, Any],
     incoming_metadata: dict[str, Any],
@@ -1205,6 +1425,21 @@ def _loads(value: str | None, default: Any) -> Any:
     if value is None:
         return default
     return json.loads(value)
+
+
+def _independence_from_row(row: sqlite3.Row) -> IndependenceRecord:
+    return IndependenceRecord(
+        id=row["id"],
+        left=row["left_value"],
+        right=row["right_value"],
+        relation=row["relation"],
+        confidence=row["confidence"],
+        context_id=row["context_id"],
+        store_id=row["store_id"],
+        metadata=_loads(row["metadata_json"], {}),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
 
 
 def _relation_from_row(row: sqlite3.Row) -> RelationRecord:

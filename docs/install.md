@@ -113,6 +113,8 @@ Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
 ```
 
 File load/export only accepts `.json` and `.jsonl` inside `allowed_roots`.
+`nesy.load_relations` also accepts `source_type=resource_uri` for safe `file://`
+URIs that resolve inside `allowed_roots`; remote URI schemes are rejected.
 
 ## Streamable HTTP Mode
 
@@ -174,9 +176,12 @@ Default hook behavior is fail-open with a stderr warning. Set
 - Default state is in memory only.
 - SQLite and JSON backends are local-only.
 - Contradiction detection only uses explicit exclusive groups.
+- Formal independence is stored through relation-set import/export, not a
+  dedicated public tool.
 - Counterfactual reasoning is conservative: open-world mode does not infer
   negation from missing facts; closed-world upgrades require
   `context_metadata.<context_id>.causal_completeness=true`.
+- MCP `resource_uri` loading is limited to allowed local `file://` URIs.
 - HTTP daemon auth is a local bearer token, not multi-user auth.
 - No regex or LLM natural-language extraction in hooks yet.
 

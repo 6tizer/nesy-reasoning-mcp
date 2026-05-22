@@ -271,6 +271,46 @@ class ExclusiveGroupRecord(ExclusiveGroupInput):
         return cls(**data)
 
 
+class IndependenceInput(BaseModel):
+    """Input shape for an explicit independence claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    left: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    right: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    relation: Literal["independent_of"] = "independent_of"
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    context_id: str = DEFAULT_CONTEXT_ID
+    store_id: str = DEFAULT_STORE_ID
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("left", "right", "context_id", "store_id")
+    @classmethod
+    def strip_non_empty(cls, value: str) -> str:
+        """Strip strings and reject empty values."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+
+class IndependenceRecord(IndependenceInput):
+    """Stored independence record."""
+
+    id: str = Field(default_factory=lambda: f"ind_{uuid4().hex}")
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    @classmethod
+    def from_input(cls, independence: IndependenceInput) -> IndependenceRecord:
+        """Create a persisted independence record from validated input."""
+        data = independence.model_dump()
+        if data["id"] is None:
+            data.pop("id")
+        return cls(**data)
+
+
 class ContextFilter(BaseModel):
     """Context, store, domain, assumption, and temporal query filter."""
 
@@ -342,6 +382,7 @@ class RelationSetData(BaseModel):
     stores: list[dict[str, Any]] = Field(default_factory=list)
     relations: list[RelationRecord] = Field(default_factory=list, max_length=MAX_LOAD_RELATIONS)
     exclusive_groups: list[ExclusiveGroupRecord] = Field(default_factory=list)
+    independence_records: list[IndependenceRecord] = Field(default_factory=list)
     context_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

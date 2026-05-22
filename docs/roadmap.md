@@ -5,7 +5,7 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.6 is the current implementation baseline:
+v0.7 is the current implementation baseline:
 
 - MCP stdio server.
 - Authenticated local Streamable HTTP daemon.
@@ -13,9 +13,13 @@ v0.6 is the current implementation baseline:
 - Relation assert/list/clear.
 - Classification and chain verification.
 - Counterfactual reasoning with open-world and guarded closed-world modes.
+- Formal independence records through relation-set load/export.
+- `classify` can return `necessity_status.status=proven_not_necessary` when an
+  independent counterexample is established.
+- `counterfactual` can use formal independence records for `still_possible`.
 - Explicit exclusive groups.
 - Explicit exclusivity-based contradiction checks.
-- Relation load/export with allowed roots.
+- Relation load/export with allowed roots and safe local `file://` resource URIs.
 - Write-operation audit log.
 - Compact graph summary.
 - Claude Code Stop and PreToolUse hook helpers.
@@ -131,25 +135,42 @@ Out of scope:
 - Hosted service.
 - LLM-based extraction from assistant text.
 
-## v0.7: Next Reasoning Expansion
+## v0.7: Independence Records And Resource URI Load
 
-Goal: expand reasoning coverage after HTTP and counterfactual are stable.
+Goal: close the main SPEC gaps left after HTTP and counterfactual.
 
 Tracking issue: https://github.com/6tizer/nesy-reasoning-mcp/issues/3
 
 Scope:
 
-- Richer contradiction classes beyond explicit exclusives.
-- Optional dedicated independence records/tools.
-- Better evaluation fixtures.
+- Add `IndependenceRecord` to relation-set schemas and stores.
+- Persist independence records in memory, JSON, and SQLite backends.
+- Include independence records in JSON/JSONL load/export.
+- Use independence records to prove `proven_not_necessary` in `nesy.classify`.
+- Use independence records as formal alternative-path proof in
+  `nesy.counterfactual`.
+- Support `nesy.load_relations(source_type=resource_uri)` for safe local
+  `file://` URIs inside `allowed_roots`.
 
 Public tools:
 
-- TBD
+- No new tool. Existing `nesy.load_relations`, `nesy.export_relations`,
+  `nesy.classify`, and `nesy.counterfactual` gain behavior.
 
 Acceptance:
 
-- Scope must be narrowed before implementation.
+- Alternative sufficient causes still do not prove non-necessity by themselves.
+- Independent counterexamples do prove `proven_not_necessary`.
+- Counterfactual alternative paths can be `still_possible` through formal
+  independence records.
+- File resource URI loads obey allowed roots and reject remote schemes.
+
+Out of scope:
+
+- Dedicated independence assertion tool.
+- Remote/client MCP resource fetching.
+- Richer contradiction classes beyond explicit exclusives.
+- Evaluation fixtures and benchmark suite.
 
 ## Later
 

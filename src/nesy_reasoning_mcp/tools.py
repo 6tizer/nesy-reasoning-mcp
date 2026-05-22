@@ -6,6 +6,7 @@ import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import ValidationError
@@ -39,6 +40,7 @@ from nesy_reasoning_mcp.schemas import (
     ExportDestination,
     ExportFormat,
     ExportRelationsInput,
+    IndependenceRecord,
     ListRelationsInput,
     LoadRelationsInput,
     LoadSourceType,
@@ -134,8 +136,8 @@ def get_tools() -> list[Tool]:
             name=LOAD_RELATIONS,
             title="Load Relations",
             description=(
-                "Load relation records and exclusive groups from inline JSON or an "
-                "allowed local file."
+                "Load relation records, exclusive groups, and independence records from "
+                "inline JSON, an allowed local file, or a safe file resource URI."
             ),
             inputSchema=LoadRelationsInput.model_json_schema(),
             outputSchema=_load_relations_output_schema(),
@@ -144,8 +146,8 @@ def get_tools() -> list[Tool]:
             name=EXPORT_RELATIONS,
             title="Export Relations",
             description=(
-                "Export relation records and exclusive groups as JSON or JSONL, inline "
-                "or to an allowed local file."
+                "Export relation records, exclusive groups, and independence records as JSON "
+                "or JSONL, inline or to an allowed local file."
             ),
             inputSchema=ExportRelationsInput.model_json_schema(),
             outputSchema=_export_relations_output_schema(),
@@ -387,6 +389,8 @@ async def classify(arguments: dict[str, Any], store: RelationStore) -> dict[str,
     """Handle `nesy.classify`."""
     payload = ClassifyInput.model_validate(arguments)
     index = build_graph(store.list_relations(), payload.context_filter)
+    independence_records = store.list_independence_records()
+    exclusive_groups = store.list_exclusive_groups()
     fwd_paths = index.find_paths(
         payload.source,
         payload.target,
@@ -412,7 +416,19 @@ async def classify(arguments: dict[str, Any], store: RelationStore) -> dict[str,
         "classification": classification.value,
         "source_implies_target": _implication_result(fwd_paths, payload.source, payload.target),
         "target_implies_source": _implication_result(rev_paths, payload.target, payload.source),
-        "necessity_status": _necessity_status(rev_paths),
+        "necessity_status": _necessity_status(
+            rev_paths,
+            source=payload.source,
+            target=payload.target,
+            index=index,
+            context_filter=payload.context_filter,
+            max_depth=payload.max_depth,
+            confidence_policy=payload.confidence_policy,
+            direct_only=payload.require_direct,
+            relation_map={relation.id: relation for relation in index.relations},
+            independence_records=independence_records,
+            exclusive_groups=exclusive_groups,
+        ),
         "direct_relations": index.direct_relations_between(payload.source, payload.target),
         "paths": _classify_paths(fwd_paths, rev_paths, payload.include_paths),
         "diagnostics": [],
@@ -483,12 +499,6 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStore) -> dict[
 async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
     """Handle `nesy.load_relations`."""
     payload = LoadRelationsInput.model_validate(arguments)
-    if payload.source_type == LoadSourceType.RESOURCE_URI:
-        return _load_error(
-            "RESOURCE_URI_NOT_IMPLEMENTED_IN_V04",
-            "resource_uri loading is not implemented in v0.4.",
-            store,
-        )
 
     try:
         data, source_trace = _load_relation_set_data(payload, store)
@@ -497,6 +507,7 @@ async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dic
 
     incoming_relations = _relations_for_store(data.relations, payload.store_id)
     incoming_groups = _groups_for_store(data.exclusive_groups, payload.store_id)
+    incoming_independence = _independence_for_store(data.independence_records, payload.store_id)
     contradictions: list[dict[str, Any]] = []
     if payload.check_contradictions:
         stored_relations = store.list_relations()
@@ -518,6 +529,7 @@ async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dic
         loaded_relations, loaded_groups, updated_relations, updated_groups = store.import_records(
             incoming_relations,
             incoming_groups,
+            incoming_independence,
             mode=payload.mode.value,
             store_id=payload.store_id,
             context_metadata=data.context_metadata,
@@ -551,6 +563,11 @@ async def export_relations(arguments: dict[str, Any], store: RelationStore) -> d
     """Handle `nesy.export_relations`."""
     payload = ExportRelationsInput.model_validate(arguments)
     relations = store.list_relations(payload.filter, limit=None)
+    independence_records = [
+        record
+        for record in store.list_independence_records()
+        if _independence_record_matches_filter(record, payload.filter)
+    ]
     exclusive_groups = (
         [
             group
@@ -563,8 +580,14 @@ async def export_relations(arguments: dict[str, Any], store: RelationStore) -> d
     exported = _relation_set_export(
         relations,
         exclusive_groups,
+        independence_records,
         context_metadata=(
-            _context_metadata_for_export(store.context_metadata(), relations, exclusive_groups)
+            _context_metadata_for_export(
+                store.context_metadata(),
+                relations,
+                exclusive_groups,
+                independence_records,
+            )
             if payload.include_metadata
             else {}
         ),
@@ -673,6 +696,8 @@ async def counterfactual(arguments: dict[str, Any], store: RelationStore) -> dic
     index = build_graph(store.list_relations(), payload.context_filter)
     targets = _counterfactual_targets(payload, index.graph.nodes)
     relation_map = {relation.id: relation for relation in index.relations}
+    independence_records = store.list_independence_records()
+    exclusive_groups = store.list_exclusive_groups()
     diagnostics = _counterfactual_diagnostics(payload, store.context_metadata())
     necessarily_blocked: list[dict[str, Any]] = []
     possibly_blocked: list[dict[str, Any]] = []
@@ -714,6 +739,8 @@ async def counterfactual(arguments: dict[str, Any], store: RelationStore) -> dic
             alternatives = _counterfactual_alternative_paths(
                 index,
                 relation_map,
+                independence_records,
+                exclusive_groups,
                 target=target,
                 if_not=payload.if_not,
                 payload=payload,
@@ -897,6 +924,8 @@ def _counterfactual_unknown_item(if_not: str, target: str) -> dict[str, Any]:
 def _counterfactual_alternative_paths(
     index: Any,
     relation_map: dict[str, RelationRecord],
+    independence_records: list[IndependenceRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
     *,
     target: str,
     if_not: str,
@@ -924,7 +953,10 @@ def _counterfactual_alternative_paths(
             item["independence_from_if_not"] = _path_independence_from_if_not(
                 path,
                 relation_map,
+                independence_records,
+                exclusive_groups,
                 if_not,
+                payload.context_filter,
             )
             alternatives.append(item)
     return alternatives[:5]
@@ -933,10 +965,22 @@ def _counterfactual_alternative_paths(
 def _path_independence_from_if_not(
     path: Any,
     relation_map: dict[str, RelationRecord],
+    independence_records: list[IndependenceRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
     if_not: str,
+    context_filter: ContextFilter,
 ) -> str:
     if if_not in path.nodes or not path.edges:
         return "unknown"
+    source = str(path.nodes[0])
+    if _pair_proves_independence(
+        source,
+        if_not,
+        independence_records,
+        exclusive_groups,
+        context_filter,
+    ):
+        return "proven"
     first_edge = path.edges[0]
     relation = relation_map.get(first_edge.relation_id)
     if relation is None:
@@ -953,6 +997,57 @@ def _path_independence_from_if_not(
     ):
         return "proven"
     return "unknown"
+
+
+def _pair_proves_independence(
+    left: str,
+    right: str,
+    independence_records: list[IndependenceRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
+    context_filter: ContextFilter,
+) -> bool:
+    return _formal_independence(left, right, independence_records, context_filter) or (
+        _exclusive_pair(left, right, exclusive_groups, context_filter)
+    )
+
+
+def _formal_independence(
+    left: str,
+    right: str,
+    records: list[IndependenceRecord],
+    context_filter: ContextFilter,
+) -> bool:
+    pair = {left, right}
+    return any(
+        {record.left, record.right} == pair
+        and _independence_compatible_with_context_filter(record, context_filter)
+        for record in records
+    )
+
+
+def _independence_compatible_with_context_filter(
+    record: IndependenceRecord,
+    context_filter: ContextFilter,
+) -> bool:
+    if context_filter.store_id and record.store_id != context_filter.store_id:
+        return False
+    if context_filter.context_id and record.context_id != context_filter.context_id:
+        return False
+    return not (context_filter.domain and record.metadata.get("domain") != context_filter.domain)
+
+
+def _exclusive_pair(
+    left: str,
+    right: str,
+    groups: list[ExclusiveGroupRecord],
+    context_filter: ContextFilter,
+) -> bool:
+    return any(
+        left in group.members
+        and right in group.members
+        and _exclusive_group_compatible_with_context_filter(group, context_filter)
+        for group in groups
+    )
 
 
 def _metadata_independent_of(metadata: dict[str, Any], if_not: str) -> bool:
@@ -1084,7 +1179,27 @@ def _load_relation_set_data(
             f"Read relation set from {real_path}."
         ]
 
+    if payload.source_type == LoadSourceType.RESOURCE_URI:
+        if payload.resource_uri is None:
+            raise ValueError("resource_uri is required when source_type=resource_uri")
+        real_path, text = _read_resource_uri(payload.resource_uri, store)
+        return _parse_relation_set_text(text, real_path.suffix), [
+            f"Read relation set from resource URI {payload.resource_uri}."
+        ]
+
     raise ValueError(f"unsupported source_type: {payload.source_type.value}")
+
+
+def _read_resource_uri(resource_uri: str, store: RelationStore) -> tuple[Path, str]:
+    parsed = urlparse(resource_uri)
+    if parsed.scheme != "file":
+        raise ValueError(f"resource_uri scheme is not supported in v0.7: {parsed.scheme}")
+    if parsed.netloc not in {"", "localhost"}:
+        raise ValueError("file resource_uri host must be empty or localhost")
+    path = unquote(parsed.path)
+    if not path:
+        raise ValueError("file resource_uri is missing a path")
+    return read_allowed_relation_file(path, store.config)
 
 
 def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
@@ -1093,31 +1208,40 @@ def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
     if suffix == ".jsonl":
         relations = []
         exclusive_groups = []
+        independence_records = []
         context_metadata: dict[str, Any] = {}
         for line_number, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             item = json.loads(stripped)
+            if not isinstance(item, dict):
+                raise ValueError(f"line {line_number} must be a JSON object")
             item_type = item.get("type")
             record = item.get("record", item)
+            if not isinstance(record, dict):
+                raise ValueError(f"line {line_number} record must be a JSON object")
             if item_type == "context_metadata":
                 context_id = item.get("context_id")
                 if not context_id:
                     raise ValueError(f"line {line_number} context_metadata is missing context_id")
                 context_metadata[str(context_id)] = record
+            elif item_type == "independence_record" or record.get("relation") == "independent_of":
+                independence_records.append(record)
             elif item_type == "exclusive_group" or "members" in record:
                 exclusive_groups.append(record)
             elif item_type == "relation" or "relation_type" in record:
                 relations.append(record)
             else:
                 raise ValueError(
-                    f"line {line_number} is not a relation, exclusive group, or context metadata"
+                    f"line {line_number} is not a relation, exclusive group, "
+                    "independence record, or context metadata"
                 )
         return RelationSetData.model_validate(
             {
                 "relations": relations,
                 "exclusive_groups": exclusive_groups,
+                "independence_records": independence_records,
                 "context_metadata": context_metadata,
             }
         )
@@ -1127,22 +1251,27 @@ def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
 def _relation_set_export(
     relations: list[RelationRecord],
     exclusive_groups: list[ExclusiveGroupRecord],
+    independence_records: list[IndependenceRecord],
     *,
     context_metadata: dict[str, Any],
     include_metadata: bool,
 ) -> dict[str, Any]:
     relation_items = [_record_dump(record) for record in relations]
     group_items = [_exclusive_group_dump(group) for group in exclusive_groups]
+    independence_items = [_independence_record_dump(record) for record in independence_records]
     if not include_metadata:
         for item in relation_items:
             item.pop("metadata", None)
             item.pop("provenance", None)
         for item in group_items:
             item.pop("metadata", None)
+        for item in independence_items:
+            item.pop("metadata", None)
     return {
         "version": "2.0",
         "relations": relation_items,
         "exclusive_groups": group_items,
+        "independence_records": independence_items,
         "context_metadata": context_metadata,
     }
 
@@ -1151,10 +1280,12 @@ def _context_metadata_for_export(
     context_metadata: dict[str, Any],
     relations: list[RelationRecord],
     exclusive_groups: list[ExclusiveGroupRecord],
+    independence_records: list[IndependenceRecord],
 ) -> dict[str, Any]:
     context_ids = {relation.context_id for relation in relations}
     context_ids.update(group.context_id for group in exclusive_groups)
-    if not context_ids and not relations and not exclusive_groups:
+    context_ids.update(record.context_id for record in independence_records)
+    if not context_ids and not relations and not exclusive_groups and not independence_records:
         return {}
     return {
         context_id: context_metadata[context_id]
@@ -1178,6 +1309,14 @@ def _serialize_relation_set(data: dict[str, Any], export_format: ExportFormat) -
             sort_keys=True,
         )
         for group in data["exclusive_groups"]
+    )
+    lines.extend(
+        json.dumps(
+            {"type": "independence_record", "record": record},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for record in data["independence_records"]
     )
     lines.extend(
         json.dumps(
@@ -1205,6 +1344,25 @@ def _exclusive_group_matches_filter(
     return not (
         relation_filter.domain is not None
         and group.metadata.get("domain") != relation_filter.domain
+    )
+
+
+def _independence_record_matches_filter(
+    record: IndependenceRecord,
+    relation_filter: RelationFilter,
+) -> bool:
+    pair = {record.left, record.right}
+    if relation_filter.source is not None and relation_filter.source not in pair:
+        return False
+    if relation_filter.target is not None and relation_filter.target not in pair:
+        return False
+    if relation_filter.context_id is not None and record.context_id != relation_filter.context_id:
+        return False
+    if relation_filter.store_id is not None and record.store_id != relation_filter.store_id:
+        return False
+    return not (
+        relation_filter.domain is not None
+        and record.metadata.get("domain") != relation_filter.domain
     )
 
 
@@ -1340,6 +1498,13 @@ def _groups_for_store(
     return [group.model_copy(update={"store_id": store_id}) for group in groups]
 
 
+def _independence_for_store(
+    records: list[IndependenceRecord],
+    store_id: str,
+) -> list[IndependenceRecord]:
+    return [record.model_copy(update={"store_id": store_id}) for record in records]
+
+
 def _load_error(code: str, message: str, store: RelationStore) -> dict[str, Any]:
     diagnostic = Diagnostic(level="error", code=code, message=message)
     return {
@@ -1440,6 +1605,10 @@ def _exclusive_group_dump(group: ExclusiveGroupRecord) -> dict[str, Any]:
     return group.model_dump(mode="json")
 
 
+def _independence_record_dump(record: IndependenceRecord) -> dict[str, Any]:
+    return record.model_dump(mode="json")
+
+
 def _temporary_fact_records(payload: CheckContradictionsInput) -> list[RelationRecord]:
     records: list[RelationRecord] = []
     for index, fact in enumerate(payload.facts):
@@ -1481,18 +1650,98 @@ def _implication_result(paths: list, start: str, end: str) -> dict[str, Any]:
     }
 
 
-def _necessity_status(reverse_paths: list) -> dict[str, Any]:
+def _necessity_status(
+    reverse_paths: list,
+    *,
+    source: str,
+    target: str,
+    index: Any,
+    context_filter: ContextFilter,
+    max_depth: int,
+    confidence_policy: Any,
+    direct_only: bool,
+    relation_map: dict[str, RelationRecord],
+    independence_records: list[IndependenceRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
+) -> dict[str, Any]:
     if reverse_paths:
         return {
             "status": "proven_necessary",
             "reason": "Target implies source under the current graph and context filter.",
         }
+    counterexample = _non_necessity_counterexample(
+        source,
+        target,
+        index,
+        context_filter,
+        max_depth=max_depth,
+        confidence_policy=confidence_policy,
+        direct_only=direct_only,
+        relation_map=relation_map,
+        independence_records=independence_records,
+        exclusive_groups=exclusive_groups,
+    )
+    if counterexample is not None:
+        return counterexample
     return {
         "status": "unknown",
         "reason": (
-            "No proof that target implies source; absence of proof is not proof of non-necessity."
+            "Alternative sufficient causes do not disprove necessity unless independence "
+            "or counterexample is established."
         ),
     }
+
+
+def _non_necessity_counterexample(
+    source: str,
+    target: str,
+    index: Any,
+    context_filter: ContextFilter,
+    *,
+    max_depth: int,
+    confidence_policy: Any,
+    direct_only: bool,
+    relation_map: dict[str, RelationRecord],
+    independence_records: list[IndependenceRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
+) -> dict[str, Any] | None:
+    if source == target:
+        return None
+    for candidate in sorted(str(node) for node in index.graph.nodes):
+        if candidate in {source, target}:
+            continue
+        paths = index.find_paths(
+            candidate,
+            target,
+            max_depth=max_depth,
+            strategy=PathStrategy.BEST_CONFIDENCE,
+            max_paths=1,
+            confidence_policy=confidence_policy,
+            direct_only=direct_only,
+        )
+        for path in paths:
+            if not path.edges or source in path.nodes:
+                continue
+            if (
+                _path_independence_from_if_not(
+                    path,
+                    relation_map,
+                    independence_records,
+                    exclusive_groups,
+                    source,
+                    context_filter,
+                )
+                != "proven"
+            ):
+                continue
+            return {
+                "status": "proven_not_necessary",
+                "reason": "Found an independent counterexample path to target.",
+                "counterexample": candidate,
+                "proof": f"{candidate} -> {target} and {candidate} independent_of {source}",
+                "path": path_to_dict(path),
+            }
+    return None
 
 
 def _classify_paths(fwd_paths: list, rev_paths: list, include_paths: bool) -> list[dict[str, Any]]:
