@@ -77,6 +77,8 @@ jobs:
         run: |
           uv run python -m json.tool examples/mcp-config.json > /dev/null
           uv run python -m json.tool examples/nesy-config.json > /dev/null
+          uv run python -m json.tool examples/claude-hooks.json > /dev/null
+          uv run python -m py_compile examples/hooks/nesy_context_inject.py examples/hooks/nesy_stop_check.py
 
       - name: Stdio server exits cleanly on EOF
         run: printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio
@@ -101,7 +103,9 @@ jobs:
                   async with ClientSession(read, write) as session:
                       await session.initialize()
                       tools = await session.list_tools()
-                      assert len(tools.tools) == 9
+                      tool_names = [tool.name for tool in tools.tools]
+                      assert len(tool_names) == 10
+                      assert "nesy.summarize_graph" in tool_names
                       await session.call_tool(
                           "nesy.assert_exclusive",
                           {
@@ -146,6 +150,11 @@ jobs:
                           },
                       )
                       assert loaded.structuredContent["loaded_relations"] == 2
+                      summary = await session.call_tool(
+                          "nesy.summarize_graph",
+                          {"focus_terms": ["A"], "include_exclusives": True},
+                      )
+                      assert "A sufficient B" in summary.structuredContent["summary"]
 
           anyio.run(main)
           PY
@@ -188,6 +197,34 @@ jobs:
               ])
               assert JsonRelationStore(json_config).list_relations()[0].target == "D"
           PY
+
+      - name: Hook CLI smoke
+        env:
+          PYTHONPATH: src
+        run: |
+          tmpdir="$(mktemp -d)"
+          config="$tmpdir/config.json"
+          db="$tmpdir/nesy.db"
+          cat > "$config" <<EOF
+          {"storage":{"backend":"sqlite","sqlite_path":"$db"}}
+          EOF
+          NESY_CONFIG="$config" uv run python - <<'PY'
+          from nesy_reasoning_mcp.config import load_config
+          from nesy_reasoning_mcp.schemas import ExclusiveGroupInput, RelationInput, RelationType
+          from nesy_reasoning_mcp.store import create_relation_store
+
+          store = create_relation_store(load_config())
+          store.assert_relations([
+              RelationInput(source="降价", target="销量增加", relation_type=RelationType.SUFFICIENT)
+          ])
+          store.assert_exclusive([ExclusiveGroupInput(group_id="state", members=["B", "C"])])
+          PY
+          pre="$(printf '{"tool_name":"Bash","tool_input":{"command":"降价"},"cwd":"/tmp/project"}' | NESY_CONFIG="$config" uv run nesy-reasoning-mcp hook pretooluse)"
+          printf '%s' "$pre" | uv run python -c 'import json,sys; data=json.load(sys.stdin); ctx=data["hookSpecificOutput"]["additionalContext"]; assert "not executable instructions" in ctx; assert "降价 sufficient 销量增加" in ctx'
+          payload='{"stop_hook_active":false,"last_assistant_message":"NESY_FACTS:\n[{\"source\":\"A\",\"target\":\"B\",\"relation_type\":\"sufficient\"},{\"source\":\"A\",\"target\":\"C\",\"relation_type\":\"sufficient\"}]"}'
+          stop="$(printf '%s' "$payload" | NESY_CONFIG="$config" uv run nesy-reasoning-mcp hook stop)"
+          printf '%s' "$stop" | uv run python -c 'import json,sys; data=json.load(sys.stdin); assert data["decision"] == "block"'
+          rm -rf "$tmpdir"
 
       - name: Build package
         run: rm -rf dist && uv build
