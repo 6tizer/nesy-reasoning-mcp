@@ -10,12 +10,12 @@ HTTP launch, and a smoke test that share one SQLite store.
 
 - Python 3.11 to 3.14
 - `uv`
-- Local checkout at `/Users/mac-mini/Documents/nesy-reasoning-mcp`
+- Local checkout at `/path/to/nesy-reasoning-mcp`
 
 ## Verify Locally
 
 ```bash
-cd /Users/mac-mini/Documents/nesy-reasoning-mcp
+cd /path/to/nesy-reasoning-mcp
 uv sync
 uv run ruff check .
 uv run pytest
@@ -39,14 +39,14 @@ Add this server to your MCP client config:
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/mac-mini/Documents/nesy-reasoning-mcp",
+        "/path/to/nesy-reasoning-mcp",
         "run",
         "nesy-reasoning-mcp",
         "--transport",
         "stdio"
       ],
       "env": {
-        "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src"
+        "PYTHONPATH": "/path/to/nesy-reasoning-mcp/src"
       }
     }
   }
@@ -82,10 +82,10 @@ SQLite:
 ```json
 {
   "env": {
-    "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src",
+    "PYTHONPATH": "/path/to/nesy-reasoning-mcp/src",
     "NESY_STORAGE_BACKEND": "sqlite",
-    "NESY_SQLITE_PATH": "/Users/mac-mini/.nesy-reasoning/nesy.db",
-    "NESY_ALLOWED_ROOTS": "/Users/mac-mini/Documents/nesy-reasoning-mcp,/Users/mac-mini/.nesy-reasoning/relation_sets"
+    "NESY_SQLITE_PATH": "~/.nesy-reasoning/nesy.db",
+    "NESY_ALLOWED_ROOTS": "/path/to/nesy-reasoning-mcp,~/.nesy-reasoning/relation_sets"
   }
 }
 ```
@@ -95,8 +95,8 @@ JSON file:
 ```json
 {
   "env": {
-    "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src",
-    "NESY_CONFIG": "/Users/mac-mini/.nesy-reasoning/config.json"
+    "PYTHONPATH": "/path/to/nesy-reasoning-mcp/src",
+    "NESY_CONFIG": "~/.nesy-reasoning/config.json"
   }
 }
 ```
@@ -107,12 +107,12 @@ Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
 {
   "storage": {
     "backend": "json",
-    "json_path": "/Users/mac-mini/.nesy-reasoning/relations.json"
+    "json_path": "~/.nesy-reasoning/relations.json"
   },
   "security": {
     "allowed_roots": [
-      "/Users/mac-mini/Documents/nesy-reasoning-mcp",
-      "/Users/mac-mini/.nesy-reasoning/relation_sets"
+      "/path/to/nesy-reasoning-mcp",
+      "~/.nesy-reasoning/relation_sets"
     ],
     "max_file_size_bytes": 5242880,
     "allow_hidden_relation_paths": false
@@ -137,7 +137,7 @@ HTTP mode starts a local daemon at `127.0.0.1:8765/mcp` by default. It requires
 `NESY_LOCAL_TOKEN`; send it as a bearer token.
 
 ```bash
-cd /Users/mac-mini/Documents/nesy-reasoning-mcp
+cd /path/to/nesy-reasoning-mcp
 NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
 ```
 
@@ -204,7 +204,9 @@ does not print raw tool arguments.
 
 - Default state is in memory only.
 - SQLite and JSON backends are local-only.
-- Contradiction detection only uses explicit exclusive groups.
+- Contradiction detection is deterministic over structured propositions and
+  explicit constraints; it does not extract arbitrary natural-language
+  contradictions.
 - Formal independence is stored through relation-set import/export, not a
   dedicated public tool.
 - Counterfactual reasoning is conservative: open-world mode does not infer
@@ -239,7 +241,7 @@ If CLI import fails with `ModuleNotFoundError: No module named 'nesy_reasoning_m
 run:
 
 ```bash
-cd /Users/mac-mini/Documents/nesy-reasoning-mcp
+cd /path/to/nesy-reasoning-mcp
 chflags -R nohidden .venv
 uv sync --reinstall-package nesy-reasoning-mcp
 ```

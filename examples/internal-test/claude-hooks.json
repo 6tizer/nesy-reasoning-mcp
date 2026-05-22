@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/hook-pretooluse.sh"
+            "command": "bash /path/to/nesy-reasoning-mcp/examples/internal-test/hook-pretooluse.sh"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/hook-stop.sh"
+            "command": "bash /path/to/nesy-reasoning-mcp/examples/internal-test/hook-stop.sh"
           }
         ]
       }

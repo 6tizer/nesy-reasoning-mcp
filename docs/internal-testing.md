@@ -22,7 +22,7 @@ mkdir -p ~/.nesy-reasoning/internal-test ~/.nesy-reasoning/relation_sets
 Run the profile smoke test:
 
 ```bash
-cd /Users/mac-mini/Documents/nesy-reasoning-mcp
+cd /path/to/nesy-reasoning-mcp
 env PYTHONPATH=src uv run python examples/internal-test/smoke.py
 ```
 
@@ -51,7 +51,7 @@ MCP server restarts preserve relations.
 Start the local daemon:
 
 ```bash
-bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/run-http.sh
+bash /path/to/nesy-reasoning-mcp/examples/internal-test/run-http.sh
 ```
 
 The default token is `nesy-internal-test-token`. Override it before launch when
@@ -59,7 +59,7 @@ needed:
 
 ```bash
 NESY_LOCAL_TOKEN='change-me' \
-  bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/run-http.sh
+  bash /path/to/nesy-reasoning-mcp/examples/internal-test/run-http.sh
 ```
 
 Health check:
@@ -157,7 +157,7 @@ Mutating tools write audit entries when `logging.audit_log=true`. Inspect recent
 entries through the local CLI:
 
 ```bash
-NESY_CONFIG=/Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/nesy-config.json \
+NESY_CONFIG=/path/to/nesy-reasoning-mcp/examples/internal-test/nesy-config.json \
   uv run nesy-reasoning-mcp audit list --format json --limit 20
 ```
 

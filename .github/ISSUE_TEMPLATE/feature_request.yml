@@ -6,16 +6,15 @@ body:
   - type: dropdown
     id: phase
     attributes:
-      label: Target version
+      label: Area
       options:
-        - v0.4 persistence/import/export
-        - v0.5 graph summary/hooks
-        - v0.6 HTTP daemon/counterfactual
-        - v0.7 independence/resource URI
-        - v0.8 evaluation/security docs
-        - v0.9 file access security
-        - v1.0 compliance/evaluation
-        - later
+        - v1.x enhancement
+        - docs/examples
+        - storage/deployment
+        - hooks/integration
+        - evaluation
+        - future research
+        - not sure
     validations:
       required: true
   - type: textarea

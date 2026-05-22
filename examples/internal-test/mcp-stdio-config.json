@@ -4,15 +4,15 @@
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/mac-mini/Documents/nesy-reasoning-mcp",
+        "/path/to/nesy-reasoning-mcp",
         "run",
         "nesy-reasoning-mcp",
         "--transport",
         "stdio"
       ],
       "env": {
-        "PYTHONPATH": "/Users/mac-mini/Documents/nesy-reasoning-mcp/src",
-        "NESY_CONFIG": "/Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/nesy-config.json"
+        "PYTHONPATH": "/path/to/nesy-reasoning-mcp/src",
+        "NESY_CONFIG": "/path/to/nesy-reasoning-mcp/examples/internal-test/nesy-config.json"
       }
     }
   }

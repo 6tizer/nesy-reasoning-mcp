@@ -17,7 +17,7 @@ for local internal testing.
 ## Quick Smoke
 
 ```bash
-cd /Users/mac-mini/Documents/nesy-reasoning-mcp
+cd /path/to/nesy-reasoning-mcp
 env PYTHONPATH=src uv run python examples/internal-test/smoke.py
 ```
 
@@ -38,7 +38,7 @@ set.
 Run:
 
 ```bash
-bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/run-http.sh
+bash /path/to/nesy-reasoning-mcp/examples/internal-test/run-http.sh
 ```
 
 The default token is `nesy-internal-test-token`. Override it with

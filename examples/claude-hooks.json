@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "NESY_CONFIG=/Users/mac-mini/.nesy-reasoning/nesy-config.json uv --directory /Users/mac-mini/Documents/nesy-reasoning-mcp run nesy-reasoning-mcp hook pretooluse"
+            "command": "NESY_CONFIG=~/.nesy-reasoning/nesy-config.json uv --directory /path/to/nesy-reasoning-mcp run nesy-reasoning-mcp hook pretooluse"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "NESY_CONFIG=/Users/mac-mini/.nesy-reasoning/nesy-config.json uv --directory /Users/mac-mini/Documents/nesy-reasoning-mcp run nesy-reasoning-mcp hook stop"
+            "command": "NESY_CONFIG=~/.nesy-reasoning/nesy-config.json uv --directory /path/to/nesy-reasoning-mcp run nesy-reasoning-mcp hook stop"
           }
         ]
       }

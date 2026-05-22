@@ -7,7 +7,7 @@
   },
   "security": {
     "allowed_roots": [
-      "/Users/mac-mini/Documents/nesy-reasoning-mcp",
+      "/path/to/nesy-reasoning-mcp",
       "~/.nesy-reasoning/relation_sets"
     ],
     "max_file_size_bytes": 5242880,

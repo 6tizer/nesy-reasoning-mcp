@@ -1,6 +1,6 @@
 # SPEC Compliance
 
-Status for `nesy-reasoning-mcp-spec-v2.md` at v1.0.
+Status for [`docs/spec-v2.md`](docs/spec-v2.md) at v1.0.
 
 ## Core Phases
 

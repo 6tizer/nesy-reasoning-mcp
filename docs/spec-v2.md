@@ -2353,7 +2353,7 @@ Stop hook 输入包含：
 {
   "session_id": "abc123",
   "transcript_path": "~/.claude/projects/.../session.jsonl",
-  "cwd": "/Users/...",
+  "cwd": "/path/to/workspace",
   "permission_mode": "default",
   "hook_event_name": "Stop",
   "stop_hook_active": false,
@@ -2444,7 +2444,7 @@ PreToolUse hook 在 Claude 已生成工具参数、工具执行前运行。输�
     "command": "npm test"
   },
   "tool_use_id": "toolu_...",
-  "cwd": "/Users/..."
+  "cwd": "/path/to/workspace"
 }
 ```
 

@@ -1,14 +1,14 @@
 {
   "storage": {
     "backend": "sqlite",
-    "sqlite_path": "/Users/mac-mini/.nesy-reasoning/nesy.db",
+    "sqlite_path": "~/.nesy-reasoning/nesy.db",
     "default_store_id": "default",
     "default_context_id": "default"
   },
   "security": {
     "allowed_roots": [
-      "/Users/mac-mini/Documents/nesy-reasoning-mcp",
-      "/Users/mac-mini/.nesy-reasoning/relation_sets"
+      "/path/to/nesy-reasoning-mcp",
+      "~/.nesy-reasoning/relation_sets"
     ],
     "max_file_size_bytes": 5242880,
     "allow_scope_all_clear": false,

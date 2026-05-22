@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${NESY_REPO_DIR:-/Users/mac-mini/Documents/nesy-reasoning-mcp}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${NESY_REPO_DIR:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 export NESY_CONFIG="${NESY_CONFIG:-$REPO_DIR/examples/internal-test/nesy-config.json}"
 export NESY_LOCAL_TOKEN="${NESY_LOCAL_TOKEN:-nesy-internal-test-token}"
 export PYTHONPATH="${PYTHONPATH:-$REPO_DIR/src}"
