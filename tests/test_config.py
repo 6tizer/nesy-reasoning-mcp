@@ -76,3 +76,46 @@ def test_hook_config_file_and_env_override(tmp_path: Path) -> None:
     assert config.hook.context_id == "from_env"
     assert config.hook.domain == "from_env_domain"
     assert config.hook.context_from_session is True
+
+
+def test_http_config_file_and_env_override(tmp_path: Path) -> None:
+    config_path = tmp_path / "nesy.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "http": {
+                    "host": "127.0.0.2",
+                    "port": 9000,
+                    "path": "/custom",
+                    "local_token": "from-file",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        env={
+            "NESY_CONFIG": str(config_path),
+            "NESY_HTTP_HOST": "127.0.0.1",
+            "NESY_HTTP_PORT": "8766",
+            "NESY_HTTP_PATH": "/mcp",
+            "NESY_LOCAL_TOKEN": "from-env",
+            "NESY_HTTP_ALLOWED_ORIGINS": "http://127.0.0.1:8766,http://localhost:8766",
+            "NESY_HTTP_ALLOWED_HOSTS": "127.0.0.1:8766,localhost:8766",
+            "NESY_HTTP_MAX_BODY_BYTES": "2048",
+            "NESY_HTTP_REQUEST_TIMEOUT_SECONDS": "7",
+            "NESY_HTTP_RATE_LIMIT_PER_MINUTE": "11",
+        },
+        cwd=tmp_path,
+    )
+
+    assert config.http.host == "127.0.0.1"
+    assert config.http.port == 8766
+    assert config.http.path == "/mcp"
+    assert config.http.local_token == "from-env"
+    assert config.http.allowed_origins == ["http://127.0.0.1:8766", "http://localhost:8766"]
+    assert config.http.allowed_hosts == ["127.0.0.1:8766", "localhost:8766"]
+    assert config.http.max_body_bytes == 2048
+    assert config.http.request_timeout_seconds == 7
+    assert config.http.rate_limit_per_minute == 11

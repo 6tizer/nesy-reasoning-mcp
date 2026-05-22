@@ -23,6 +23,7 @@ from nesy_reasoning_mcp.reasoning import (
     relations_compatible_with_filter,
 )
 from nesy_reasoning_mcp.schemas import (
+    DEFAULT_CONTEXT_ID,
     AssertExclusiveInput,
     AssertRelationsInput,
     CheckContradictionsInput,
@@ -31,6 +32,7 @@ from nesy_reasoning_mcp.schemas import (
     ClearRelationsInput,
     ContextFilter,
     ContradictionMode,
+    CounterfactualInput,
     Diagnostic,
     ExclusiveGroupRecord,
     ExpectedRelation,
@@ -40,11 +42,14 @@ from nesy_reasoning_mcp.schemas import (
     ListRelationsInput,
     LoadRelationsInput,
     LoadSourceType,
+    PathStrategy,
     RelationFilter,
     RelationRecord,
     RelationSetData,
+    RelationType,
     SummarizeGraphInput,
     VerifyChainInput,
+    WorldMode,
 )
 from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
 
@@ -58,6 +63,7 @@ CHECK_CONTRADICTIONS = "nesy.check_contradictions"
 LOAD_RELATIONS = "nesy.load_relations"
 EXPORT_RELATIONS = "nesy.export_relations"
 SUMMARIZE_GRAPH = "nesy.summarize_graph"
+COUNTERFACTUAL = "nesy.counterfactual"
 
 
 def get_tools() -> list[Tool]:
@@ -154,6 +160,16 @@ def get_tools() -> list[Tool]:
             inputSchema=SummarizeGraphInput.model_json_schema(),
             outputSchema=_summarize_graph_output_schema(),
         ),
+        Tool(
+            name=COUNTERFACTUAL,
+            title="Counterfactual Reasoning",
+            description=(
+                "Analyze what is necessarily blocked, possibly blocked, still possible, "
+                "or unknown if a proposition is assumed false."
+            ),
+            inputSchema=CounterfactualInput.model_json_schema(),
+            outputSchema=_counterfactual_output_schema(),
+        ),
     ]
 
 
@@ -170,6 +186,7 @@ async def call_tool(name: str, arguments: dict[str, Any], store: RelationStore) 
         LOAD_RELATIONS: load_relations,
         EXPORT_RELATIONS: export_relations,
         SUMMARIZE_GRAPH: summarize_graph,
+        COUNTERFACTUAL: counterfactual,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -503,6 +520,7 @@ async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dic
             incoming_groups,
             mode=payload.mode.value,
             store_id=payload.store_id,
+            context_metadata=data.context_metadata,
             dry_run=payload.validate_only,
         )
     except Exception as exc:
@@ -545,6 +563,11 @@ async def export_relations(arguments: dict[str, Any], store: RelationStore) -> d
     exported = _relation_set_export(
         relations,
         exclusive_groups,
+        context_metadata=(
+            _context_metadata_for_export(store.context_metadata(), relations, exclusive_groups)
+            if payload.include_metadata
+            else {}
+        ),
         include_metadata=payload.include_metadata,
     )
     text = _serialize_relation_set(exported, payload.format)
@@ -644,6 +667,397 @@ async def summarize_graph(arguments: dict[str, Any], store: RelationStore) -> di
     }
 
 
+async def counterfactual(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
+    """Handle `nesy.counterfactual`."""
+    payload = CounterfactualInput.model_validate(arguments)
+    index = build_graph(store.list_relations(), payload.context_filter)
+    targets = _counterfactual_targets(payload, index.graph.nodes)
+    relation_map = {relation.id: relation for relation in index.relations}
+    diagnostics = _counterfactual_diagnostics(payload, store.context_metadata())
+    necessarily_blocked: list[dict[str, Any]] = []
+    possibly_blocked: list[dict[str, Any]] = []
+    still_possible: list[dict[str, Any]] = []
+    unknown: list[dict[str, Any]] = []
+    not_derivably_affected: list[str] = []
+    trace = [f"Assume not {payload.if_not}."]
+
+    for target in targets:
+        if target == payload.if_not:
+            necessarily_blocked.append(_counterfactual_self_blocked(payload.if_not))
+            trace.append(f"{target} is directly blocked by the intervention.")
+            continue
+
+        dependency_paths = index.find_paths(
+            target,
+            payload.if_not,
+            max_depth=payload.max_depth,
+            strategy=PathStrategy.BEST_CONFIDENCE,
+            max_paths=1,
+            confidence_policy=payload.confidence_policy,
+        )
+        if dependency_paths:
+            necessarily_blocked.append(
+                _counterfactual_necessary_item(payload.if_not, target, dependency_paths[0])
+            )
+            trace.append(f"{target} implies {payload.if_not}; classified as necessarily_blocked.")
+            continue
+
+        blocked_paths = index.find_paths(
+            payload.if_not,
+            target,
+            max_depth=payload.max_depth,
+            strategy=PathStrategy.BEST_CONFIDENCE,
+            max_paths=1,
+            confidence_policy=payload.confidence_policy,
+        )
+        if blocked_paths:
+            alternatives = _counterfactual_alternative_paths(
+                index,
+                relation_map,
+                target=target,
+                if_not=payload.if_not,
+                payload=payload,
+            )
+            proven_alternatives = [
+                alternative
+                for alternative in alternatives
+                if alternative["independence_from_if_not"] == "proven"
+            ]
+            if proven_alternatives:
+                still_possible.append(
+                    _counterfactual_still_possible_item(
+                        payload.if_not,
+                        target,
+                        blocked_paths[0],
+                        proven_alternatives,
+                        payload.include_alternative_paths,
+                    )
+                )
+                trace.append(
+                    f"{target} has an alternative path proven independent of {payload.if_not}."
+                )
+            else:
+                possibly_blocked.append(
+                    _counterfactual_possible_item(
+                        payload.if_not,
+                        target,
+                        blocked_paths[0],
+                        alternatives,
+                        payload.include_alternative_paths,
+                    )
+                )
+                trace.append(f"{payload.if_not} implies {target}; classified as possibly_blocked.")
+            continue
+
+        unknown.append(_counterfactual_unknown_item(payload.if_not, target))
+        not_derivably_affected.append(target)
+        trace.append(f"No dependency path found between {payload.if_not} and {target}.")
+
+    if payload.world_mode == WorldMode.CLOSED and _causal_completeness_declared(
+        payload,
+        store.context_metadata(),
+    ):
+        possibly_blocked, closed_upgrades = _closed_world_upgrades(
+            payload,
+            index,
+            possibly_blocked,
+        )
+        necessarily_blocked.extend(closed_upgrades)
+        if closed_upgrades:
+            trace.append(
+                "Closed-world causal_completeness used to upgrade possible blocks to necessary."
+            )
+
+    return {
+        "status": "warning" if any(item.level == "warning" for item in diagnostics) else "ok",
+        "if_not": payload.if_not,
+        "world_mode": payload.world_mode.value,
+        "necessarily_blocked": necessarily_blocked,
+        "possibly_blocked": possibly_blocked,
+        "still_possible": still_possible,
+        "unknown": unknown,
+        "not_derivably_affected": not_derivably_affected,
+        "diagnostics": [diagnostic.model_dump(mode="json") for diagnostic in diagnostics],
+        "trace": trace,
+        "graph_stats": index.graph_stats,
+    }
+
+
+def _counterfactual_targets(payload: CounterfactualInput, nodes: Any) -> list[str]:
+    if payload.targets:
+        return payload.targets
+    return sorted(str(node) for node in nodes if str(node) != payload.if_not)
+
+
+def _counterfactual_diagnostics(
+    payload: CounterfactualInput,
+    context_metadata: dict[str, Any],
+) -> list[Diagnostic]:
+    if payload.world_mode == WorldMode.OPEN:
+        return [
+            Diagnostic(
+                level="info",
+                code="OPEN_WORLD_DEFAULT",
+                message="No missing or alternative path is treated as proof of impossibility.",
+            )
+        ]
+    if _causal_completeness_declared(payload, context_metadata):
+        return [
+            Diagnostic(
+                level="info",
+                code="CLOSED_WORLD_CAUSAL_COMPLETENESS_DECLARED",
+                message="Closed-world upgrades may use context causal_completeness metadata.",
+            )
+        ]
+    return [
+        Diagnostic(
+            level="warning",
+            code="CLOSED_WORLD_COMPLETENESS_NOT_DECLARED",
+            message="Closed-world mode requested, but context causal_completeness is not true.",
+        )
+    ]
+
+
+def _counterfactual_self_blocked(if_not: str) -> dict[str, Any]:
+    return {
+        "target": if_not,
+        "proof": {
+            "type": "intervention",
+            "path": [if_not],
+            "meaning": f"{if_not} is assumed false by the counterfactual intervention.",
+        },
+        "logic_validity": True,
+        "evidence_confidence": 1.0,
+    }
+
+
+def _counterfactual_necessary_item(if_not: str, target: str, path: Any) -> dict[str, Any]:
+    return {
+        "target": target,
+        "proof": {
+            "type": "necessary_condition",
+            "path": path.nodes,
+            "meaning": f"{target} implies {if_not}; therefore not {if_not} implies not {target}.",
+        },
+        "logic_validity": True,
+        "evidence_confidence": path.evidence_confidence,
+    }
+
+
+def _counterfactual_possible_item(
+    if_not: str,
+    target: str,
+    blocked_path: Any,
+    alternative_paths: list[dict[str, Any]],
+    include_alternative_paths: bool,
+) -> dict[str, Any]:
+    item = {
+        "target": target,
+        "reason": (
+            f"{if_not} is a sufficient path to {target}, but absence of {if_not} does not "
+            "logically imply absence of the target under open-world semantics."
+        ),
+        "blocked_path": blocked_path.nodes,
+        "evidence_confidence": blocked_path.evidence_confidence,
+    }
+    if include_alternative_paths:
+        item["alternative_paths"] = alternative_paths
+    return item
+
+
+def _counterfactual_still_possible_item(
+    if_not: str,
+    target: str,
+    blocked_path: Any,
+    alternative_paths: list[dict[str, Any]],
+    include_alternative_paths: bool,
+) -> dict[str, Any]:
+    item = {
+        "target": target,
+        "reason": f"At least one alternative sufficient path is proven independent of {if_not}.",
+        "blocked_path": blocked_path.nodes,
+        "logic_validity": True,
+        "evidence_confidence": blocked_path.evidence_confidence,
+    }
+    if include_alternative_paths:
+        item["alternative_paths"] = alternative_paths
+    return item
+
+
+def _counterfactual_unknown_item(if_not: str, target: str) -> dict[str, Any]:
+    return {
+        "target": target,
+        "reason": (
+            f"No necessary dependency on {if_not} and no sufficient path from {if_not} was "
+            "found. This is unknown, not proven unaffected."
+        ),
+    }
+
+
+def _counterfactual_alternative_paths(
+    index: Any,
+    relation_map: dict[str, RelationRecord],
+    *,
+    target: str,
+    if_not: str,
+    payload: CounterfactualInput,
+) -> list[dict[str, Any]]:
+    alternatives: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for start in sorted(str(node) for node in index.graph.nodes):
+        if start in {if_not, target}:
+            continue
+        paths = index.find_paths(
+            start,
+            target,
+            max_depth=payload.max_depth,
+            strategy=PathStrategy.BEST_CONFIDENCE,
+            max_paths=1,
+            confidence_policy=payload.confidence_policy,
+        )
+        for path in paths:
+            key = tuple(path.nodes)
+            if not path.edges or if_not in path.nodes or key in seen:
+                continue
+            seen.add(key)
+            item = path_to_dict(path)
+            item["independence_from_if_not"] = _path_independence_from_if_not(
+                path,
+                relation_map,
+                if_not,
+            )
+            alternatives.append(item)
+    return alternatives[:5]
+
+
+def _path_independence_from_if_not(
+    path: Any,
+    relation_map: dict[str, RelationRecord],
+    if_not: str,
+) -> str:
+    if if_not in path.nodes or not path.edges:
+        return "unknown"
+    first_edge = path.edges[0]
+    relation = relation_map.get(first_edge.relation_id)
+    if relation is None:
+        return "unknown"
+    if relation.source == first_edge.antecedent and _metadata_independent_of(
+        relation.metadata,
+        if_not,
+    ):
+        return "proven"
+    if relation.source == first_edge.antecedent and _assumptions_independent_of(
+        relation.assumptions,
+        relation.source,
+        if_not,
+    ):
+        return "proven"
+    return "unknown"
+
+
+def _metadata_independent_of(metadata: dict[str, Any], if_not: str) -> bool:
+    return if_not in _metadata_string_values(metadata.get("independent_of"))
+
+
+def _metadata_string_values(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list | tuple | set):
+        values: set[str] = set()
+        for item in value:
+            values.update(_metadata_string_values(item))
+        return values
+    if isinstance(value, dict):
+        values = {
+            str(key) for key, item in value.items() if isinstance(item, bool) and item is True
+        }
+        for key in ("right", "target", "proposition", "propositions", "values"):
+            values.update(_metadata_string_values(value.get(key)))
+        return values
+    return set()
+
+
+def _assumptions_independent_of(assumptions: list[str], source: str, if_not: str) -> bool:
+    markers = {
+        f"independent_of:{if_not}",
+        f"independent_of={if_not}",
+        f"{source} independent_of {if_not}",
+        f"{if_not} independent_of {source}",
+    }
+    return bool(markers & {assumption.strip() for assumption in assumptions})
+
+
+def _causal_completeness_declared(
+    payload: CounterfactualInput,
+    context_metadata: dict[str, Any],
+) -> bool:
+    context_id = payload.context_filter.context_id or DEFAULT_CONTEXT_ID
+    metadata = context_metadata.get(context_id, {})
+    return isinstance(metadata, dict) and metadata.get("causal_completeness") is True
+
+
+def _closed_world_upgrades(
+    payload: CounterfactualInput,
+    index: Any,
+    possibly_blocked: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    remaining: list[dict[str, Any]] = []
+    upgraded: list[dict[str, Any]] = []
+    for item in possibly_blocked:
+        target = item["target"]
+        causes = _direct_sufficient_causes(index, target)
+        if causes and all(_counterfactual_cause_blocked(index, payload, cause) for cause in causes):
+            upgraded.append(
+                {
+                    "target": target,
+                    "proof": {
+                        "type": "closed_world_all_causes_blocked",
+                        "causes": causes,
+                        "meaning": (
+                            "Closed-world causal completeness is declared and all known direct "
+                            "sufficient causes are blocked."
+                        ),
+                    },
+                    "logic_validity": True,
+                    "blocked_path": item.get("blocked_path"),
+                    "evidence_confidence": item.get("evidence_confidence"),
+                }
+            )
+        else:
+            remaining.append(item)
+    return remaining, upgraded
+
+
+def _direct_sufficient_causes(index: Any, target: str) -> list[str]:
+    edges = [
+        edge
+        for edge in index.edges
+        if edge.consequent == target
+        and edge.source_relation_type in {RelationType.SUFFICIENT, RelationType.EQUIVALENT}
+    ]
+    causes: dict[str, None] = {}
+    for edge in sorted(edges, key=lambda item: (item.antecedent, item.relation_id)):
+        causes[edge.antecedent] = None
+    return list(causes)
+
+
+def _counterfactual_cause_blocked(index: Any, payload: CounterfactualInput, cause: str) -> bool:
+    if cause == payload.if_not:
+        return True
+    return bool(
+        index.find_paths(
+            cause,
+            payload.if_not,
+            max_depth=payload.max_depth,
+            strategy=PathStrategy.BEST_CONFIDENCE,
+            max_paths=1,
+            confidence_policy=payload.confidence_policy,
+        )
+    )
+
+
 def make_result(structured: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
     """Build an MCP CallToolResult with mirrored JSON text content."""
     return CallToolResult(
@@ -679,6 +1093,7 @@ def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
     if suffix == ".jsonl":
         relations = []
         exclusive_groups = []
+        context_metadata: dict[str, Any] = {}
         for line_number, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             if not stripped:
@@ -686,14 +1101,25 @@ def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
             item = json.loads(stripped)
             item_type = item.get("type")
             record = item.get("record", item)
-            if item_type == "exclusive_group" or "members" in record:
+            if item_type == "context_metadata":
+                context_id = item.get("context_id")
+                if not context_id:
+                    raise ValueError(f"line {line_number} context_metadata is missing context_id")
+                context_metadata[str(context_id)] = record
+            elif item_type == "exclusive_group" or "members" in record:
                 exclusive_groups.append(record)
             elif item_type == "relation" or "relation_type" in record:
                 relations.append(record)
             else:
-                raise ValueError(f"line {line_number} is not a relation or exclusive group")
+                raise ValueError(
+                    f"line {line_number} is not a relation, exclusive group, or context metadata"
+                )
         return RelationSetData.model_validate(
-            {"relations": relations, "exclusive_groups": exclusive_groups}
+            {
+                "relations": relations,
+                "exclusive_groups": exclusive_groups,
+                "context_metadata": context_metadata,
+            }
         )
     raise ValueError("only .json and .jsonl files are allowed")
 
@@ -702,6 +1128,7 @@ def _relation_set_export(
     relations: list[RelationRecord],
     exclusive_groups: list[ExclusiveGroupRecord],
     *,
+    context_metadata: dict[str, Any],
     include_metadata: bool,
 ) -> dict[str, Any]:
     relation_items = [_record_dump(record) for record in relations]
@@ -716,6 +1143,23 @@ def _relation_set_export(
         "version": "2.0",
         "relations": relation_items,
         "exclusive_groups": group_items,
+        "context_metadata": context_metadata,
+    }
+
+
+def _context_metadata_for_export(
+    context_metadata: dict[str, Any],
+    relations: list[RelationRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
+) -> dict[str, Any]:
+    context_ids = {relation.context_id for relation in relations}
+    context_ids.update(group.context_id for group in exclusive_groups)
+    if not context_ids and not relations and not exclusive_groups:
+        return {}
+    return {
+        context_id: context_metadata[context_id]
+        for context_id in sorted(context_ids)
+        if context_id in context_metadata
     }
 
 
@@ -734,6 +1178,18 @@ def _serialize_relation_set(data: dict[str, Any], export_format: ExportFormat) -
             sort_keys=True,
         )
         for group in data["exclusive_groups"]
+    )
+    lines.extend(
+        json.dumps(
+            {
+                "type": "context_metadata",
+                "context_id": context_id,
+                "record": metadata,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for context_id, metadata in data.get("context_metadata", {}).items()
     )
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -1423,5 +1879,26 @@ def _summarize_graph_output_schema() -> dict[str, Any]:
         "type": "object",
         "properties": props,
         "required": ["status", "summary", "relation_count_included", "truncated"],
+        "additionalProperties": False,
+    }
+
+
+def _counterfactual_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "if_not": {"type": "string"},
+            "world_mode": {"type": "string", "enum": ["open", "closed"]},
+            "necessarily_blocked": {"type": "array"},
+            "possibly_blocked": {"type": "array"},
+            "still_possible": {"type": "array"},
+            "unknown": {"type": "array"},
+            "not_derivably_affected": {"type": "array"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "if_not", "world_mode"],
         "additionalProperties": False,
     }

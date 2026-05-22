@@ -104,8 +104,9 @@ jobs:
                       await session.initialize()
                       tools = await session.list_tools()
                       tool_names = [tool.name for tool in tools.tools]
-                      assert len(tool_names) == 10
+                      assert len(tool_names) == 11
                       assert "nesy.summarize_graph" in tool_names
+                      assert "nesy.counterfactual" in tool_names
                       await session.call_tool(
                           "nesy.assert_exclusive",
                           {
@@ -155,6 +156,118 @@ jobs:
                           {"focus_terms": ["A"], "include_exclusives": True},
                       )
                       assert "A sufficient B" in summary.structuredContent["summary"]
+                      counterfactual = await session.call_tool(
+                          "nesy.counterfactual",
+                          {"if_not": "A", "targets": ["B"]},
+                      )
+                      assert counterfactual.structuredContent["possibly_blocked"][0]["target"] == "B"
+
+          anyio.run(main)
+          PY
+
+      - name: HTTP MCP client smoke
+        env:
+          PYTHONPATH: src
+        run: |
+          uv run python - <<'PY'
+          import anyio
+          import os
+          import socket
+          import subprocess
+          import sys
+          import time
+
+          import httpx
+          from mcp import ClientSession
+          from mcp.client.streamable_http import streamablehttp_client
+
+          def free_port():
+              with socket.socket() as sock:
+                  sock.bind(("127.0.0.1", 0))
+                  return sock.getsockname()[1]
+
+          async def main():
+              port = free_port()
+              env = os.environ.copy()
+              for key in list(env):
+                  if key.upper().endswith("_PROXY"):
+                      env.pop(key, None)
+              env.update(
+                  {
+                      "NO_PROXY": "127.0.0.1,localhost",
+                      "PYTHONPATH": "src",
+                      "NESY_LOCAL_TOKEN": "ci-token",
+                      "NESY_HTTP_PORT": str(port),
+                      "NESY_HTTP_RATE_LIMIT_PER_MINUTE": "1000",
+                  }
+              )
+              proc = subprocess.Popen(
+                  [sys.executable, "-m", "nesy_reasoning_mcp", "--transport", "http"],
+                  env=env,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True,
+              )
+              try:
+                  base_url = f"http://127.0.0.1:{port}"
+                  for _ in range(100):
+                      if proc.poll() is not None:
+                          raise RuntimeError(proc.stderr.read())
+                      try:
+                          response = httpx.get(
+                              f"{base_url}/healthz",
+                              headers={"Authorization": "Bearer ci-token"},
+                              timeout=0.2,
+                              trust_env=False,
+                          )
+                          if response.status_code == 200:
+                              break
+                      except httpx.HTTPError:
+                          pass
+                      time.sleep(0.05)
+                  else:
+                      raise RuntimeError("HTTP server did not become ready")
+
+                  for key in list(os.environ):
+                      if key.upper().endswith("_PROXY"):
+                          os.environ.pop(key, None)
+                  os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+                  async with streamablehttp_client(
+                      f"{base_url}/mcp",
+                      headers={"Authorization": "Bearer ci-token"},
+                      timeout=5,
+                      sse_read_timeout=5,
+                  ) as (read, write, _session_id):
+                      async with ClientSession(read, write) as session:
+                          await session.initialize()
+                          tools = await session.list_tools()
+                          assert len(tools.tools) == 11
+                          await session.call_tool(
+                              "nesy.assert_relations",
+                              {
+                                  "relations": [
+                                      {
+                                          "source": "A",
+                                          "target": "B",
+                                          "relation_type": "sufficient",
+                                      }
+                                  ],
+                                  "check_contradictions": False,
+                              },
+                          )
+                          classified = await session.call_tool(
+                              "nesy.classify",
+                              {"source": "A", "target": "B"},
+                          )
+                          assert classified.structuredContent["classification"] == "sufficient"
+              finally:
+                  proc.terminate()
+                  try:
+                      proc.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      proc.kill()
+                      proc.wait(timeout=5)
+                  assert proc.stdout.read() == ""
 
           anyio.run(main)
           PY

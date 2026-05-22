@@ -10,8 +10,8 @@ body:
       options:
         - v0.4 persistence/import/export
         - v0.5 graph summary/hooks
-        - v0.6 HTTP daemon
-        - v0.7 counterfactual
+        - v0.6 HTTP daemon/counterfactual
+        - v0.7 reasoning expansion
         - later
     validations:
       required: true

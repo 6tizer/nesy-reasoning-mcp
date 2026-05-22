@@ -1,6 +1,6 @@
 # Install NeSy Reasoning MCP
 
-This project runs as a local stdio MCP server.
+This project runs as a local MCP server over stdio or authenticated Streamable HTTP.
 
 ## Requirements
 
@@ -63,6 +63,7 @@ Then restart or reload the MCP client.
 - `nesy.load_relations`
 - `nesy.export_relations`
 - `nesy.summarize_graph`
+- `nesy.counterfactual`
 
 ## Persistent Storage
 
@@ -113,6 +114,33 @@ Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
 
 File load/export only accepts `.json` and `.jsonl` inside `allowed_roots`.
 
+## Streamable HTTP Mode
+
+HTTP mode starts a local daemon at `127.0.0.1:8765/mcp` by default. It requires
+`NESY_LOCAL_TOKEN`; send it as a bearer token.
+
+```bash
+cd /Users/mac-mini/Documents/nesy-reasoning-mcp
+NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
+```
+
+Common HTTP env overrides:
+
+- `NESY_HTTP_HOST`
+- `NESY_HTTP_PORT`
+- `NESY_HTTP_PATH`
+- `NESY_HTTP_ALLOWED_ORIGINS`
+- `NESY_HTTP_ALLOWED_HOSTS`
+- `NESY_HTTP_MAX_BODY_BYTES`
+- `NESY_HTTP_REQUEST_TIMEOUT_SECONDS`
+- `NESY_HTTP_RATE_LIMIT_PER_MINUTE`
+
+Health check:
+
+```bash
+curl -H 'Authorization: Bearer change-me' http://127.0.0.1:8765/healthz
+```
+
 ## Claude Code Hook Helpers
 
 Hook helpers run as separate processes. Use SQLite or JSON storage so hooks see
@@ -146,8 +174,10 @@ Default hook behavior is fail-open with a stderr warning. Set
 - Default state is in memory only.
 - SQLite and JSON backends are local-only.
 - Contradiction detection only uses explicit exclusive groups.
-- No counterfactual reasoning yet.
-- No HTTP daemon yet.
+- Counterfactual reasoning is conservative: open-world mode does not infer
+  negation from missing facts; closed-world upgrades require
+  `context_metadata.<context_id>.causal_completeness=true`.
+- HTTP daemon auth is a local bearer token, not multi-user auth.
 - No regex or LLM natural-language extraction in hooks yet.
 
 ## Troubleshooting

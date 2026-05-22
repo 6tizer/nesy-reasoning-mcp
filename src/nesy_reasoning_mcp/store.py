@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Iterable
+from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -126,6 +127,9 @@ class RelationStoreProtocol(Protocol):
     def list_audit_entries(self) -> list[dict[str, Any]]:
         """List audit entries."""
 
+    def context_metadata(self) -> dict[str, Any]:
+        """Return graph context metadata."""
+
     def import_records(
         self,
         relations: Iterable[RelationRecord],
@@ -133,6 +137,7 @@ class RelationStoreProtocol(Protocol):
         *,
         mode: str,
         store_id: str,
+        context_metadata: dict[str, Any] | None = None,
         dry_run: bool = False,
     ) -> tuple[int, int, int, int]:
         """Import validated records into the store."""
@@ -146,6 +151,7 @@ class MemoryRelationStore:
         self._relations: list[RelationRecord] = []
         self._exclusive_groups: list[ExclusiveGroupRecord] = []
         self._audit_log: list[AuditEntry] = []
+        self._context_metadata: dict[str, Any] = {}
 
     def assert_relations(
         self,
@@ -240,6 +246,7 @@ class MemoryRelationStore:
                 self._relations.clear()
                 if include_exclusive_groups:
                     self._exclusive_groups.clear()
+                self._context_metadata.clear()
             return removed, removed_groups
 
         if scope not in {"store", "context", "filter"}:
@@ -267,6 +274,8 @@ class MemoryRelationStore:
                 self._exclusive_groups = [
                     group for group in self._exclusive_groups if not group_matches_clear(group)
                 ]
+            if scope == "context":
+                self._context_metadata.pop(context_id, None)
         return removed, removed_groups
 
     def implication_edges(
@@ -320,6 +329,10 @@ class MemoryRelationStore:
         """List in-memory audit entries."""
         return [entry.to_dict() for entry in self._audit_log]
 
+    def context_metadata(self) -> dict[str, Any]:
+        """Return a copy of in-memory graph context metadata."""
+        return deepcopy(self._context_metadata)
+
     def import_records(
         self,
         relations: Iterable[RelationRecord],
@@ -327,6 +340,7 @@ class MemoryRelationStore:
         *,
         mode: str,
         store_id: str,
+        context_metadata: dict[str, Any] | None = None,
         dry_run: bool = False,
     ) -> tuple[int, int, int, int]:
         """Import validated records into memory."""
@@ -340,9 +354,14 @@ class MemoryRelationStore:
             mode=mode,
             store_id=store_id,
         )
+        merged_metadata = _merge_context_metadata(
+            self._context_metadata,
+            context_metadata or {},
+        )
         if not dry_run:
             self._relations = merged_relations
             self._exclusive_groups = merged_groups
+            self._context_metadata = merged_metadata
         return len(incoming_relations), len(incoming_groups), updated_relations, updated_groups
 
 
@@ -505,6 +524,7 @@ class SqliteRelationStore:
                 self._conn.execute("DELETE FROM relations")
                 if include_exclusive_groups:
                     self._conn.execute("DELETE FROM exclusive_groups")
+                self._conn.execute("DELETE FROM context_metadata")
                 self._conn.commit()
             return removed, removed_groups
 
@@ -534,6 +554,11 @@ class SqliteRelationStore:
             self._delete_relation_ids(remove_ids)
             if include_exclusive_groups:
                 self._delete_group_keys(remove_group_keys)
+            if scope == "context":
+                self._conn.execute(
+                    "DELETE FROM context_metadata WHERE context_id = ?",
+                    (context_id,),
+                )
             self._conn.commit()
 
         return len(remove_ids), len(remove_group_keys) if include_exclusive_groups else 0
@@ -624,6 +649,17 @@ class SqliteRelationStore:
             for row in rows
         ]
 
+    def context_metadata(self) -> dict[str, Any]:
+        """Return SQLite graph context metadata."""
+        rows = self._conn.execute(
+            """
+            SELECT context_id, metadata_json
+            FROM context_metadata
+            ORDER BY context_id
+            """
+        ).fetchall()
+        return {row["context_id"]: _loads(row["metadata_json"], {}) for row in rows}
+
     def import_records(
         self,
         relations: Iterable[RelationRecord],
@@ -631,6 +667,7 @@ class SqliteRelationStore:
         *,
         mode: str,
         store_id: str,
+        context_metadata: dict[str, Any] | None = None,
         dry_run: bool = False,
     ) -> tuple[int, int, int, int]:
         """Import validated records into SQLite."""
@@ -644,9 +681,17 @@ class SqliteRelationStore:
             mode=mode,
             store_id=store_id,
         )
+        merged_metadata = _merge_context_metadata(
+            self.context_metadata(),
+            context_metadata or {},
+        )
         if not dry_run:
             try:
-                self._replace_all_records(merged_relations, merged_groups)
+                self._replace_all_records(
+                    merged_relations,
+                    merged_groups,
+                    merged_metadata,
+                )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
@@ -698,6 +743,12 @@ class SqliteRelationStore:
               result_status TEXT,
               created_at TEXT NOT NULL,
               metadata_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS context_metadata (
+              context_id TEXT PRIMARY KEY,
+              metadata_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL
             );
             """
         )
@@ -781,11 +832,27 @@ class SqliteRelationStore:
         self,
         relations: Iterable[RelationRecord],
         groups: Iterable[ExclusiveGroupRecord],
+        context_metadata: dict[str, Any],
     ) -> None:
         self._conn.execute("DELETE FROM relations")
         self._conn.execute("DELETE FROM exclusive_groups")
+        self._conn.execute("DELETE FROM context_metadata")
         self._insert_relations(relations)
         self._insert_exclusive_groups(groups)
+        self._insert_context_metadata(context_metadata)
+
+    def _insert_context_metadata(self, context_metadata: dict[str, Any]) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        self._conn.executemany(
+            """
+            INSERT INTO context_metadata (context_id, metadata_json, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (context_id, _dumps(metadata), timestamp)
+                for context_id, metadata in sorted(context_metadata.items())
+            ],
+        )
 
 
 class JsonRelationStore(MemoryRelationStore):
@@ -870,6 +937,7 @@ class JsonRelationStore(MemoryRelationStore):
         *,
         mode: str,
         store_id: str,
+        context_metadata: dict[str, Any] | None = None,
         dry_run: bool = False,
     ) -> tuple[int, int, int, int]:
         """Import validated records and persist the JSON relation set."""
@@ -878,6 +946,7 @@ class JsonRelationStore(MemoryRelationStore):
             exclusive_groups,
             mode=mode,
             store_id=store_id,
+            context_metadata=context_metadata,
             dry_run=dry_run,
         )
         if not dry_run:
@@ -897,6 +966,7 @@ class JsonRelationStore(MemoryRelationStore):
             ExclusiveGroupRecord.model_validate(item) for item in data.get("exclusive_groups", [])
         ]
         self._audit_log = [_audit_from_dict(item) for item in data.get("audit_log", [])]
+        self._context_metadata = data.get("context_metadata", {})
 
     def _persist(self) -> None:
         data = {
@@ -904,6 +974,7 @@ class JsonRelationStore(MemoryRelationStore):
             "relations": [record.model_dump(mode="json") for record in self._relations],
             "exclusive_groups": [group.model_dump(mode="json") for group in self._exclusive_groups],
             "audit_log": [entry.to_dict() for entry in self._audit_log],
+            "context_metadata": self._context_metadata,
         }
         tmp_path = self.path.with_name(f".{self.path.name}.tmp")
         tmp_path.write_text(
@@ -1112,6 +1183,16 @@ def _merge_groups(
             positions[key] = len(groups)
             groups.append(group)
     return groups, updated
+
+
+def _merge_context_metadata(
+    current_metadata: dict[str, Any],
+    incoming_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(current_metadata)
+    for context_id, metadata in incoming_metadata.items():
+        merged[context_id] = deepcopy(metadata)
+    return merged
 
 
 def _dumps(value: Any) -> str | None:

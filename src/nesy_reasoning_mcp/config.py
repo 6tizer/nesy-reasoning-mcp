@@ -63,6 +63,22 @@ class HookConfig(BaseModel):
     context_from_session: bool = False
 
 
+class HttpConfig(BaseModel):
+    """Streamable HTTP daemon settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8765, ge=1, le=65535)
+    path: str = "/mcp"
+    local_token: str | None = None
+    allowed_origins: list[str] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
+    max_body_bytes: int = Field(default=1_000_000, ge=1)
+    request_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    rate_limit_per_minute: int = Field(default=120, ge=1)
+
+
 class NesyConfig(BaseModel):
     """Complete runtime configuration."""
 
@@ -72,6 +88,7 @@ class NesyConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     hook: HookConfig = Field(default_factory=HookConfig)
+    http: HttpConfig = Field(default_factory=HttpConfig)
 
 
 def load_config(
@@ -109,6 +126,24 @@ def load_config(
         data.setdefault("hook", {})["domain"] = hook_domain
     if context_from_session := env_map.get("NESY_HOOK_CONTEXT_FROM_SESSION"):
         data.setdefault("hook", {})["context_from_session"] = _env_bool(context_from_session)
+    if http_host := env_map.get("NESY_HTTP_HOST"):
+        data.setdefault("http", {})["host"] = http_host
+    if http_port := env_map.get("NESY_HTTP_PORT"):
+        data.setdefault("http", {})["port"] = int(http_port)
+    if http_path := env_map.get("NESY_HTTP_PATH"):
+        data.setdefault("http", {})["path"] = http_path
+    if local_token := env_map.get("NESY_LOCAL_TOKEN"):
+        data.setdefault("http", {})["local_token"] = local_token
+    if origins := env_map.get("NESY_HTTP_ALLOWED_ORIGINS"):
+        data.setdefault("http", {})["allowed_origins"] = _env_csv(origins)
+    if hosts := env_map.get("NESY_HTTP_ALLOWED_HOSTS"):
+        data.setdefault("http", {})["allowed_hosts"] = _env_csv(hosts)
+    if max_body := env_map.get("NESY_HTTP_MAX_BODY_BYTES"):
+        data.setdefault("http", {})["max_body_bytes"] = int(max_body)
+    if http_timeout := env_map.get("NESY_HTTP_REQUEST_TIMEOUT_SECONDS"):
+        data.setdefault("http", {})["request_timeout_seconds"] = float(http_timeout)
+    if rate_limit := env_map.get("NESY_HTTP_RATE_LIMIT_PER_MINUTE"):
+        data.setdefault("http", {})["rate_limit_per_minute"] = int(rate_limit)
 
     return NesyConfig.model_validate(data)
 
@@ -131,6 +166,14 @@ def _default_config_data(cwd: Path) -> dict[str, Any]:
         },
         "logging": {"level": "info", "audit_log": True},
         "hook": {"timeout_seconds": 5, "fail_closed": False, "context_from_session": False},
+        "http": {
+            "host": "127.0.0.1",
+            "port": 8765,
+            "path": "/mcp",
+            "max_body_bytes": 1_000_000,
+            "request_timeout_seconds": 30,
+            "rate_limit_per_minute": 120,
+        },
     }
 
 
@@ -151,3 +194,7 @@ def _expand_path(path: str) -> Path:
 def _env_bool(value: str) -> bool:
     normalized = value.strip().casefold()
     return normalized in {"1", "true", "yes", "on"}
+
+
+def _env_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]

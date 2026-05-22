@@ -167,6 +167,56 @@ def test_json_store_persists_relations(tmp_path) -> None:
     assert reloaded.implication_edges()[0].consequent == "B"
 
 
+def test_memory_import_records_keeps_context_metadata() -> None:
+    store = RelationStore()
+
+    store.import_records(
+        [],
+        [],
+        mode="append",
+        store_id="default",
+        context_metadata={"ctx": {"causal_completeness": True}},
+    )
+
+    assert store.context_metadata() == {"ctx": {"causal_completeness": True}}
+
+
+def test_sqlite_store_persists_context_metadata(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.import_records(
+        [],
+        [],
+        mode="append",
+        store_id="default",
+        context_metadata={"ctx": {"causal_completeness": True}},
+    )
+
+    reloaded = SqliteRelationStore(config)
+
+    assert reloaded.context_metadata() == {"ctx": {"causal_completeness": True}}
+
+
+def test_json_store_persists_context_metadata(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.import_records(
+        [],
+        [],
+        mode="append",
+        store_id="default",
+        context_metadata={"ctx": {"causal_completeness": True}},
+    )
+
+    reloaded = JsonRelationStore(config)
+
+    assert reloaded.context_metadata() == {"ctx": {"causal_completeness": True}}
+
+
 def test_create_relation_store_uses_json_backend(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))

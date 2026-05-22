@@ -15,6 +15,7 @@
 - [ ] `uv run ruff check .`
 - [ ] `uv run pytest`
 - [ ] MCP stdio smoke, if behavior changed.
+- [ ] MCP HTTP smoke, if transport/auth changed.
 - [ ] MCP client smoke, if public tools changed.
 
 ## Notes

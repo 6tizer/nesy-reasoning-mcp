@@ -74,6 +74,13 @@ class ContradictionMode(StrEnum):
     COMBINED = "combined"
 
 
+class WorldMode(StrEnum):
+    """Counterfactual world assumption modes."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
 class LoadSourceType(StrEnum):
     """Supported relation import sources."""
 
@@ -403,6 +410,38 @@ class SummarizeGraphInput(BaseModel):
     def strip_focus_terms(cls, value: list[str]) -> list[str]:
         """Strip focus terms and discard empty entries."""
         return [item for item in (term.strip() for term in value) if item]
+
+
+class CounterfactualInput(BaseModel):
+    """Input for `nesy.counterfactual`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    if_not: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    targets: list[str] = Field(default_factory=list)
+    context_filter: ContextFilter = Field(default_factory=ContextFilter)
+    world_mode: WorldMode = WorldMode.OPEN
+    max_depth: int = Field(default=8, ge=1, le=20)
+    include_alternative_paths: bool = True
+    confidence_policy: ConfidencePolicy = ConfidencePolicy.PRODUCT_INDEPENDENT
+
+    @field_validator("if_not")
+    @classmethod
+    def strip_if_not(cls, value: str) -> str:
+        """Strip the intervention proposition and reject empty values."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @field_validator("targets")
+    @classmethod
+    def strip_targets(cls, value: list[str]) -> list[str]:
+        """Strip target propositions and de-duplicate them in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("targets must not contain empty values")
+        return list(dict.fromkeys(stripped))
 
 
 class _PropositionPairInput(BaseModel):
