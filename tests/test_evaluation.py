@@ -176,11 +176,43 @@ async def test_agent_eval_mode_and_case_filter() -> None:
         case_ids=["verify_best_chain"],
     )
 
-    assert report["status"] == "pass"
+    assert report["status"] == "fail"
     assert report["modes"] == ["classify_only"]
     assert report["mode_scores"]["classify_only"] == 0.0
     assert report["cases"][0]["case_id"] == "verify_best_chain"
     assert report["cases"][0]["error_type"] == "tool_unavailable"
+
+
+def test_agent_eval_cli_returns_failure_for_selected_failed_mode() -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "eval",
+            "agent",
+            "--fixture",
+            str(FIXTURE_PATH),
+            "--mode",
+            "classify_only",
+            "--case-id",
+            "verify_best_chain",
+            "--format",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    report = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert report["status"] == "fail"
+    assert report["cases"][0]["error_type"] == "tool_unavailable"
+    assert completed.stderr == ""
 
 
 def test_agent_eval_cli_outputs_parseable_json() -> None:
@@ -420,6 +452,6 @@ async def test_agent_eval_openai_disallowed_tool_is_reported() -> None:
         client_factory=_fake_client_factory([disallowed_action]),
     )
 
-    assert report["status"] == "pass"
+    assert report["status"] == "fail"
     assert report["cases"][0]["error_type"] == "tool_unavailable"
     assert report["error_type_counts"]["tool_unavailable"] == 1

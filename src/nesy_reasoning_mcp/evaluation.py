@@ -344,9 +344,10 @@ async def run_agent_fixture(
         if full_score is not None
         else {}
     )
-    full_results = mode_results.get("full_mcp", [])
-    status = "pass" if not full_results or all(item["passed"] for item in full_results) else "fail"
     cases = [item for mode in modes for item in mode_results[mode]]
+    full_results = mode_results.get("full_mcp", [])
+    gate_results = full_results if full_results else cases
+    status = "pass" if all(item["passed"] for item in gate_results) else "fail"
     return {
         "status": status,
         "fixture": fixture.name,
