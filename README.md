@@ -266,6 +266,8 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fix
 
 - [Full specification](docs/spec-v2.md)
 - [SPEC compliance](SPEC_COMPLIANCE.md)
+- [Agent instructions](AGENTS.md)
+- [Claude Code instructions](CLAUDE.md)
 - [Install as MCP server](docs/install.md)
 - [Internal testing profile](docs/internal-testing.md)
 - [Security](docs/security.md)
