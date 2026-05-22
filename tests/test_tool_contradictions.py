@@ -161,6 +161,145 @@ async def test_no_exclusive_group_means_no_semantic_contradiction() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("negated_target", ["not B", "not:B", "¬B"])
+async def test_direct_opposition_detects_explicit_negation_forms(negated_target: str) -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient"},
+                {"source": "A", "target": negated_target, "relation_type": "sufficient"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"include_soft": False}, store)
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "direct_opposition"
+    assert contradiction["severity"] == "hard"
+    assert contradiction["targets"] == ["B", negated_target]
+
+
+@pytest.mark.asyncio
+async def test_cycle_to_exclusion_detects_path_to_own_negation() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient"},
+                {"source": "B", "target": "not A", "relation_type": "sufficient"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"max_depth": 2}, store)
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "cycle_to_exclusion"
+    assert contradiction["severity"] == "hard"
+    assert contradiction["path"] == ["A", "B", "not A"]
+
+
+@pytest.mark.asyncio
+async def test_cycle_to_exclusion_respects_max_depth() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient"},
+                {"source": "B", "target": "not A", "relation_type": "sufficient"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"max_depth": 1}, store)
+
+    assert result.structuredContent["has_contradictions"] is False
+    assert result.structuredContent["contradictions"] == []
+
+
+@pytest.mark.asyncio
+async def test_cycle_to_exclusion_ignores_temporally_disjoint_path() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                    "temporal": {"valid_from": "2026-01-01", "valid_to": "2026-01-31"},
+                },
+                {
+                    "source": "B",
+                    "target": "not A",
+                    "relation_type": "sufficient",
+                    "temporal": {"valid_from": "2026-02-01", "valid_to": "2026-02-28"},
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"max_depth": 2}, store)
+
+    assert result.structuredContent["has_contradictions"] is False
+    assert result.structuredContent["contradictions"] == []
+
+
+@pytest.mark.asyncio
+async def test_confidence_tension_only_returns_when_soft_included() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_low",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                    "confidence": 0.2,
+                },
+                {
+                    "id": "rel_high",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                    "confidence": 0.8,
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    hard_only = await call_tool(CHECK_CONTRADICTIONS, {"include_soft": False}, store)
+    with_soft = await call_tool(CHECK_CONTRADICTIONS, {"include_soft": True}, store)
+
+    assert hard_only.structuredContent["contradictions"] == []
+    assert with_soft.structuredContent["has_contradictions"] is True
+    contradiction = with_soft.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "confidence_tension"
+    assert contradiction["severity"] == "soft"
+    assert contradiction["fact_ids"] == ["rel_low", "rel_high"]
+
+
+@pytest.mark.asyncio
 async def test_facts_mode_does_not_persist_input_facts() -> None:
     store = RelationStore()
     await call_tool(

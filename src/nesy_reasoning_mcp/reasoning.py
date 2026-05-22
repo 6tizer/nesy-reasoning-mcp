@@ -69,6 +69,31 @@ class BrokenChain:
         }
 
 
+@dataclass(frozen=True)
+class ClassificationContradiction:
+    """Exclusive-group contradiction found during relation classification."""
+
+    exclusive_group_id: str
+    context_id: str
+    store_id: str
+    target: str
+    conflicting_target: str
+    target_path: ReasoningPath
+    conflicting_path: ReasoningPath
+
+    @property
+    def fact_ids(self) -> list[str]:
+        """Return unique relation ids supporting both contradictory paths."""
+        return list(
+            dict.fromkeys(
+                [
+                    *(edge.relation_id for edge in self.target_path.edges),
+                    *(edge.relation_id for edge in self.conflicting_path.edges),
+                ]
+            )
+        )
+
+
 class GraphIndex:
     """Context-filtered NetworkX index over canonical implication edges."""
 
@@ -268,10 +293,15 @@ def find_exclusive_contradictions(
     context_filter: ContextFilter,
     *,
     max_depth: int,
+    include_soft: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Find exclusivity-based contradictions and context-separated tensions."""
     contradictions: list[dict[str, Any]] = []
     context_separated: list[dict[str, Any]] = []
+    compatible_relations = relations_compatible_with_filter(relations, context_filter)
+    contradictions.extend(_explicit_negation_contradictions(compatible_relations, max_depth))
+    if include_soft:
+        contradictions.extend(_confidence_tensions(compatible_relations))
     for group in exclusive_groups:
         if not _exclusive_group_compatible(group, context_filter):
             continue
@@ -318,6 +348,64 @@ def classify_reachability(
     if reverse:
         return Classification.NECESSARY
     return Classification.UNKNOWN
+
+
+def find_classification_contradiction(
+    relations: list[RelationRecord],
+    exclusive_groups: list[ExclusiveGroupRecord],
+    *,
+    source: str,
+    target: str,
+    context_filter: ContextFilter,
+    max_depth: int,
+    confidence_policy: ConfidencePolicy,
+    direct_only: bool,
+) -> ClassificationContradiction | None:
+    """Find whether a classification target conflicts with an exclusive sibling."""
+    for group in exclusive_groups:
+        if target not in group.members or not _exclusive_group_compatible(group, context_filter):
+            continue
+        group_relations = _relations_for_group(relations, group, context_filter)
+        if not group_relations:
+            continue
+        index = GraphIndex(group_relations)
+        target_paths = index.find_paths(
+            source,
+            target,
+            max_depth=max_depth,
+            strategy=PathStrategy.BEST_CONFIDENCE,
+            max_paths=1,
+            confidence_policy=confidence_policy,
+            direct_only=direct_only,
+        )
+        if not target_paths:
+            continue
+        target_path = target_paths[0]
+        for member in sorted(item for item in group.members if item != target):
+            conflicting_paths = index.find_paths(
+                source,
+                member,
+                max_depth=max_depth,
+                strategy=PathStrategy.BEST_CONFIDENCE,
+                max_paths=1,
+                confidence_policy=confidence_policy,
+                direct_only=direct_only,
+            )
+            if not conflicting_paths:
+                continue
+            conflicting_path = conflicting_paths[0]
+            if not _paths_temporally_compatible([target_path, conflicting_path]):
+                continue
+            return ClassificationContradiction(
+                exclusive_group_id=group.group_id,
+                context_id=group.context_id,
+                store_id=group.store_id,
+                target=target,
+                conflicting_target=member,
+                target_path=target_path,
+                conflicting_path=conflicting_path,
+            )
+    return None
 
 
 def aggregate_confidence(
@@ -548,6 +636,215 @@ def _context_separated_conflicts(
             }
         )
     return separated
+
+
+def _explicit_negation_contradictions(
+    relations: list[RelationRecord],
+    max_depth: int,
+) -> list[dict[str, Any]]:
+    contradictions: list[dict[str, Any]] = []
+    for (store_id, context_id), scoped_relations in _relations_by_scope(relations).items():
+        index = GraphIndex(scoped_relations)
+        negated_nodes = sorted(
+            (node, base)
+            for node in (str(item) for item in index.graph.nodes)
+            if (base := _explicit_negation_base(node)) is not None
+        )
+        if not negated_nodes:
+            continue
+
+        for source in sorted(str(item) for item in index.graph.nodes):
+            contradictions.extend(
+                _cycle_to_exclusion_contradictions(
+                    index,
+                    source,
+                    negated_nodes,
+                    context_id=context_id,
+                    store_id=store_id,
+                    max_depth=max_depth,
+                )
+            )
+            contradictions.extend(
+                _direct_opposition_contradictions(
+                    index,
+                    source,
+                    negated_nodes,
+                    context_id=context_id,
+                    store_id=store_id,
+                    max_depth=max_depth,
+                )
+            )
+    return _dedupe_contradictions(contradictions)
+
+
+def _cycle_to_exclusion_contradictions(
+    index: GraphIndex,
+    source: str,
+    negated_nodes: list[tuple[str, str]],
+    *,
+    context_id: str,
+    store_id: str,
+    max_depth: int,
+) -> list[dict[str, Any]]:
+    contradictions: list[dict[str, Any]] = []
+    for negated_node, base in negated_nodes:
+        if base != source:
+            continue
+        paths = index.find_paths(
+            source,
+            negated_node,
+            max_depth=max_depth,
+            strategy=PathStrategy.SHORTEST,
+            max_paths=1,
+        )
+        if not paths or len(paths[0].edges) <= 1:
+            continue
+        path = paths[0]
+        if not _paths_temporally_compatible([path]):
+            continue
+        contradictions.append(
+            {
+                "type": "cycle_to_exclusion",
+                "severity": "hard",
+                "source": source,
+                "targets": [source, negated_node],
+                "path": path.nodes,
+                "context_id": context_id,
+                "store_id": store_id,
+                "fact_ids": _path_fact_ids([path]),
+                "reason": "The source reaches an explicit negation of itself through a cycle.",
+            }
+        )
+    return contradictions
+
+
+def _direct_opposition_contradictions(
+    index: GraphIndex,
+    source: str,
+    negated_nodes: list[tuple[str, str]],
+    *,
+    context_id: str,
+    store_id: str,
+    max_depth: int,
+) -> list[dict[str, Any]]:
+    contradictions: list[dict[str, Any]] = []
+    for negated_node, base in negated_nodes:
+        positive_paths = index.find_paths(
+            source,
+            base,
+            max_depth=max_depth,
+            strategy=PathStrategy.SHORTEST,
+            max_paths=1,
+        )
+        negative_paths = index.find_paths(
+            source,
+            negated_node,
+            max_depth=max_depth,
+            strategy=PathStrategy.SHORTEST,
+            max_paths=1,
+        )
+        if not positive_paths or not negative_paths:
+            continue
+        if source == base and len(negative_paths[0].edges) > 1:
+            continue
+        if not _paths_temporally_compatible([positive_paths[0], negative_paths[0]]):
+            continue
+        contradictions.append(
+            {
+                "type": "direct_opposition",
+                "severity": "hard",
+                "source": source,
+                "targets": [base, negated_node],
+                "context_id": context_id,
+                "store_id": store_id,
+                "fact_ids": _path_fact_ids([positive_paths[0], negative_paths[0]]),
+                "reason": "The same source implies a proposition and its explicit negation.",
+            }
+        )
+    return contradictions
+
+
+def _confidence_tensions(relations: list[RelationRecord]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, RelationType, str, str], list[RelationRecord]] = {}
+    for relation in relations:
+        key = (
+            relation.source,
+            relation.target,
+            relation.relation_type,
+            relation.context_id,
+            relation.store_id,
+        )
+        grouped.setdefault(key, []).append(relation)
+
+    tensions: list[dict[str, Any]] = []
+    for (source, target, relation_type, context_id, store_id), records in sorted(grouped.items()):
+        if len(records) < 2:
+            continue
+        confidences = [record.confidence for record in records]
+        if max(confidences) - min(confidences) < 0.5:
+            continue
+        tensions.append(
+            {
+                "type": "confidence_tension",
+                "severity": "soft",
+                "source": source,
+                "target": target,
+                "relation_type": relation_type.value,
+                "context_id": context_id,
+                "store_id": store_id,
+                "fact_ids": [record.id for record in records],
+                "confidences": confidences,
+                "reason": "Multiple evidence records for the same claim have divergent confidence.",
+            }
+        )
+    return tensions
+
+
+def _relations_by_scope(
+    relations: list[RelationRecord],
+) -> dict[tuple[str, str], list[RelationRecord]]:
+    grouped: dict[tuple[str, str], list[RelationRecord]] = {}
+    for relation in relations:
+        grouped.setdefault((relation.store_id, relation.context_id), []).append(relation)
+    return grouped
+
+
+def _explicit_negation_base(value: str) -> str | None:
+    stripped = value.strip()
+    if stripped.startswith("¬"):
+        base = stripped[1:].strip()
+        return base or None
+    lowered = stripped.lower()
+    if lowered.startswith("not:"):
+        base = stripped[4:].strip()
+        return base or None
+    if lowered.startswith("not "):
+        base = stripped[4:].strip()
+        return base or None
+    return None
+
+
+def _path_fact_ids(paths: list[ReasoningPath]) -> list[str]:
+    return list(dict.fromkeys(edge.relation_id for path in paths for edge in path.edges))
+
+
+def _dedupe_contradictions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in items:
+        key = (
+            item["type"],
+            item.get("source"),
+            tuple(item.get("targets", [])),
+            item.get("context_id"),
+            item.get("store_id"),
+            tuple(item.get("fact_ids", [])),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _reachable_group_members(

@@ -126,5 +126,6 @@ Export a relation set through MCP before sharing or archiving long-lived state.
 - Stop hook checks the explicit graph and `NESY_FACTS`, not arbitrary prose.
 - `clear_relations(scope=all)`, `load_relations(mode=replace_store)`, and file
   load/export should require explicit confirmation.
-- `assert_relations(mode="upsert")`, `merge_equivalent`, and direct
-  `classify=contradictory` behavior remain follow-up semantic work.
+- Contradiction checks are deterministic over structured facts only. Explicit
+  negation uses proposition labels such as `not X`, `not:X`, and `¬X`; arbitrary
+  natural-language negation is not extracted automatically.

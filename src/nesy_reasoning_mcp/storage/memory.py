@@ -29,6 +29,7 @@ from nesy_reasoning_mcp.storage.common import (
     _merge_context_metadata,
     _merge_import,
     _relation_for_store,
+    _upsert_relations,
     graph_stats_for,
 )
 
@@ -55,7 +56,11 @@ class MemoryRelationStore:
         records = [RelationRecord.from_input(item) for item in inputs]
         updated = 0
 
-        if mode == "replace_same_pair":
+        if mode == "upsert":
+            merged, updated = _upsert_relations(self._relations, records)
+            if not dry_run:
+                self._relations = merged
+        elif mode == "replace_same_pair":
             replace_keys = {
                 (record.source, record.target, record.context_id, record.store_id)
                 for record in records
@@ -74,7 +79,10 @@ class MemoryRelationStore:
                     not in replace_keys
                 ]
 
-        if not dry_run:
+        elif mode != "append":
+            raise ValueError(f"unsupported assert mode: {mode}")
+
+        if not dry_run and mode != "upsert":
             self._relations.extend(records)
 
         return records, updated

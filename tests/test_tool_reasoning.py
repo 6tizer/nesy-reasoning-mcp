@@ -2,6 +2,7 @@ import pytest
 
 from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tools import (
+    ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
     CLASSIFY,
     LOAD_RELATIONS,
@@ -97,6 +98,91 @@ async def test_alternative_sufficient_cause_does_not_prove_not_necessary() -> No
 
     assert result.structuredContent["classification"] == "sufficient"
     assert result.structuredContent["necessity_status"]["status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_classify_returns_contradictory_for_exclusive_target_conflict() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_EXCLUSIVE,
+        {"groups": [{"group_id": "state", "members": ["B", "C"]}]},
+        store,
+    )
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient"},
+                {"source": "A", "target": "C", "relation_type": "sufficient"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CLASSIFY, {"source": "A", "target": "B"}, store)
+
+    assert result.structuredContent["classification"] == "contradictory"
+    assert result.structuredContent["source_implies_target"]["proven"] is True
+    assert result.structuredContent["diagnostics"][0]["code"] == "CONTRADICTORY_CLASSIFICATION"
+
+
+@pytest.mark.asyncio
+async def test_classify_contradictory_respects_context_scope() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_EXCLUSIVE,
+        {"groups": [{"group_id": "state", "members": ["B", "C"], "context_id": "ctx1"}]},
+        store,
+    )
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient", "context_id": "ctx1"},
+                {"source": "A", "target": "C", "relation_type": "sufficient", "context_id": "ctx2"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CLASSIFY, {"source": "A", "target": "B"}, store)
+
+    assert result.structuredContent["classification"] == "sufficient"
+    assert result.structuredContent["diagnostics"] == []
+
+
+@pytest.mark.asyncio
+async def test_classify_contradictory_respects_require_direct() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_EXCLUSIVE,
+        {"groups": [{"group_id": "state", "members": ["B", "C"]}]},
+        store,
+    )
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient"},
+                {"source": "A", "target": "X", "relation_type": "sufficient"},
+                {"source": "X", "target": "C", "relation_type": "sufficient"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    direct = await call_tool(
+        CLASSIFY,
+        {"source": "A", "target": "B", "require_direct": True},
+        store,
+    )
+    transitive = await call_tool(CLASSIFY, {"source": "A", "target": "B"}, store)
+
+    assert direct.structuredContent["classification"] == "sufficient"
+    assert transitive.structuredContent["classification"] == "contradictory"
 
 
 @pytest.mark.asyncio
