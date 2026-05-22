@@ -2,6 +2,10 @@
 
 This project runs as a local MCP server over stdio or authenticated Streamable HTTP.
 
+For internal testing, prefer the SQLite profile in
+[Internal Testing](internal-testing.md). It packages MCP config, hook config,
+HTTP launch, and a smoke test that share one SQLite store.
+
 ## Requirements
 
 - Python 3.11 to 3.14
@@ -69,6 +73,9 @@ Then restart or reload the MCP client.
 
 Default storage is process memory. Restarting the server clears state unless you
 choose a persistent backend.
+
+Internal testing should use SQLite, not memory, so MCP and hooks share durable
+state across processes and restarts.
 
 SQLite:
 

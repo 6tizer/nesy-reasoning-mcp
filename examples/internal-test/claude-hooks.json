@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|Read|Grep|Glob|WebSearch|WebFetch|mcp__nesy-reasoning__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/hook-pretooluse.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/hook-stop.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
