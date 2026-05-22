@@ -1,0 +1,227 @@
+{
+  "version": "1.0",
+  "name": "core-phase7-offline",
+  "cases": [
+    {
+      "id": "classify_direct_sufficient",
+      "category": "classification",
+      "description": "A direct sufficient relation should classify source as sufficient for target.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient" }
+        ]
+      },
+      "tool_name": "nesy.classify",
+      "tool_input": { "source": "A", "target": "B" },
+      "expected": {
+        "equals": {
+          "status": "ok",
+          "classification": "sufficient",
+          "source_implies_target.proven": true
+        },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.7,
+        "tool_descriptions_only": 0.8,
+        "no_classify": 0.0
+      }
+    },
+    {
+      "id": "classify_transitive_sufficient",
+      "category": "transitive",
+      "description": "A sufficient B and B sufficient C should imply A sufficient C.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient" },
+          { "source": "B", "target": "C", "relation_type": "sufficient" }
+        ]
+      },
+      "tool_name": "nesy.classify",
+      "tool_input": { "source": "A", "target": "C" },
+      "expected": {
+        "equals": {
+          "classification": "sufficient",
+          "source_implies_target.best_path": ["A", "B", "C"]
+        },
+        "contains": { "paths[].direction": "source_to_target" },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.45,
+        "tool_descriptions_only": 0.6,
+        "no_classify": 0.0
+      }
+    },
+    {
+      "id": "verify_best_chain",
+      "category": "transitive",
+      "description": "verify_chain should return a valid multi-hop path.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient" },
+          { "source": "B", "target": "C", "relation_type": "sufficient" }
+        ]
+      },
+      "tool_name": "nesy.verify_chain",
+      "tool_input": { "source": "A", "target": "C", "path_strategy": "shortest" },
+      "expected": {
+        "equals": {
+          "reachable": true,
+          "relation_type": "sufficient",
+          "best_path.nodes": ["A", "B", "C"]
+        },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.5,
+        "tool_descriptions_only": 0.65,
+        "no_classify": 0.2,
+        "no_verify_chain": 0.0
+      }
+    },
+    {
+      "id": "contradiction_exclusive_targets",
+      "category": "contradiction",
+      "description": "The same source implying exclusive targets should be a hard contradiction.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient" },
+          { "source": "A", "target": "C", "relation_type": "sufficient" }
+        ],
+        "exclusive_groups": [
+          { "group_id": "state", "members": ["B", "C"] }
+        ]
+      },
+      "tool_name": "nesy.check_contradictions",
+      "tool_input": {},
+      "expected": {
+        "equals": { "has_contradictions": true },
+        "contains": { "contradictions[].type": "exclusive_targets" },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.35,
+        "tool_descriptions_only": 0.55,
+        "no_contradiction": 0.0
+      }
+    },
+    {
+      "id": "contradiction_context_separated_not_hard",
+      "category": "contradiction",
+      "description": "Exclusive targets in separate contexts should not become a hard contradiction.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient", "context_id": "x" },
+          { "source": "A", "target": "C", "relation_type": "sufficient", "context_id": "y" }
+        ],
+        "exclusive_groups": [
+          { "group_id": "state", "members": ["B", "C"], "context_id": "x" }
+        ]
+      },
+      "tool_name": "nesy.check_contradictions",
+      "tool_input": {},
+      "expected": {
+        "equals": { "has_contradictions": false },
+        "min_count": { "context_separated[]": 1, "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.4,
+        "tool_descriptions_only": 0.55,
+        "no_contradiction": 0.5
+      }
+    },
+    {
+      "id": "counterfactual_necessary_blocks",
+      "category": "counterfactual",
+      "description": "If A is necessary for B, not A necessarily blocks B.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "necessary" }
+        ]
+      },
+      "tool_name": "nesy.counterfactual",
+      "tool_input": { "if_not": "A", "targets": ["B"] },
+      "expected": {
+        "contains": { "necessarily_blocked[].target": "B" },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.55,
+        "tool_descriptions_only": 0.7,
+        "no_counterfactual": 0.0
+      }
+    },
+    {
+      "id": "counterfactual_sufficient_open_world",
+      "category": "counterfactual",
+      "description": "If A is only sufficient for B, not A should not necessarily block B.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient" }
+        ]
+      },
+      "tool_name": "nesy.counterfactual",
+      "tool_input": { "if_not": "A", "targets": ["B"] },
+      "expected": {
+        "equals": { "necessarily_blocked": [] },
+        "contains": { "possibly_blocked[].target": "B" },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.25,
+        "tool_descriptions_only": 0.45,
+        "no_counterfactual": 0.0
+      }
+    },
+    {
+      "id": "counterfactual_independent_alternative",
+      "category": "counterfactual",
+      "description": "An independent alternative sufficient path should keep the target possible.",
+      "relation_set": {
+        "relations": [
+          { "source": "A", "target": "B", "relation_type": "sufficient" },
+          { "source": "C", "target": "B", "relation_type": "sufficient" }
+        ],
+        "independence_records": [
+          { "left": "C", "right": "A", "relation": "independent_of" }
+        ]
+      },
+      "tool_name": "nesy.counterfactual",
+      "tool_input": { "if_not": "A", "targets": ["B"] },
+      "expected": {
+        "contains": { "still_possible[].target": "B" },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.3,
+        "tool_descriptions_only": 0.5,
+        "no_counterfactual": 0.0
+      }
+    },
+    {
+      "id": "business_permission_necessary",
+      "category": "business",
+      "description": "Login is necessary for submitting an order in a permission scenario.",
+      "relation_set": {
+        "relations": [
+          { "source": "Login", "target": "SubmitOrder", "relation_type": "necessary" }
+        ]
+      },
+      "tool_name": "nesy.classify",
+      "tool_input": { "source": "Login", "target": "SubmitOrder" },
+      "expected": {
+        "equals": {
+          "classification": "necessary",
+          "target_implies_source.proven": true
+        },
+        "min_count": { "trace[]": 1 }
+      },
+      "baselines": {
+        "llm_only": 0.65,
+        "tool_descriptions_only": 0.75,
+        "no_classify": 0.0
+      }
+    }
+  ]
+}

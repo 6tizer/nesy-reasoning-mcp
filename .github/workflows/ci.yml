@@ -49,6 +49,9 @@ jobs:
       - name: Test
         run: uv run pytest
 
+      - name: Offline eval
+        run: env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
+
       - name: Build package
         run: rm -rf dist && uv build
 
@@ -78,7 +81,14 @@ jobs:
           uv run python -m json.tool examples/mcp-config.json > /dev/null
           uv run python -m json.tool examples/nesy-config.json > /dev/null
           uv run python -m json.tool examples/claude-hooks.json > /dev/null
+          uv run python -m json.tool benchmarks/fixtures/core.json > /dev/null
+          uv run python -m json.tool benchmarks/fixtures/core.schema.json > /dev/null
           uv run python -m py_compile examples/hooks/nesy_context_inject.py examples/hooks/nesy_stop_check.py
+
+      - name: Offline eval smoke
+        run: |
+          env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json > /tmp/nesy-eval.json
+          uv run python -m json.tool /tmp/nesy-eval.json > /dev/null
 
       - name: Stdio server exits cleanly on EOF
         run: printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio

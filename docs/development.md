@@ -15,6 +15,7 @@ uv sync --locked
 uv run ruff format --check .
 uv run ruff check .
 uv run pytest
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
 printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio
 ```
 
@@ -55,6 +56,7 @@ Each version should have one primary goal.
 - Keep business constants and tool names single-sourced in code.
 - Keep stdout clean in stdio mode.
 - Keep HTTP mode authenticated with `NESY_LOCAL_TOKEN`.
+- Keep offline evaluation deterministic and free of API-key requirements.
 
 ## Adding A Tool
 
@@ -96,6 +98,7 @@ Rules:
 - Bump version in `pyproject.toml` and `src/nesy_reasoning_mcp/__init__.py`.
 - Update README and docs for changed tools or config.
 - Run full local gate.
+- Run the offline benchmark fixture.
 - Confirm GitHub Actions passes.
 - Build package with `rm -rf dist && uv build`.
 - Attach artifacts only when cutting a GitHub release.

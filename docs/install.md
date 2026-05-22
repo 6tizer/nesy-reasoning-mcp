@@ -185,6 +185,16 @@ Default hook behavior is fail-open with a stderr warning. Set
 - HTTP daemon auth is a local bearer token, not multi-user auth.
 - No regex or LLM natural-language extraction in hooks yet.
 
+## Offline Evaluation
+
+v0.8 includes deterministic benchmark fixtures:
+
+```bash
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
+```
+
+The default evaluator does not call a real LLM and does not require API keys.
+
 ## Troubleshooting
 
 If CLI import fails with `ModuleNotFoundError: No module named 'nesy_reasoning_mcp'`,

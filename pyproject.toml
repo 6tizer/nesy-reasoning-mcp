@@ -1,6 +1,6 @@
 [project]
 name = "nesy-reasoning-mcp"
-version = "0.7.0"
+version = "0.8.0"
 description = "Deterministic neuro-symbolic reasoning MCP server."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -17,6 +17,8 @@ nesy-reasoning-mcp = "nesy_reasoning_mcp.cli:main"
 
 [dependency-groups]
 dev = [
+  "hypothesis>=6,<7",
+  "jsonschema>=4,<5",
   "pytest>=8,<10",
   "pytest-asyncio>=1,<2",
   "ruff>=0.14,<1",

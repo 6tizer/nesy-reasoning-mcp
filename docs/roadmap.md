@@ -5,7 +5,7 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.7 is the current implementation baseline:
+v0.8 is the current implementation baseline:
 
 - MCP stdio server.
 - Authenticated local Streamable HTTP daemon.
@@ -24,6 +24,8 @@ v0.7 is the current implementation baseline:
 - Compact graph summary.
 - Claude Code Stop and PreToolUse hook helpers.
 - Local install docs and CI smoke coverage.
+- Offline benchmark fixtures and deterministic eval runner.
+- Security and evaluation documentation.
 
 ## Version Gates
 
@@ -33,6 +35,7 @@ Each version must pass these gates before merge:
 - `uv run ruff format --check .`
 - `uv run ruff check .`
 - `uv run pytest`
+- `env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json`
 - MCP stdio smoke.
 - MCP client smoke for all public tools.
 - Docs updated for any public tool, config, or behavior change.
@@ -172,10 +175,43 @@ Out of scope:
 - Richer contradiction classes beyond explicit exclusives.
 - Evaluation fixtures and benchmark suite.
 
+## v0.8: Offline Evaluation And Security Docs
+
+Goal: complete SPEC Phase 7 with deterministic offline evaluation and close the
+security/evaluation documentation loop before v1.0.
+
+Scope:
+
+- Add benchmark fixtures for classification, transitive reasoning,
+  contradiction detection, counterfactual reasoning, and business scenarios.
+- Add `nesy-reasoning-mcp eval run` for deterministic local benchmark reports.
+- Add static LLM-only and tool-ablation baseline scores for marginal contribution
+  reporting.
+- Add property tests for graph reasoning invariants.
+- Add security and evaluation docs.
+
+Public tools:
+
+- No new MCP tools. The new surface is a local CLI subcommand.
+
+Acceptance:
+
+- Eval runner reports full MCP score, baselines, marginal contribution, metrics,
+  failed cases, and latency.
+- Fixture schema validates in tests.
+- Failures can be converted into benchmark regression cases.
+- CI runs the offline eval fixture.
+
+Out of scope:
+
+- Real LLM/API benchmark runner.
+- Hosted evaluation dashboard.
+- New reasoning semantics.
+
 ## Later
 
 - Natural-language relation extraction.
-- Evaluation fixtures and benchmark suite.
+- Real LLM benchmark runner.
 - Optional Postgres backend.
 - Team/server deployment model.
 - Richer contradiction classes beyond explicit exclusives.

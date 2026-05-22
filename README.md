@@ -2,7 +2,7 @@
 
 Deterministic neuro-symbolic reasoning MCP server.
 
-v0.7 provides a local MCP server with stdio and authenticated Streamable HTTP
+v0.8 provides a local MCP server with stdio and authenticated Streamable HTTP
 transports, memory/JSON/SQLite storage, and Claude Code hook helpers:
 
 - `nesy.assert_relations`
@@ -30,6 +30,8 @@ For version planning and contribution gates, see:
 
 - [docs/roadmap.md](docs/roadmap.md)
 - [docs/development.md](docs/development.md)
+- [docs/evaluation.md](docs/evaluation.md)
+- [docs/security.md](docs/security.md)
 
 ## Run
 
@@ -65,6 +67,12 @@ Relation sets can include explicit `independence_records`; `nesy.classify` uses
 them to prove `proven_not_necessary`, and `nesy.counterfactual` uses them to keep
 independent alternatives in `still_possible`. `nesy.load_relations` also accepts
 safe `file://` resource URIs inside configured `allowed_roots`.
+
+Offline benchmark evaluation:
+
+```bash
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
+```
 
 ## Install As MCP Server
 
