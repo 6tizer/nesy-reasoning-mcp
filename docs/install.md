@@ -158,14 +158,20 @@ Health check:
 curl -H 'Authorization: Bearer change-me' http://127.0.0.1:8765/healthz
 ```
 
-## Claude Code Hook Helpers
+## Claude Code Setup
 
-Hook helpers run as separate processes. Use SQLite or JSON storage so hooks see
-the same graph as the MCP server.
+Claude Code setup has two layers.
 
-Example hook config: [examples/claude-hooks.json](../examples/claude-hooks.json)
+Step 1: add the MCP server with the config from
+[examples/mcp-config.json](../examples/mcp-config.json), or adapt the JSON in
+the MCP client config section above.
 
-Commands:
+Step 2: optionally add hooks with
+[examples/claude-hooks.json](../examples/claude-hooks.json). Hook helpers run as
+separate processes. Use SQLite, JSON, or the local HTTP daemon so hooks see the
+same graph as the MCP server.
+
+Hook commands:
 
 ```bash
 uv run nesy-reasoning-mcp hook pretooluse
@@ -188,6 +194,18 @@ Default hook behavior is fail-open with a stderr warning. Set
 PreToolUse focus terms can be tuned with `NESY_HOOK_FOCUS_TERM_SOURCES` and
 `NESY_HOOK_FOCUS_TERMS`; use `NESY_HOOK_CONTEXT_ID` or `NESY_HOOK_DOMAIN` when
 the graph should be scoped manually.
+
+Step 3: run the internal-test smoke:
+
+```bash
+env PYTHONPATH=src uv run python examples/internal-test/smoke.py
+```
+
+Expected:
+
+```text
+internal-test smoke ok
+```
 
 ## Audit CLI
 

@@ -99,6 +99,30 @@ More examples:
 - [examples/claude-hooks.json](examples/claude-hooks.json)
 - [examples/internal-test](examples/internal-test/README.md)
 
+## Claude Code Setup
+
+Claude Code integration has two separate parts:
+
+1. Add the MCP server with a stdio config such as
+   [examples/mcp-config.json](examples/mcp-config.json).
+2. Optionally add hooks with [examples/claude-hooks.json](examples/claude-hooks.json)
+   or the internal-test wrappers in [examples/internal-test](examples/internal-test/README.md).
+
+For hooks, use SQLite, JSON, or the local HTTP daemon so the hook process and MCP
+server see the same graph. In-process memory is not shared across processes.
+
+Run the internal-test smoke after configuring Claude Code:
+
+```bash
+env PYTHONPATH=src uv run python examples/internal-test/smoke.py
+```
+
+Expected output:
+
+```text
+internal-test smoke ok
+```
+
 ## Minimal Reasoning Example
 
 Assert two sufficient relations:

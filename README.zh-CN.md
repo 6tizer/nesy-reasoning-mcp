@@ -90,6 +90,29 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
 - [examples/claude-hooks.json](examples/claude-hooks.json)
 - [examples/internal-test](examples/internal-test/README.md)
 
+## Claude Code 安装
+
+Claude Code 接入分两步：
+
+1. 用 [examples/mcp-config.json](examples/mcp-config.json) 这类 stdio 配置添加 MCP server。
+2. 可选：用 [examples/claude-hooks.json](examples/claude-hooks.json) 或
+   [examples/internal-test](examples/internal-test/README.md) 里的 wrapper 添加 hooks。
+
+Hooks 是单独进程，所以要用 SQLite、JSON 或本地 HTTP daemon，让 hook 和 MCP
+server 看到同一个图。进程内 memory 不能跨进程共享。
+
+配置 Claude Code 后，跑 internal-test smoke：
+
+```bash
+env PYTHONPATH=src uv run python examples/internal-test/smoke.py
+```
+
+预期输出：
+
+```text
+internal-test smoke ok
+```
+
 ## 最小推理示例
 
 声明两个充分关系：
