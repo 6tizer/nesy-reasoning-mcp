@@ -15,14 +15,6 @@ agents using NeSy Reasoning MCP. They explain when an agent should call
 `nesy.classify`, `nesy.verify_chain`, `nesy.counterfactual`,
 `nesy.check_contradictions`, and when it is allowed to write long-term memory.
 
-If you rebuild the GitNexus index locally, preserve those files:
-
-```bash
-gitnexus analyze --force --embeddings --skip-agents-md
-```
-
-Do not commit generated GitNexus boilerplate over `AGENTS.md` or `CLAUDE.md`.
-
 Run the full local gate:
 
 ```bash

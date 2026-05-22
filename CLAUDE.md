@@ -1,125 +1,67 @@
 # Claude Instructions For NeSy Reasoning MCP
 
-Use these instructions when Claude Code works in a repository or project that
-has the `nesy-reasoning` MCP server installed.
+Use these instructions when `nesy-reasoning` MCP is installed.
 
-## What This MCP Is For
+## Use NeSy When
 
-NeSy Reasoning MCP is a deterministic symbolic reasoning layer for structured
-claims. It is useful when an answer depends on:
+Call NeSy before finalizing answers involving structured:
 
-- causal claims
-- necessary or sufficient conditions
-- dependency relationships
+- causality, dependency, necessary/sufficient conditions
 - multi-hop implication chains
-- contradictions or mutually exclusive states
-- counterfactual questions
-- long-lived structured reasoning memory
+- contradictions, exclusives, or direct opposition
+- counterfactuals: "without X", "if X is false", "what if X is removed"
+- long-lived reasoning memory
 
-It is not a general natural-language extraction engine. Do not write ordinary
-natural-language guesses into long-term memory unless the user approves them as
-stable structured facts.
+Do not require the user to name a tool. If the request matches, use the tool.
 
-## When To Use NeSy Tools
+## Tool Routing
 
-Prefer using NeSy before finalizing an answer when the user asks about structured
-logic, causality, dependencies, contradictions, or counterfactuals.
+- `nesy.classify`: X causes/enables/requires Y; sufficient/necessary/equivalent/contradictory/unknown.
+- `nesy.verify_chain`: X -> Y -> Z or any multi-hop implication proof.
+- `nesy.counterfactual`: what changes if X is absent/false/removed.
+- `nesy.check_contradictions`: before finalizing high-impact structured claims or `NESY_FACTS`.
+- `nesy.summarize_graph`: compact context from current graph.
+- `nesy.list_relations`: inspect stored evidence.
+- `nesy.assert_relations`: only when user explicitly asks to remember/store/assert stable facts.
+- `nesy.assert_exclusive`: only for user-approved mutually exclusive states.
+- `nesy.load_relations`: only for user-provided or user-approved relation sets.
 
-Use:
+## Memory Rules
 
-- `nesy.classify` when the user asks whether `X` causes, enables, requires, is
-  sufficient for, or is necessary for `Y`.
-- `nesy.verify_chain` when reasoning depends on a multi-hop chain such as
-  `X -> Y -> Z`.
-- `nesy.counterfactual` when the user asks "what if X is absent", "what if X is
-  false", "without X", "if X is removed", or similar questions.
-- `nesy.check_contradictions` before finalizing high-impact structured claims
-  that may conflict with known facts or explicit `NESY_FACTS`.
-- `nesy.summarize_graph` when compact context from the current reasoning graph
-  would improve the answer.
-- `nesy.list_relations` when stored evidence needs inspection.
+- Do not write uncertain guesses.
+- Do not convert casual prose into memory without approval.
+- Do not overwrite stores, clear relations, or load/export files without confirmation.
+- If MCP is unavailable, say the deterministic check cannot be run; do not pretend it was verified.
 
-Do not require the user to name the tool. If the request clearly matches one of
-the cases above and the MCP is available, call the appropriate tool.
+## NESY_FACTS
 
-## Writing Long-Term Memory
-
-Only write to NeSy memory when the user explicitly asks to remember, store,
-assert, import, or use stable structured facts.
-
-Use:
-
-- `nesy.assert_relations` for stable causal/dependency facts.
-- `nesy.assert_exclusive` for mutually exclusive states.
-- `nesy.load_relations` only when the user provides or approves the relation set.
-
-Avoid:
-
-- writing uncertain guesses
-- writing facts inferred only from casual prose
-- overwriting a store without confirmation
-- clearing relations without confirmation
-- importing or exporting files outside the user-approved workflow
-
-## Final Answers And NESY_FACTS
-
-If a final answer introduces new structured facts that should be checked by a
-Stop hook, append a valid `NESY_FACTS:` JSON array:
+When a final answer introduces new structured facts that should be checked by a Stop hook, append:
 
 ```text
 NESY_FACTS:
-[
-  {"source":"Login","target":"SubmitOrder","relation_type":"necessary","context_id":"default"}
-]
+[{"source":"Login","target":"SubmitOrder","relation_type":"necessary","context_id":"default"}]
 ```
 
-The Stop hook checks the explicit graph and `NESY_FACTS`. It does not prove that
-arbitrary natural-language prose is contradiction-free.
+Stop hooks check explicit graph facts and `NESY_FACTS`, not arbitrary prose.
 
 ## Claude Code Hooks
 
-If project hooks are installed:
+- PreToolUse may inject compact graph summary.
+- Stop may block hard contradictions in `NESY_FACTS` or current explicit graph.
+- Hook failures are usually fail-open unless `NESY_HOOK_FAIL_CLOSED=true`.
 
-- PreToolUse may inject a compact NeSy graph summary.
-- Stop may block final answers that include hard contradictions in `NESY_FACTS`
-  or the current explicit graph.
-- Hook failures are usually fail-open unless the project config sets
-  `NESY_HOOK_FAIL_CLOSED=true`.
+## Safety
 
-## Safety Boundaries
-
-- Treat `clear_relations`, file load/export, and replace-store operations as
-  confirmation-required.
+- Treat `clear_relations`, file load/export, and replace-store operations as confirmation-required.
 - Do not expose or log secrets.
-- HTTP mode is local-only bearer-token auth, not hosted multi-user auth.
+- HTTP mode is local bearer-token auth, not hosted multi-user auth.
 - `resource_uri` is limited to safe local `file://` loads.
-- This MCP is a reasoning aid, not a replacement for legal, medical, financial,
-  or safety-critical domain review.
+- This is a reasoning aid, not legal/medical/financial/safety-critical authority.
 
-## If The MCP Is Not Available
+## Repo Development
 
-If NeSy tools are not available, say that the deterministic check cannot be run
-in this session. Do not pretend the result was verified by NeSy.
-
-## Repository Development Rules
-
-When editing this repository:
-
-- Use Python 3.11+ and `uv`.
-- Keep public MCP tool schemas and output shapes stable unless the change is
-  intentional and tested.
-- Keep `structuredContent` and `content[0].text` mirrored for tool results.
-- Keep stdout clean in stdio mode.
-- Keep HTTP mode authenticated.
-- Keep default CI deterministic and API-key-free.
-- Run the relevant local gate before committing:
-
-```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy src/nesy_reasoning_mcp
-uv run pytest
-```
-
-If you rebuild the GitNexus index locally, use `--skip-agents-md` so generated
-GitNexus guidance does not overwrite this product-level instruction file.
+- Python 3.11+, `uv`, pytest, Ruff, mypy.
+- Keep MCP schemas/output shapes stable unless intentionally changed and tested.
+- Keep `structuredContent` and `content[0].text` mirrored.
+- Keep stdio stdout clean and HTTP authenticated.
+- Local gate: `uv run ruff format --check . && uv run ruff check . && uv run mypy src/nesy_reasoning_mcp && uv run pytest`.
