@@ -231,6 +231,37 @@ async def test_cycle_to_exclusion_respects_max_depth() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cycle_to_exclusion_ignores_temporally_disjoint_path() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                    "temporal": {"valid_from": "2026-01-01", "valid_to": "2026-01-31"},
+                },
+                {
+                    "source": "B",
+                    "target": "not A",
+                    "relation_type": "sufficient",
+                    "temporal": {"valid_from": "2026-02-01", "valid_to": "2026-02-28"},
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"max_depth": 2}, store)
+
+    assert result.structuredContent["has_contradictions"] is False
+    assert result.structuredContent["contradictions"] == []
+
+
+@pytest.mark.asyncio
 async def test_confidence_tension_only_returns_when_soft_included() -> None:
     store = RelationStore()
     await call_tool(

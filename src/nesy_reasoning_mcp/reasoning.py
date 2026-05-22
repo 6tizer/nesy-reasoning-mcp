@@ -700,6 +700,8 @@ def _cycle_to_exclusion_contradictions(
         if not paths or len(paths[0].edges) <= 1:
             continue
         path = paths[0]
+        if not _paths_temporally_compatible([path]):
+            continue
         contradictions.append(
             {
                 "type": "cycle_to_exclusion",
