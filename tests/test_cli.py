@@ -4,8 +4,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import anyio
+
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.store import create_relation_store
+from nesy_reasoning_mcp.tools import ASSERT_RELATIONS, call_tool
 
 
 def _cli_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -188,4 +191,52 @@ def test_audit_list_default_memory_backend_is_empty() -> None:
     )
 
     assert completed.stdout == "No audit entries.\n"
+    assert completed.stderr == ""
+
+
+def test_audit_list_reads_entry_from_mutating_tool_call(tmp_path: Path) -> None:
+    config_path = tmp_path / "nesy.json"
+    sqlite_path = tmp_path / "nesy.db"
+    config_path.write_text(
+        json.dumps({"storage": {"backend": "sqlite", "sqlite_path": str(sqlite_path)}}),
+        encoding="utf-8",
+    )
+    store = create_relation_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    )
+
+    anyio.run(
+        call_tool,
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "audit",
+            "list",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["count"] == 1
+    assert payload["entries"][0]["tool_name"] == ASSERT_RELATIONS
+    assert payload["entries"][0]["result_status"] == "ok"
+    assert "arguments" not in payload["entries"][0]
+    assert '"source"' not in completed.stdout
+    assert '"target"' not in completed.stdout
+    assert "sufficient" not in completed.stdout
     assert completed.stderr == ""

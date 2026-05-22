@@ -73,6 +73,35 @@ async def test_load_relations_inline_migrates_legacy_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_relations_json_file_migrates_legacy_fields(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    path = allowed / "relations.json"
+    path.write_text(
+        json.dumps({"relations": [{"from": "A", "to": "B", "type": "equivalent"}]}),
+        encoding="utf-8",
+    )
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "file",
+            "path": str(path),
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    relation = store.list_relations()[0]
+    assert result.isError is False
+    assert result.structuredContent["diagnostics"][0]["code"] == "LEGACY_FIELDS_MIGRATED"
+    assert relation.source == "A"
+    assert relation.target == "B"
+    assert relation.relation_type == "equivalent"
+
+
+@pytest.mark.asyncio
 async def test_load_relations_jsonl_migrates_legacy_fields(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
