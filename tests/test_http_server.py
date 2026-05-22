@@ -31,7 +31,7 @@ def test_http_health_requires_bearer_token() -> None:
 
     assert rejected.status_code == 401
     assert accepted.status_code == 200
-    assert accepted.json()["version"] == "0.7.0"
+    assert accepted.json()["version"] == "0.8.0"
 
 
 def test_http_rejects_bad_origin() -> None:
