@@ -22,10 +22,10 @@ from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
 from nesy_reasoning_mcp.tool_common import (
     _contradiction_trace,
     _exclusive_group_dump,
+    _normalization_trace,
     _record_dump,
     _temporary_fact_records,
 )
-from nesy_reasoning_mcp.tool_reasoning import _normalization_trace
 
 
 async def assert_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:

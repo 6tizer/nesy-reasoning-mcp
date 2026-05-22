@@ -413,20 +413,3 @@ def _searched_chain_trace(
         trace.append("No valid implication path found in either direction.")
     trace.append(f"Mapped reachability to relation_type: {classification.value}.")
     return trace
-
-
-def _normalization_trace(record: RelationRecord) -> str:
-    if record.relation_type == "necessary":
-        return (
-            f"normalized necessary({record.source}, {record.target}) into implication edge "
-            f"{record.target} -> {record.source}"
-        )
-    if record.relation_type == "equivalent":
-        return (
-            f"normalized equivalent({record.source}, {record.target}) into implication edges "
-            f"{record.source} -> {record.target} and {record.target} -> {record.source}"
-        )
-    return (
-        f"normalized sufficient({record.source}, {record.target}) into implication edge "
-        f"{record.source} -> {record.target}"
-    )

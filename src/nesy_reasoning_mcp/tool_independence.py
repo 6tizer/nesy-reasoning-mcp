@@ -10,7 +10,7 @@ from nesy_reasoning_mcp.schemas import (
     IndependenceRecord,
     RelationRecord,
 )
-from nesy_reasoning_mcp.tool_summary import _exclusive_group_compatible_with_context_filter
+from nesy_reasoning_mcp.tool_common import _exclusive_group_compatible_with_context_filter
 
 
 def _path_independence_from_if_not(

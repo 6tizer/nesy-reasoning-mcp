@@ -6,6 +6,7 @@ from typing import Any
 
 from nesy_reasoning_mcp.schemas import (
     CheckContradictionsInput,
+    ContextFilter,
     ContradictionMode,
     ExclusiveGroupRecord,
     IndependenceRecord,
@@ -33,6 +34,19 @@ def _exclusive_group_matches_filter(
     return not (
         relation_filter.domain is not None
         and group.metadata.get("domain") != relation_filter.domain
+    )
+
+
+def _exclusive_group_compatible_with_context_filter(
+    group: ExclusiveGroupRecord,
+    context_filter: ContextFilter,
+) -> bool:
+    if context_filter.store_id and group.store_id != context_filter.store_id:
+        return False
+    return not (
+        context_filter.context_id
+        and group.scope.value == "same_context"
+        and group.context_id != context_filter.context_id
     )
 
 
@@ -142,3 +156,20 @@ def _contradiction_trace(
     else:
         trace.append("No hard contradictions found.")
     return trace
+
+
+def _normalization_trace(record: RelationRecord) -> str:
+    if record.relation_type == "necessary":
+        return (
+            f"normalized necessary({record.source}, {record.target}) into implication edge "
+            f"{record.target} -> {record.source}"
+        )
+    if record.relation_type == "equivalent":
+        return (
+            f"normalized equivalent({record.source}, {record.target}) into implication edges "
+            f"{record.source} -> {record.target} and {record.target} -> {record.source}"
+        )
+    return (
+        f"normalized sufficient({record.source}, {record.target}) into implication edge "
+        f"{record.source} -> {record.target}"
+    )

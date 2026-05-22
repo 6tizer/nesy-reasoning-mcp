@@ -6,12 +6,12 @@ from typing import Any
 
 from nesy_reasoning_mcp.reasoning import relations_compatible_with_filter
 from nesy_reasoning_mcp.schemas import (
-    ContextFilter,
     ExclusiveGroupRecord,
     RelationRecord,
     SummarizeGraphInput,
 )
 from nesy_reasoning_mcp.store import RelationStore, graph_stats_for
+from nesy_reasoning_mcp.tool_common import _exclusive_group_compatible_with_context_filter
 
 
 async def summarize_graph(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
@@ -92,19 +92,6 @@ def _summary_exclusive_groups(
     return sorted(
         selected,
         key=lambda item: (item.store_id, item.context_id, item.group_id),
-    )
-
-
-def _exclusive_group_compatible_with_context_filter(
-    group: ExclusiveGroupRecord,
-    context_filter: ContextFilter,
-) -> bool:
-    if context_filter.store_id and group.store_id != context_filter.store_id:
-        return False
-    return not (
-        context_filter.context_id
-        and group.scope.value == "same_context"
-        and group.context_id != context_filter.context_id
     )
 
 
