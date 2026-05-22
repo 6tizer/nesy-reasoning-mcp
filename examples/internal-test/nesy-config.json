@@ -1,0 +1,42 @@
+{
+  "storage": {
+    "backend": "sqlite",
+    "sqlite_path": "~/.nesy-reasoning/internal-test/nesy.db",
+    "default_store_id": "default",
+    "default_context_id": "default"
+  },
+  "security": {
+    "allowed_roots": [
+      "/Users/mac-mini/Documents/nesy-reasoning-mcp",
+      "~/.nesy-reasoning/relation_sets"
+    ],
+    "max_file_size_bytes": 5242880,
+    "allow_scope_all_clear": false,
+    "allow_hidden_relation_paths": false
+  },
+  "logging": {
+    "level": "info",
+    "audit_log": true
+  },
+  "hook": {
+    "timeout_seconds": 5,
+    "fail_closed": false,
+    "context_from_session": false
+  },
+  "http": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "path": "/mcp",
+    "allowed_origins": [
+      "http://127.0.0.1:8765",
+      "http://localhost:8765"
+    ],
+    "allowed_hosts": [
+      "127.0.0.1:8765",
+      "localhost:8765"
+    ],
+    "max_body_bytes": 1000000,
+    "request_timeout_seconds": 30,
+    "rate_limit_per_minute": 120
+  }
+}

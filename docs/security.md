@@ -30,6 +30,9 @@ The MCP server records write-tool audit events, but it does not implement a
 separate interactive confirmation prompt. Confirmation belongs in the MCP client,
 hook policy, or deployment wrapper.
 
+For the internal-test confirmation policy, see
+[tool-policy.md](../examples/internal-test/tool-policy.md).
+
 ## File Access
 
 `load_relations` and `export_relations` only allow `.json` and `.jsonl` under

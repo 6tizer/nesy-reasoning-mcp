@@ -71,6 +71,9 @@ uv run nesy-reasoning-mcp hook stop
 Hook use should share SQLite, JSON storage, or HTTP daemon state with the MCP
 server. Process memory cannot be shared between stdio MCP and hook processes.
 
+For the recommended internal-test SQLite profile, use
+[Internal Testing](docs/internal-testing.md).
+
 ## Relation Sets And Security
 
 Relation sets can include explicit `independence_records`; `nesy.classify` uses
@@ -124,6 +127,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtu
 - [Development](docs/development.md)
 - [Evaluation](docs/evaluation.md)
 - [Security](docs/security.md)
+- [Internal Testing](docs/internal-testing.md)
 - [Install as MCP server](docs/install.md)
 
 Example configs:
