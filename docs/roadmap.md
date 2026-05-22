@@ -22,8 +22,10 @@ v1.0 is the current implementation baseline:
 - Relation load/export with allowed roots and safe local `file://` resource URIs.
 - Hidden relation paths blocked by default unless explicitly configured.
 - Write-operation audit log.
+- Local audit inspection CLI.
+- Legacy relation-set import aliases at the load boundary.
 - Compact graph summary.
-- Claude Code Stop and PreToolUse hook helpers.
+- Claude Code Stop and PreToolUse hook helpers with configurable focus terms.
 - Local install docs and CI smoke coverage.
 - Offline benchmark fixtures and deterministic eval runner.
 - Optional live OpenAI LLM-only baseline evaluator.

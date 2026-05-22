@@ -21,7 +21,13 @@
   "hook": {
     "timeout_seconds": 5,
     "fail_closed": false,
-    "context_from_session": false
+    "context_from_session": false,
+    "focus_term_sources": [
+      "tool_name",
+      "cwd_basename",
+      "tool_input_strings"
+    ],
+    "focus_terms": []
   },
   "http": {
     "host": "127.0.0.1",

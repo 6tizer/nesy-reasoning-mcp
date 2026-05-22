@@ -7,6 +7,7 @@ import sys
 
 import anyio
 
+from nesy_reasoning_mcp.audit_cli import run_audit_cli
 from nesy_reasoning_mcp.evaluation import run_eval_cli, run_llm_eval_cli
 from nesy_reasoning_mcp.hooks import run_pretooluse_hook, run_stop_hook
 from nesy_reasoning_mcp.http_server import run_http_server
@@ -19,6 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     hook_parser = subparsers.add_parser("hook", help="Run a Claude Code hook helper.")
     hook_parser.add_argument("hook_name", choices=["pretooluse", "stop"])
+    audit_parser = subparsers.add_parser("audit", help="Inspect local audit logs.")
+    audit_subparsers = audit_parser.add_subparsers(dest="audit_command")
+    audit_list_parser = audit_subparsers.add_parser("list", help="List recent audit entries.")
+    audit_list_parser.add_argument("--format", choices=["text", "json"], default="text")
+    audit_list_parser.add_argument("--limit", type=int, default=50)
+    audit_list_parser.add_argument("--tool-name", default=None)
+    audit_list_parser.add_argument("--result-status", default=None)
     eval_parser = subparsers.add_parser("eval", help="Run offline evaluation helpers.")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command")
     eval_run_parser = eval_subparsers.add_parser("run", help="Run an offline benchmark fixture.")
@@ -96,6 +104,11 @@ def main(argv: list[str] | None = None) -> None:
         if args.hook_name == "pretooluse":
             sys.exit(run_pretooluse_hook())
         sys.exit(run_stop_hook())
+    if args.command == "audit":
+        try:
+            sys.exit(run_audit_cli(args))
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.command == "eval":
         if args.eval_command == "run":
             sys.exit(run_eval_cli(args))

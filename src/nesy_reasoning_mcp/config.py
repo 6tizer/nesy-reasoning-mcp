@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,6 +52,15 @@ class LoggingConfig(BaseModel):
     audit_log: bool = True
 
 
+FocusTermSource = Literal[
+    "tool_name",
+    "cwd_basename",
+    "tool_input_strings",
+    "cwd_path_segments",
+    "configured_terms",
+]
+
+
 class HookConfig(BaseModel):
     """Claude Code hook integration settings."""
 
@@ -62,6 +71,10 @@ class HookConfig(BaseModel):
     context_id: str | None = None
     domain: str | None = None
     context_from_session: bool = False
+    focus_term_sources: list[FocusTermSource] = Field(
+        default_factory=lambda: ["tool_name", "cwd_basename", "tool_input_strings"]
+    )
+    focus_terms: list[str] = Field(default_factory=list)
 
 
 class HttpConfig(BaseModel):
@@ -129,6 +142,10 @@ def load_config(
         data.setdefault("hook", {})["domain"] = hook_domain
     if context_from_session := env_map.get("NESY_HOOK_CONTEXT_FROM_SESSION"):
         data.setdefault("hook", {})["context_from_session"] = _env_bool(context_from_session)
+    if focus_term_sources := env_map.get("NESY_HOOK_FOCUS_TERM_SOURCES"):
+        data.setdefault("hook", {})["focus_term_sources"] = _env_csv(focus_term_sources)
+    if focus_terms := env_map.get("NESY_HOOK_FOCUS_TERMS"):
+        data.setdefault("hook", {})["focus_terms"] = _env_csv(focus_terms)
     if http_host := env_map.get("NESY_HTTP_HOST"):
         data.setdefault("http", {})["host"] = http_host
     if http_port := env_map.get("NESY_HTTP_PORT"):
@@ -169,7 +186,13 @@ def _default_config_data(cwd: Path) -> dict[str, Any]:
             "allow_hidden_relation_paths": False,
         },
         "logging": {"level": "info", "audit_log": True},
-        "hook": {"timeout_seconds": 5, "fail_closed": False, "context_from_session": False},
+        "hook": {
+            "timeout_seconds": 5,
+            "fail_closed": False,
+            "context_from_session": False,
+            "focus_term_sources": ["tool_name", "cwd_basename", "tool_input_strings"],
+            "focus_terms": [],
+        },
         "http": {
             "host": "127.0.0.1",
             "port": 8765,

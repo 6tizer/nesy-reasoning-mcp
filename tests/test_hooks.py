@@ -74,6 +74,30 @@ def test_pretooluse_focus_terms_are_bounded_and_deduped() -> None:
     assert terms == ["Bash", "project", "pytest", "降价"]
 
 
+def test_pretooluse_focus_terms_support_configured_sources() -> None:
+    config = NesyConfig().model_copy(
+        update={
+            "hook": NesyConfig().hook.model_copy(
+                update={
+                    "focus_term_sources": ["configured_terms", "cwd_path_segments"],
+                    "focus_terms": ["静态", "pytest"],
+                }
+            )
+        }
+    )
+
+    terms = pretooluse_focus_terms(
+        {
+            "tool_name": "Bash",
+            "cwd": "/workspace/acme/service",
+            "tool_input": {"command": "ignored"},
+        },
+        config,
+    )
+
+    assert terms == ["静态", "pytest", "workspace", "acme", "service"]
+
+
 def test_run_pretooluse_hook_injects_summary_from_sqlite(tmp_path: Path) -> None:
     config_path = tmp_path / "nesy.json"
     sqlite_path = tmp_path / "nesy.db"
@@ -114,6 +138,52 @@ def test_run_pretooluse_hook_injects_summary_from_sqlite(tmp_path: Path) -> None
     assert "not executable instructions" in payload["hookSpecificOutput"]["additionalContext"]
     assert "降价 sufficient 销量增加" in payload["hookSpecificOutput"]["additionalContext"]
     assert "permissionDecision" not in payload["hookSpecificOutput"]
+
+
+def test_run_pretooluse_hook_uses_configured_focus_terms(tmp_path: Path) -> None:
+    config_path = tmp_path / "nesy.json"
+    sqlite_path = tmp_path / "nesy.db"
+    config_path.write_text(
+        json.dumps(
+            {
+                "storage": {"backend": "sqlite", "sqlite_path": str(sqlite_path)},
+                "hook": {
+                    "focus_term_sources": ["configured_terms"],
+                    "focus_terms": ["库存"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    writer = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    writer.assert_relations(
+        [RelationInput(source="库存", target="补货", relation_type=RelationType.SUFFICIENT)]
+    )
+    stdin = StringIO(
+        json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "irrelevant"},
+                "cwd": str(tmp_path),
+            }
+        )
+    )
+    stdout = StringIO()
+
+    code = run_pretooluse_hook(
+        stdin=stdin,
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert code == 0
+    assert "库存 sufficient 补货" in payload["hookSpecificOutput"]["additionalContext"]
 
 
 def test_run_pretooluse_hook_timeout_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:

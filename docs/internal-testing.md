@@ -85,6 +85,34 @@ Default hook behavior is fail-open. For stricter internal tests:
 export NESY_HOOK_FAIL_CLOSED=true
 ```
 
+PreToolUse summary recall is deterministic. By default it uses the tool name,
+the current working-directory basename, and string leaves from `tool_input`.
+For projects with stable domain terms, add configured focus terms:
+
+```json
+{
+  "hook": {
+    "focus_term_sources": [
+      "configured_terms",
+      "tool_name",
+      "cwd_basename",
+      "tool_input_strings"
+    ],
+    "focus_terms": ["pricing", "inventory"]
+  }
+}
+```
+
+Equivalent env overrides:
+
+```bash
+export NESY_HOOK_FOCUS_TERM_SOURCES='configured_terms,tool_name,cwd_path_segments,tool_input_strings'
+export NESY_HOOK_FOCUS_TERMS='pricing,inventory'
+```
+
+Use `NESY_HOOK_CONTEXT_ID` and `NESY_HOOK_DOMAIN` to bind hooks to a known graph
+slice when workspace/tool input terms are too broad.
+
 ## Agent Fact Protocol
 
 Agents must write structured facts explicitly. Plain natural-language answers
@@ -119,6 +147,31 @@ rm -f ~/.nesy-reasoning/internal-test/nesy.db
 ```
 
 Export a relation set through MCP before sharing or archiving long-lived state.
+
+## Audit Inspection
+
+Mutating tools write audit entries when `logging.audit_log=true`. Inspect recent
+entries through the local CLI:
+
+```bash
+NESY_CONFIG=/Users/mac-mini/Documents/nesy-reasoning-mcp/examples/internal-test/nesy-config.json \
+  uv run nesy-reasoning-mcp audit list --format json --limit 20
+```
+
+Audit entries show tool name, input hash, status, timestamp, and metadata. They
+do not include raw tool arguments.
+
+## Legacy Relation Sets
+
+`nesy.load_relations` accepts older relation field names at the import boundary:
+
+- `from` -> `source`
+- `to` -> `target`
+- `type` -> `relation_type`
+- `temporal_delay` -> `temporal.delay`
+
+Successful migration returns an info diagnostic. Export always writes the
+canonical field names.
 
 ## Known Boundaries
 

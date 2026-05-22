@@ -19,6 +19,7 @@ from nesy_reasoning_mcp.tools import CHECK_CONTRADICTIONS, SUMMARIZE_GRAPH, call
 
 FOCUS_TERM_LIMIT = 20
 FOCUS_TERM_MAX_CHARS = 200
+DEFAULT_FOCUS_TERM_SOURCES = ["tool_name", "cwd_basename", "tool_input_strings"]
 
 
 class _HookTimeout(Exception):
@@ -56,16 +57,25 @@ def hook_context_filter(payload: Mapping[str, Any], config: NesyConfig) -> Conte
     )
 
 
-def pretooluse_focus_terms(payload: Mapping[str, Any]) -> list[str]:
+def pretooluse_focus_terms(
+    payload: Mapping[str, Any],
+    config: NesyConfig | None = None,
+) -> list[str]:
     """Extract bounded focus terms from a PreToolUse hook payload."""
     raw_terms = []
+    sources = config.hook.focus_term_sources if config is not None else DEFAULT_FOCUS_TERM_SOURCES
     tool_name = payload.get("tool_name")
     cwd = payload.get("cwd")
-    if isinstance(tool_name, str):
+    if "configured_terms" in sources and config is not None:
+        raw_terms.extend(config.hook.focus_terms)
+    if "tool_name" in sources and isinstance(tool_name, str):
         raw_terms.append(tool_name)
-    if isinstance(cwd, str):
+    if "cwd_basename" in sources and isinstance(cwd, str):
         raw_terms.append(Path(cwd).name)
-    raw_terms.extend(_string_leaf_values(payload.get("tool_input")))
+    if "cwd_path_segments" in sources and isinstance(cwd, str):
+        raw_terms.extend(_cwd_path_segments(cwd))
+    if "tool_input_strings" in sources:
+        raw_terms.extend(_string_leaf_values(payload.get("tool_input")))
     return _dedupe_terms(raw_terms)
 
 
@@ -119,7 +129,7 @@ def _pretooluse_action(
 ) -> None:
     payload = _read_hook_payload(stdin)
     store = create_hook_store(config, stderr=stderr)
-    focus_terms = pretooluse_focus_terms(payload)
+    focus_terms = pretooluse_focus_terms(payload, config)
     context_filter = hook_context_filter(payload, config)
     result = anyio.run(
         call_tool,
@@ -318,6 +328,11 @@ def _string_leaf_values(value: Any) -> list[str]:
             values.extend(_string_leaf_values(item))
         return values
     return []
+
+
+def _cwd_path_segments(cwd: str) -> list[str]:
+    path = Path(cwd)
+    return [part for part in path.parts if part and part not in {path.anchor, "/"}]
 
 
 def _dedupe_terms(values: list[str]) -> list[str]:

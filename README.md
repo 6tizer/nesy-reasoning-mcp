@@ -13,6 +13,8 @@ v1.0 provides:
 - Claude Code Stop and PreToolUse hook helpers.
 - Offline benchmark evaluation and optional live OpenAI LLM baseline evaluation.
 - Security docs, audit logging, and SPEC compliance tracking.
+- Local audit inspection CLI, legacy relation-set import aliases, and tunable
+  PreToolUse summary recall.
 
 ## Tools
 
@@ -89,6 +91,12 @@ restricted to `allowed_roots`. Hidden relation paths are blocked by default unle
 HTTP mode binds locally by default and requires `NESY_LOCAL_TOKEN`. File tools and
 state-mutating tools should still be treated as user-confirmation operations in
 MCP clients or wrappers.
+
+Inspect audit history from the configured store:
+
+```bash
+NESY_CONFIG=/path/to/nesy-config.json uv run nesy-reasoning-mcp audit list --format json
+```
 
 ## Evaluation
 

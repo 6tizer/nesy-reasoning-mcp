@@ -11,6 +11,8 @@ def test_config_defaults_to_memory_and_allowed_roots(tmp_path: Path) -> None:
     assert str(tmp_path) in config.security.allowed_roots
     assert normalized_allowed_roots(config)[0] == tmp_path.resolve()
     assert config.security.allow_hidden_relation_paths is False
+    assert config.hook.focus_term_sources == ["tool_name", "cwd_basename", "tool_input_strings"]
+    assert config.hook.focus_terms == []
 
 
 def test_config_file_and_env_override(tmp_path: Path) -> None:
@@ -59,6 +61,8 @@ def test_hook_config_file_and_env_override(tmp_path: Path) -> None:
                     "fail_closed": True,
                     "context_id": "from_file",
                     "domain": "from_file_domain",
+                    "focus_term_sources": ["configured_terms"],
+                    "focus_terms": ["from_file"],
                 }
             }
         ),
@@ -73,6 +77,8 @@ def test_hook_config_file_and_env_override(tmp_path: Path) -> None:
             "NESY_HOOK_CONTEXT_ID": "from_env",
             "NESY_HOOK_DOMAIN": "from_env_domain",
             "NESY_HOOK_CONTEXT_FROM_SESSION": "true",
+            "NESY_HOOK_FOCUS_TERM_SOURCES": "configured_terms,cwd_path_segments",
+            "NESY_HOOK_FOCUS_TERMS": "from_env,extra",
         },
         cwd=tmp_path,
     )
@@ -82,6 +88,8 @@ def test_hook_config_file_and_env_override(tmp_path: Path) -> None:
     assert config.hook.context_id == "from_env"
     assert config.hook.domain == "from_env_domain"
     assert config.hook.context_from_session is True
+    assert config.hook.focus_term_sources == ["configured_terms", "cwd_path_segments"]
+    assert config.hook.focus_terms == ["from_env", "extra"]
 
 
 def test_http_config_file_and_env_override(tmp_path: Path) -> None:

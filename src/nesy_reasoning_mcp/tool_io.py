@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -23,6 +24,7 @@ from nesy_reasoning_mcp.schemas import (
     LoadSourceType,
     RelationRecord,
     RelationSetData,
+    RelationType,
 )
 from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tool_common import (
@@ -39,12 +41,13 @@ from nesy_reasoning_mcp.tool_common import (
 
 async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dict[str, Any]:
     """Handle `nesy.load_relations`."""
-    payload = LoadRelationsInput.model_validate(arguments)
-
     try:
-        data, source_trace = _load_relation_set_data(payload, store)
+        migrated_arguments, migration_diagnostics = _migrate_load_arguments(arguments)
+        payload = LoadRelationsInput.model_validate(migrated_arguments)
+        data, source_trace, parse_diagnostics = _load_relation_set_data(payload, store)
     except (OSError, ValueError, ValidationError) as exc:
         return _load_error("LOAD_RELATIONS_FAILED", str(exc), store)
+    diagnostics = [*migration_diagnostics, *parse_diagnostics]
 
     incoming_relations = _relations_for_store(data.relations, payload.store_id)
     incoming_groups = _groups_for_store(data.exclusive_groups, payload.store_id)
@@ -87,7 +90,7 @@ async def load_relations(arguments: dict[str, Any], store: RelationStore) -> dic
         "rejected": 0,
         "conflicts": contradictions,
         "validate_only": payload.validate_only,
-        "diagnostics": [],
+        "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
         "trace": [
             *source_trace,
             (
@@ -195,27 +198,25 @@ async def export_relations(arguments: dict[str, Any], store: RelationStore) -> d
 def _load_relation_set_data(
     payload: LoadRelationsInput,
     store: RelationStore,
-) -> tuple[RelationSetData, list[str]]:
+) -> tuple[RelationSetData, list[str], list[Diagnostic]]:
     if payload.source_type == LoadSourceType.INLINE:
         if payload.data is None:
             raise ValueError("data is required when source_type=inline")
-        return payload.data, ["Read inline relation set."]
+        return payload.data, ["Read inline relation set."], []
 
     if payload.source_type == LoadSourceType.FILE:
         if payload.path is None:
             raise ValueError("path is required when source_type=file")
         real_path, text = read_allowed_relation_file(payload.path, store.config)
-        return _parse_relation_set_text(text, real_path.suffix), [
-            f"Read relation set from {real_path}."
-        ]
+        data, diagnostics = _parse_relation_set_text(text, real_path.suffix)
+        return data, [f"Read relation set from {real_path}."], diagnostics
 
     if payload.source_type == LoadSourceType.RESOURCE_URI:
         if payload.resource_uri is None:
             raise ValueError("resource_uri is required when source_type=resource_uri")
         real_path, text = _read_resource_uri(payload.resource_uri, store)
-        return _parse_relation_set_text(text, real_path.suffix), [
-            f"Read relation set from resource URI {payload.resource_uri}."
-        ]
+        data, diagnostics = _parse_relation_set_text(text, real_path.suffix)
+        return data, [f"Read relation set from resource URI {payload.resource_uri}."], diagnostics
 
     raise ValueError(f"unsupported source_type: {payload.source_type.value}")
 
@@ -223,7 +224,7 @@ def _load_relation_set_data(
 def _read_resource_uri(resource_uri: str, store: RelationStore) -> tuple[Path, str]:
     parsed = urlparse(resource_uri)
     if parsed.scheme != "file":
-        raise ValueError(f"resource_uri scheme is not supported in v0.7: {parsed.scheme}")
+        raise ValueError(f"resource_uri supports local file:// URIs only: {parsed.scheme}")
     if parsed.netloc not in {"", "localhost"}:
         raise ValueError("file resource_uri host must be empty or localhost")
     path = unquote(parsed.path)
@@ -232,14 +233,16 @@ def _read_resource_uri(resource_uri: str, store: RelationStore) -> tuple[Path, s
     return read_allowed_relation_file(path, store.config)
 
 
-def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
+def _parse_relation_set_text(text: str, suffix: str) -> tuple[RelationSetData, list[Diagnostic]]:
     if suffix == ".json":
-        return RelationSetData.model_validate(json.loads(text))
+        migrated, count = _migrate_relation_set_payload(json.loads(text))
+        return RelationSetData.model_validate(migrated), _legacy_diagnostics(count)
     if suffix == ".jsonl":
         relations = []
         exclusive_groups = []
         independence_records = []
         context_metadata: dict[str, Any] = {}
+        migrated_count = 0
         for line_number, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             if not stripped:
@@ -260,14 +263,16 @@ def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
                 independence_records.append(record)
             elif item_type == "exclusive_group" or "members" in record:
                 exclusive_groups.append(record)
-            elif item_type == "relation" or "relation_type" in record:
-                relations.append(record)
+            elif item_type == "relation" or _looks_like_relation_record(record):
+                migrated_record, count = _migrate_relation_record_payload(record)
+                migrated_count += count
+                relations.append(migrated_record)
             else:
                 raise ValueError(
                     f"line {line_number} is not a relation, exclusive group, "
                     "independence record, or context metadata"
                 )
-        return RelationSetData.model_validate(
+        data = RelationSetData.model_validate(
             {
                 "relations": relations,
                 "exclusive_groups": exclusive_groups,
@@ -275,7 +280,90 @@ def _parse_relation_set_text(text: str, suffix: str) -> RelationSetData:
                 "context_metadata": context_metadata,
             }
         )
+        return data, _legacy_diagnostics(migrated_count)
     raise ValueError("only .json and .jsonl files are allowed")
+
+
+def _migrate_load_arguments(arguments: dict[str, Any]) -> tuple[dict[str, Any], list[Diagnostic]]:
+    migrated = deepcopy(arguments)
+    if migrated.get("source_type") != LoadSourceType.INLINE.value or "data" not in migrated:
+        return migrated, []
+    migrated_data, count = _migrate_relation_set_payload(migrated["data"])
+    migrated["data"] = migrated_data
+    return migrated, _legacy_diagnostics(count)
+
+
+def _migrate_relation_set_payload(data: Any) -> tuple[Any, int]:
+    if not isinstance(data, dict):
+        return data, 0
+    migrated = deepcopy(data)
+    relations = migrated.get("relations")
+    if not isinstance(relations, list):
+        return migrated, 0
+    migrated_count = 0
+    migrated_relations = []
+    for relation in relations:
+        migrated_relation, count = _migrate_relation_record_payload(relation)
+        migrated_count += count
+        migrated_relations.append(migrated_relation)
+    migrated["relations"] = migrated_relations
+    return migrated, migrated_count
+
+
+def _migrate_relation_record_payload(record: Any) -> tuple[Any, int]:
+    if not isinstance(record, dict):
+        return record, 0
+    migrated = deepcopy(record)
+    count = 0
+    for old_key, new_key in (("from", "source"), ("to", "target"), ("type", "relation_type")):
+        if old_key not in migrated:
+            continue
+        if old_key == "type" and migrated[old_key] not in {item.value for item in RelationType}:
+            continue
+        if new_key in migrated and migrated[new_key] != migrated[old_key]:
+            raise ValueError(f"legacy field conflict: {old_key} differs from {new_key}")
+        if new_key not in migrated:
+            migrated[new_key] = migrated[old_key]
+            count += 1
+        del migrated[old_key]
+
+    if "temporal_delay" in migrated:
+        temporal = migrated.get("temporal")
+        if temporal is None:
+            temporal = {}
+        if not isinstance(temporal, dict):
+            raise ValueError("legacy field conflict: temporal is not an object")
+        if "delay" in temporal and temporal["delay"] != migrated["temporal_delay"]:
+            raise ValueError("legacy field conflict: temporal_delay differs from temporal.delay")
+        if "delay" not in temporal:
+            temporal["delay"] = migrated["temporal_delay"]
+            count += 1
+        migrated["temporal"] = temporal
+        del migrated["temporal_delay"]
+
+    return migrated, count
+
+
+def _looks_like_relation_record(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if "relation_type" in record:
+        return True
+    if record.get("type") in {item.value for item in RelationType}:
+        return True
+    return any(key in record for key in ("from", "to", "temporal_delay"))
+
+
+def _legacy_diagnostics(count: int) -> list[Diagnostic]:
+    if count == 0:
+        return []
+    return [
+        Diagnostic(
+            level="info",
+            code="LEGACY_FIELDS_MIGRATED",
+            message=f"Migrated {count} legacy relation field(s) at load boundary.",
+        )
+    ]
 
 
 def _relation_set_export(

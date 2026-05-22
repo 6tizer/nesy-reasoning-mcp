@@ -74,3 +74,9 @@ memory is not shared across hook and MCP processes.
 Audit entries are stored for mutating tools when `logging.audit_log=true`.
 Entries include tool name, input hash, result status, timestamp, and metadata.
 They intentionally do not store plaintext secrets.
+
+Use the local CLI to inspect recent entries without exposing raw tool arguments:
+
+```bash
+NESY_CONFIG=/path/to/nesy-config.json uv run nesy-reasoning-mcp audit list --format json
+```

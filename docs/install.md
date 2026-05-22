@@ -127,6 +127,10 @@ Hidden relation paths under an allowed root are rejected by default. Set
 `security.allow_hidden_relation_paths=true` or `NESY_ALLOW_HIDDEN_RELATION_PATHS=true`
 only when hidden `.json` or `.jsonl` paths are intentional.
 
+`nesy.load_relations` can import legacy relation field names at the load boundary:
+`from`, `to`, `type`, and `temporal_delay`. Stored records and exports always use
+canonical fields: `source`, `target`, `relation_type`, and `temporal.delay`.
+
 ## Streamable HTTP Mode
 
 HTTP mode starts a local daemon at `127.0.0.1:8765/mcp` by default. It requires
@@ -181,6 +185,20 @@ NESY_FACTS:
 
 Default hook behavior is fail-open with a stderr warning. Set
 `NESY_HOOK_FAIL_CLOSED=true` for projects that should block on hook failures.
+PreToolUse focus terms can be tuned with `NESY_HOOK_FOCUS_TERM_SOURCES` and
+`NESY_HOOK_FOCUS_TERMS`; use `NESY_HOOK_CONTEXT_ID` or `NESY_HOOK_DOMAIN` when
+the graph should be scoped manually.
+
+## Audit CLI
+
+Inspect write-tool audit entries from the configured store:
+
+```bash
+NESY_CONFIG=/path/to/nesy-config.json uv run nesy-reasoning-mcp audit list --format json
+```
+
+The audit CLI reports tool name, input hash, status, timestamp, and metadata. It
+does not print raw tool arguments.
 
 ## Current Limits
 
