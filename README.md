@@ -269,6 +269,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fix
 - [Install as MCP server](docs/install.md)
 - [Internal testing profile](docs/internal-testing.md)
 - [Security](docs/security.md)
+- [Uninstall / rollback](docs/uninstall.md)
 - [Evaluation](docs/evaluation.md)
 - [Roadmap](docs/roadmap.md)
 - [Development](docs/development.md)

@@ -266,3 +266,5 @@ uv sync --reinstall-package nesy-reasoning-mcp
 
 The MCP config includes `PYTHONPATH=.../src` to avoid this editable-install issue on
 macOS environments where `.pth` files have the hidden flag.
+
+Need to roll back? See [Uninstall / rollback](uninstall.md).
