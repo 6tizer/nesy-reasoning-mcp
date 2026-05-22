@@ -1,17 +1,43 @@
 # Evaluation
 
-NeSy Reasoning uses deterministic offline fixtures for v0.8 evaluation. The
-default runner does not call an LLM and does not require API keys.
+NeSy Reasoning has two evaluation modes:
 
-## Run
+- deterministic offline fixtures for CI and regression testing
+- optional live OpenAI LLM-only baseline runs for manual comparison
+
+CI never calls an external API and never requires `OPENAI_API_KEY`.
+
+## Offline Fixture
 
 ```bash
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
 ```
 
-The runner exits with code `0` only when the full MCP score is at least
+The offline runner exits with code `0` only when the full MCP score is at least
 `--min-score` and every fixture case passes.
+
+## Live OpenAI Baseline
+
+Install the optional eval dependency and set a key only for manual live runs:
+
+```bash
+uv sync --extra eval
+export OPENAI_API_KEY='<set outside the repo>'
+env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
+  --fixture benchmarks/fixtures/core.json \
+  --case-id classify_direct_sufficient \
+  --format json
+```
+
+`eval llm` uses the OpenAI Responses API through the Python SDK. It sends each
+case's relation set, requested tool name, tool input, and expected matcher paths,
+then scores the returned JSON as an LLM-only baseline. Reports include MCP score,
+`live_baseline_scores.openai_llm_only`, and
+`live_marginal_contribution.openai_llm_only`.
+
+Live reports do not store the API key or full prompt. Run a small set first with
+`--case-id` to control cost.
 
 ## Fixture Shape
 
@@ -41,11 +67,6 @@ When a benchmark exposes a failure:
 
 1. Add or update a fixture case with the smallest relation set that reproduces it.
 2. Add a focused pytest assertion if the failure is a code regression.
-3. Keep baseline scores static and explain any changed score in the PR.
-4. Run the eval runner and the full local gate before opening the PR.
-
-## Scope
-
-v0.8 intentionally uses offline baselines. A real LLM runner can be added later
-as an optional extension with explicit API-key setup, cost limits, and skip-by-default
-CI behavior.
+3. Keep static baseline scores stable unless the fixture changes.
+4. Explain any live LLM score change in the PR if the live runner was used.
+5. Run the offline eval runner and the full local gate before opening the PR.

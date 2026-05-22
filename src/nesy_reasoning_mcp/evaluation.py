@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +24,8 @@ EvalCategory = Literal[
     "counterfactual",
     "business",
 ]
+EvalProvider = Literal["openai"]
+OPENAI_LLM_ONLY = "openai_llm_only"
 
 
 class ExpectedSpec(BaseModel):
@@ -90,10 +95,54 @@ def run_eval_cli(args: Any) -> int:
     return 0 if status_ok else 1
 
 
+def run_llm_eval_cli(args: Any) -> int:
+    """Run live LLM baseline evaluation from argparse args."""
+    try:
+        report = anyio.run(
+            run_llm_eval_file,
+            Path(args.fixture),
+            args.provider,
+            args.model,
+            args.case_id,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    status_ok = report["status"] == "pass"
+    text = _json_report(report) if args.format == "json" else _llm_text_report(report)
+    if args.output:
+        Path(args.output).write_text(text + ("\n" if text else ""), encoding="utf-8")
+    else:
+        print(text)
+    return 0 if status_ok else 1
+
+
 async def run_eval_file(path: Path, min_score: float = 1.0) -> dict[str, Any]:
     """Evaluate a fixture file and return a structured report."""
     fixture = BenchmarkFixture.model_validate_json(path.read_text(encoding="utf-8"))
     return await run_fixture(fixture, fixture_path=str(path), min_score=min_score)
+
+
+async def run_llm_eval_file(
+    path: Path,
+    provider: EvalProvider = "openai",
+    model: str = "gpt-5.2",
+    case_ids: list[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    client_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate a live LLM-only baseline against a benchmark fixture."""
+    fixture = BenchmarkFixture.model_validate_json(path.read_text(encoding="utf-8"))
+    filtered = _filter_fixture_cases(fixture, case_ids or [])
+    return await run_llm_fixture(
+        filtered,
+        fixture_path=str(path),
+        provider=provider,
+        model=model,
+        env=env,
+        client_factory=client_factory,
+    )
 
 
 async def run_fixture(
@@ -124,6 +173,49 @@ async def run_fixture(
         "marginal_contribution": marginal,
         "metrics": metrics,
         "cases": case_results,
+    }
+
+
+async def run_llm_fixture(
+    fixture: BenchmarkFixture,
+    *,
+    fixture_path: str | None = None,
+    provider: EvalProvider = "openai",
+    model: str = "gpt-5.2",
+    env: Mapping[str, str] | None = None,
+    client_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate a live LLM-only baseline and compare it with the deterministic MCP run."""
+    if provider != "openai":
+        raise ValueError(f"unsupported eval provider: {provider}")
+    env_map = os.environ if env is None else env
+    api_key = env_map.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is required for eval llm with provider=openai")
+
+    mcp_report = await run_fixture(fixture, fixture_path=fixture_path)
+    llm_results = [
+        await _run_llm_case(case, model=model, api_key=api_key, client_factory=client_factory)
+        for case in fixture.cases
+    ]
+    llm_score = round(_average(item["score"] for item in llm_results), 6)
+    return {
+        "status": "pass" if mcp_report["status"] == "pass" else "fail",
+        "fixture": fixture.name,
+        "fixture_path": fixture_path,
+        "provider": provider,
+        "model": model,
+        "case_count": len(llm_results),
+        "llm_passed": sum(1 for item in llm_results if item["passed"]),
+        "llm_failed": [item["id"] for item in llm_results if not item["passed"]],
+        "full_mcp_score": mcp_report["full_mcp_score"],
+        "live_baseline_scores": {OPENAI_LLM_ONLY: llm_score},
+        "live_marginal_contribution": {
+            OPENAI_LLM_ONLY: round(mcp_report["full_mcp_score"] - llm_score, 6)
+        },
+        "metrics": mcp_report["metrics"],
+        "cases": llm_results,
+        "mcp_report": mcp_report,
     }
 
 
@@ -181,6 +273,60 @@ def _failed_case(
     }
 
 
+async def _run_llm_case(
+    case: BenchmarkCase,
+    *,
+    model: str,
+    api_key: str,
+    client_factory: Callable[[str], Any] | None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        prediction = await _openai_prediction(case, model, api_key, client_factory)
+    except json.JSONDecodeError:
+        latency_ms = (time.perf_counter() - started) * 1000
+        return _failed_llm_case(case, model, ["model output was not valid JSON"], latency_ms)
+    except ValueError:
+        raise
+    except Exception:
+        latency_ms = (time.perf_counter() - started) * 1000
+        return _failed_llm_case(case, model, ["provider call failed"], latency_ms)
+
+    latency_ms = (time.perf_counter() - started) * 1000
+    failures = _match_failures(prediction, case.expected)
+    passed = not failures
+    return {
+        "id": case.id,
+        "category": case.category,
+        "tool_name": case.tool_name,
+        "model": model,
+        "passed": passed,
+        "score": 1.0 if passed else 0.0,
+        "latency_ms": round(latency_ms, 3),
+        "failures": failures,
+        "prediction_keys": sorted(str(key) for key in prediction),
+    }
+
+
+def _failed_llm_case(
+    case: BenchmarkCase,
+    model: str,
+    failures: list[str],
+    latency_ms: float,
+) -> dict[str, Any]:
+    return {
+        "id": case.id,
+        "category": case.category,
+        "tool_name": case.tool_name,
+        "model": model,
+        "passed": False,
+        "score": 0.0,
+        "latency_ms": round(latency_ms, 3),
+        "failures": failures,
+        "prediction_keys": [],
+    }
+
+
 def _match_failures(payload: dict[str, Any], expected: ExpectedSpec) -> list[str]:
     failures: list[str] = []
     for path, expected_value in expected.equals.items():
@@ -196,6 +342,93 @@ def _match_failures(payload: dict[str, Any], expected: ExpectedSpec) -> list[str
         if len(values) < minimum:
             failures.append(f"{path} expected at least {minimum}, got {len(values)}")
     return failures
+
+
+async def _openai_prediction(
+    case: BenchmarkCase,
+    model: str,
+    api_key: str,
+    client_factory: Callable[[str], Any] | None,
+) -> dict[str, Any]:
+    client = client_factory(api_key) if client_factory else _openai_client(api_key)
+    prompt = _llm_prompt(case)
+    response = await anyio.to_thread.run_sync(
+        lambda: client.responses.create(model=model, input=prompt)
+    )
+    output_text = getattr(response, "output_text", "")
+    if not isinstance(output_text, str):
+        raise json.JSONDecodeError("output_text is not a string", "", 0)
+    parsed = _parse_json_prediction(output_text)
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError("model output must be a JSON object", output_text, 0)
+    return parsed
+
+
+def _openai_client(api_key: str) -> Any:
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "openai package is required for eval llm; install with `uv sync --extra eval`"
+        ) from exc
+    return OpenAI(api_key=api_key)
+
+
+def _llm_prompt(case: BenchmarkCase) -> str:
+    payload = {
+        "id": case.id,
+        "category": case.category,
+        "description": case.description,
+        "relation_set": case.relation_set.model_dump(mode="json"),
+        "tool_name": case.tool_name,
+        "tool_input": case.tool_input,
+        "expected_matchers": {
+            "equals": case.expected.equals,
+            "contains": case.expected.contains,
+            "min_count": case.expected.min_count,
+        },
+    }
+    return (
+        "You are evaluating a structured reasoning case without calling MCP tools. "
+        "Infer the expected tool result from the relation_set and tool_input. "
+        "Return only one JSON object. The object should include the fields needed "
+        "to satisfy expected_matchers. Do not use markdown.\n\n"
+        f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+    )
+
+
+def _parse_json_prediction(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end < start:
+            raise
+        return json.loads(stripped[start : end + 1])
+
+
+def _filter_fixture_cases(
+    fixture: BenchmarkFixture,
+    case_ids: list[str],
+) -> BenchmarkFixture:
+    if not case_ids:
+        return fixture
+    requested = set(case_ids)
+    selected = [case for case in fixture.cases if case.id in requested]
+    found = {case.id for case in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise ValueError(f"unknown benchmark case id(s): {', '.join(missing)}")
+    return BenchmarkFixture(version=fixture.version, name=fixture.name, cases=selected)
 
 
 def _values_at_path(payload: Any, path: str) -> list[Any]:
@@ -302,6 +535,24 @@ def _text_report(report: dict[str, Any]) -> str:
     lines.extend(f"- {key}: {value}" for key, value in report["marginal_contribution"].items())
     if report["failed"]:
         lines.append(f"failed: {', '.join(report['failed'])}")
+    return "\n".join(lines)
+
+
+def _llm_text_report(report: dict[str, Any]) -> str:
+    live_score = report["live_baseline_scores"][OPENAI_LLM_ONLY]
+    marginal = report["live_marginal_contribution"][OPENAI_LLM_ONLY]
+    lines = [
+        f"NeSy live evaluation: {report['status']}",
+        f"fixture: {report['fixture']}",
+        f"provider: {report['provider']}",
+        f"model: {report['model']}",
+        f"cases: {report['llm_passed']}/{report['case_count']}",
+        f"full_mcp_score: {report['full_mcp_score']:.3f}",
+        f"openai_llm_only: {live_score:.3f}",
+        f"marginal_contribution: {marginal:.3f}",
+    ]
+    if report["llm_failed"]:
+        lines.append(f"llm_failed: {', '.join(report['llm_failed'])}")
     return "\n".join(lines)
 
 

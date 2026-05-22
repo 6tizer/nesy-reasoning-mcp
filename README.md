@@ -1,9 +1,20 @@
 # NeSy Reasoning MCP
 
-Deterministic neuro-symbolic reasoning MCP server.
+Deterministic neuro-symbolic reasoning MCP server for structured causal,
+dependency, contradiction, and counterfactual checks.
 
-v0.9 provides a local MCP server with stdio and authenticated Streamable HTTP
-transports, memory/JSON/SQLite storage, and Claude Code hook helpers:
+v1.0 provides:
+
+- MCP stdio and authenticated local Streamable HTTP transports.
+- Memory, JSON, and SQLite relation stores.
+- Relation assertion, listing, clearing, import, and export.
+- Classification, chain verification, contradiction checks, graph summaries, and
+  counterfactual analysis.
+- Claude Code Stop and PreToolUse hook helpers.
+- Offline benchmark evaluation and optional live OpenAI LLM baseline evaluation.
+- Security docs, audit logging, and SPEC compliance tracking.
+
+## Tools
 
 - `nesy.assert_relations`
 - `nesy.list_relations`
@@ -17,67 +28,103 @@ transports, memory/JSON/SQLite storage, and Claude Code hook helpers:
 - `nesy.summarize_graph`
 - `nesy.counterfactual`
 
-## Development
+## Install
 
 ```bash
 uv sync
-uv run ruff format --check .
-uv run pytest
-uv run ruff check .
 ```
 
-For version planning and contribution gates, see:
+For optional live OpenAI baseline evaluation:
 
-- [docs/roadmap.md](docs/roadmap.md)
-- [docs/development.md](docs/development.md)
-- [docs/evaluation.md](docs/evaluation.md)
-- [docs/security.md](docs/security.md)
+```bash
+uv sync --extra eval
+```
 
-## Run
+## Quick Start
+
+Run as a stdio MCP server:
 
 ```bash
 uv run nesy-reasoning-mcp --transport stdio
 ```
 
-Authenticated local HTTP daemon:
+Run as an authenticated local HTTP daemon:
 
 ```bash
 NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
 ```
 
-Optional persistent storage:
+Use persistent SQLite storage:
 
 ```bash
 NESY_STORAGE_BACKEND=sqlite NESY_SQLITE_PATH=~/.nesy-reasoning/nesy.db \
   uv run nesy-reasoning-mcp --transport stdio
 ```
 
-Hook helpers:
+Run hook helpers:
 
 ```bash
 uv run nesy-reasoning-mcp hook pretooluse
 uv run nesy-reasoning-mcp hook stop
 ```
 
-Hook use should share SQLite or JSON storage with the MCP server. Process memory
-cannot be shared between stdio MCP and hook processes. HTTP daemon mode can also
-keep one long-running in-process store for multiple MCP clients.
+Hook use should share SQLite, JSON storage, or HTTP daemon state with the MCP
+server. Process memory cannot be shared between stdio MCP and hook processes.
+
+## Relation Sets And Security
 
 Relation sets can include explicit `independence_records`; `nesy.classify` uses
 them to prove `proven_not_necessary`, and `nesy.counterfactual` uses them to keep
-independent alternatives in `still_possible`. `nesy.load_relations` also accepts
-safe `file://` resource URIs inside configured `allowed_roots`.
+independent alternatives in `still_possible`.
 
-Offline benchmark evaluation:
+`nesy.load_relations` and `nesy.export_relations` accept `.json` and `.jsonl`
+inside configured `allowed_roots`. Local `file://` resource URI loads are also
+restricted to `allowed_roots`. Hidden relation paths are blocked by default unless
+`security.allow_hidden_relation_paths=true` or
+`NESY_ALLOW_HIDDEN_RELATION_PATHS=true` is set.
+
+HTTP mode binds locally by default and requires `NESY_LOCAL_TOKEN`. File tools and
+state-mutating tools should still be treated as user-confirmation operations in
+MCP clients or wrappers.
+
+## Evaluation
+
+Deterministic offline benchmark:
 
 ```bash
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
 ```
 
-## Install As MCP Server
+Optional live OpenAI LLM-only baseline:
 
-See [docs/install.md](docs/install.md) for Claude Desktop, Codex, Cursor, or any MCP client
-that supports stdio or Streamable HTTP servers.
+```bash
+export OPENAI_API_KEY='<set outside the repo>'
+env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
+  --fixture benchmarks/fixtures/core.json \
+  --case-id classify_direct_sufficient \
+  --format json
+```
+
+Live eval is manual-only. CI runs offline fixtures and never requires an API key.
+
+## Development
+
+```bash
+uv sync --locked
+uv run ruff format --check .
+uv run ruff check .
+uv run pytest
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
+```
+
+## Documentation
+
+- [SPEC compliance](SPEC_COMPLIANCE.md)
+- [Roadmap](docs/roadmap.md)
+- [Development](docs/development.md)
+- [Evaluation](docs/evaluation.md)
+- [Security](docs/security.md)
+- [Install as MCP server](docs/install.md)
 
 Example configs:
 

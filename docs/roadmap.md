@@ -5,7 +5,7 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.9 is the current implementation baseline:
+v1.0 is the current implementation baseline:
 
 - MCP stdio server.
 - Authenticated local Streamable HTTP daemon.
@@ -26,7 +26,9 @@ v0.9 is the current implementation baseline:
 - Claude Code Stop and PreToolUse hook helpers.
 - Local install docs and CI smoke coverage.
 - Offline benchmark fixtures and deterministic eval runner.
+- Optional live OpenAI LLM-only baseline evaluator.
 - Security and evaluation documentation.
+- SPEC compliance matrix.
 
 ## Version Gates
 
@@ -205,7 +207,7 @@ Acceptance:
 
 Out of scope:
 
-- Real LLM/API benchmark runner.
+- Live LLM/API benchmark runner, implemented later in v1.0.
 - Hosted evaluation dashboard.
 - New reasoning semantics.
 
@@ -231,10 +233,34 @@ Acceptance:
 - Explicit hidden-path opt-in restores access without weakening other file guards.
 - Hidden configured allowed roots are not rejected as a side effect.
 
+## v1.0: Evaluation And Compliance Closure
+
+Goal: mark the SPEC v2 core as complete for local deterministic reasoning use.
+
+Scope:
+
+- Add optional live OpenAI LLM-only benchmark evaluation.
+- Keep default CI deterministic and API-key-free.
+- Add root README coverage for install, tools, transports, storage, security,
+  hooks, and evaluation.
+- Add root SPEC compliance matrix.
+
+Public tools:
+
+- No new MCP tools. The new surface is `nesy-reasoning-mcp eval llm`.
+
+Acceptance:
+
+- Offline eval behavior remains stable.
+- Live LLM eval requires explicit `OPENAI_API_KEY` and optional eval dependency.
+- Live reports include MCP score, OpenAI LLM-only score, and marginal
+  contribution.
+- Root docs accurately state completed, intentionally out-of-scope, and future
+  SPEC items.
+
 ## Later
 
 - Natural-language relation extraction.
-- Real LLM benchmark runner.
 - Optional Postgres backend.
 - Team/server deployment model.
 - Richer contradiction classes beyond explicit exclusives.

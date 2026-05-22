@@ -7,7 +7,7 @@ import sys
 
 import anyio
 
-from nesy_reasoning_mcp.evaluation import run_eval_cli
+from nesy_reasoning_mcp.evaluation import run_eval_cli, run_llm_eval_cli
 from nesy_reasoning_mcp.hooks import run_pretooluse_hook, run_stop_hook
 from nesy_reasoning_mcp.http_server import run_http_server
 from nesy_reasoning_mcp.server import run_stdio_server
@@ -44,6 +44,40 @@ def build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Minimum full MCP score required for exit 0.",
     )
+    eval_llm_parser = eval_subparsers.add_parser("llm", help="Run a live LLM baseline fixture.")
+    eval_llm_parser.add_argument(
+        "--fixture",
+        default="benchmarks/fixtures/core.json",
+        help="Benchmark fixture JSON path.",
+    )
+    eval_llm_parser.add_argument(
+        "--provider",
+        choices=["openai"],
+        default="openai",
+        help="Live LLM provider.",
+    )
+    eval_llm_parser.add_argument(
+        "--model",
+        default="gpt-5.2",
+        help="Provider model name.",
+    )
+    eval_llm_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Evaluation report output format.",
+    )
+    eval_llm_parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional output path. Defaults to stdout.",
+    )
+    eval_llm_parser.add_argument(
+        "--case-id",
+        action="append",
+        default=[],
+        help="Optional benchmark case id. May be repeated.",
+    )
     parser.add_argument(
         "--transport",
         choices=["stdio", "http"],
@@ -65,6 +99,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "eval":
         if args.eval_command == "run":
             sys.exit(run_eval_cli(args))
+        if args.eval_command == "llm":
+            sys.exit(run_llm_eval_cli(args))
         parser.error("eval command requires a subcommand")
 
     try:
