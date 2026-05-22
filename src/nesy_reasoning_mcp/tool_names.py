@@ -1,0 +1,13 @@
+"""Public MCP tool names."""
+
+ASSERT_RELATIONS = "nesy.assert_relations"
+LIST_RELATIONS = "nesy.list_relations"
+CLEAR_RELATIONS = "nesy.clear_relations"
+CLASSIFY = "nesy.classify"
+VERIFY_CHAIN = "nesy.verify_chain"
+ASSERT_EXCLUSIVE = "nesy.assert_exclusive"
+CHECK_CONTRADICTIONS = "nesy.check_contradictions"
+LOAD_RELATIONS = "nesy.load_relations"
+EXPORT_RELATIONS = "nesy.export_relations"
+SUMMARIZE_GRAPH = "nesy.summarize_graph"
+COUNTERFACTUAL = "nesy.counterfactual"
