@@ -387,6 +387,24 @@ class CheckContradictionsInput(BaseModel):
     max_depth: int = Field(default=8, ge=1, le=20)
 
 
+class SummarizeGraphInput(BaseModel):
+    """Input for `nesy.summarize_graph`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    focus_terms: list[str] = Field(default_factory=list)
+    context_filter: ContextFilter = Field(default_factory=ContextFilter)
+    max_relations: int = Field(default=50, ge=1, le=200)
+    max_chars: int = Field(default=5000, ge=500, le=20000)
+    include_exclusives: bool = True
+
+    @field_validator("focus_terms")
+    @classmethod
+    def strip_focus_terms(cls, value: list[str]) -> list[str]:
+        """Strip focus terms and discard empty entries."""
+        return [item for item in (term.strip() for term in value) if item]
+
+
 class _PropositionPairInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

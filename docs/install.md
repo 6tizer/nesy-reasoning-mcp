@@ -62,6 +62,7 @@ Then restart or reload the MCP client.
 - `nesy.check_contradictions`
 - `nesy.load_relations`
 - `nesy.export_relations`
+- `nesy.summarize_graph`
 
 ## Persistent Storage
 
@@ -112,13 +113,42 @@ Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
 
 File load/export only accepts `.json` and `.jsonl` inside `allowed_roots`.
 
+## Claude Code Hook Helpers
+
+Hook helpers run as separate processes. Use SQLite or JSON storage so hooks see
+the same graph as the MCP server.
+
+Example hook config: [examples/claude-hooks.json](../examples/claude-hooks.json)
+
+Commands:
+
+```bash
+uv run nesy-reasoning-mcp hook pretooluse
+uv run nesy-reasoning-mcp hook stop
+```
+
+Stop hook checks `last_assistant_message`. If the answer contains a `NESY_FACTS:`
+JSON array, the hook checks those facts with the current graph. Without
+`NESY_FACTS`, it checks the current graph only.
+
+```text
+NESY_FACTS:
+[
+  {"source":"降价","target":"销量增加","relation_type":"sufficient"}
+]
+```
+
+Default hook behavior is fail-open with a stderr warning. Set
+`NESY_HOOK_FAIL_CLOSED=true` for projects that should block on hook failures.
+
 ## Current Limits
 
 - Default state is in memory only.
 - SQLite and JSON backends are local-only.
 - Contradiction detection only uses explicit exclusive groups.
 - No counterfactual reasoning yet.
-- No HTTP daemon or hook bridge yet.
+- No HTTP daemon yet.
+- No regex or LLM natural-language extraction in hooks yet.
 
 ## Troubleshooting
 

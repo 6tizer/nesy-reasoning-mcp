@@ -51,6 +51,18 @@ class LoggingConfig(BaseModel):
     audit_log: bool = True
 
 
+class HookConfig(BaseModel):
+    """Claude Code hook integration settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_seconds: float = Field(default=5, gt=0, le=60)
+    fail_closed: bool = False
+    context_id: str | None = None
+    domain: str | None = None
+    context_from_session: bool = False
+
+
 class NesyConfig(BaseModel):
     """Complete runtime configuration."""
 
@@ -59,6 +71,7 @@ class NesyConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    hook: HookConfig = Field(default_factory=HookConfig)
 
 
 def load_config(
@@ -86,6 +99,16 @@ def load_config(
         ]
     if log_level := env_map.get("NESY_LOG_LEVEL"):
         data.setdefault("logging", {})["level"] = log_level
+    if timeout := env_map.get("NESY_HOOK_TIMEOUT_SECONDS"):
+        data.setdefault("hook", {})["timeout_seconds"] = float(timeout)
+    if fail_closed := env_map.get("NESY_HOOK_FAIL_CLOSED"):
+        data.setdefault("hook", {})["fail_closed"] = _env_bool(fail_closed)
+    if hook_context_id := env_map.get("NESY_HOOK_CONTEXT_ID"):
+        data.setdefault("hook", {})["context_id"] = hook_context_id
+    if hook_domain := env_map.get("NESY_HOOK_DOMAIN"):
+        data.setdefault("hook", {})["domain"] = hook_domain
+    if context_from_session := env_map.get("NESY_HOOK_CONTEXT_FROM_SESSION"):
+        data.setdefault("hook", {})["context_from_session"] = _env_bool(context_from_session)
 
     return NesyConfig.model_validate(data)
 
@@ -107,6 +130,7 @@ def _default_config_data(cwd: Path) -> dict[str, Any]:
             "allow_scope_all_clear": False,
         },
         "logging": {"level": "info", "audit_log": True},
+        "hook": {"timeout_seconds": 5, "fail_closed": False, "context_from_session": False},
     }
 
 
@@ -122,3 +146,8 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
 
 def _expand_path(path: str) -> Path:
     return Path(path).expanduser()
+
+
+def _env_bool(value: str) -> bool:
+    normalized = value.strip().casefold()
+    return normalized in {"1", "true", "yes", "on"}

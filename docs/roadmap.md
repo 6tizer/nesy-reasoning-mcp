@@ -5,7 +5,7 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.4 is the current implementation baseline:
+v0.5 is the current implementation baseline:
 
 - MCP stdio server.
 - Memory, JSON, and SQLite stores.
@@ -15,6 +15,8 @@ v0.4 is the current implementation baseline:
 - Explicit exclusivity-based contradiction checks.
 - Relation load/export with allowed roots.
 - Write-operation audit log.
+- Compact graph summary.
+- Claude Code Stop and PreToolUse hook helpers.
 - Local install docs and CI smoke coverage.
 
 ## Version Gates
@@ -84,6 +86,7 @@ Acceptance:
 
 - Hook examples use SQLite or file-backed store, not process memory.
 - Stop hook can block on hard contradictions from current graph.
+- Stop hook can check explicit `NESY_FACTS` blocks with the current graph.
 - Hook output stays small and deterministic.
 
 Out of scope:
