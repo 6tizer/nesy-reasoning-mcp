@@ -89,6 +89,8 @@ jobs:
         run: |
           uv run python - <<'PY'
           import anyio
+          import json
+          from pathlib import Path
           from mcp import ClientSession
           from mcp.client.stdio import StdioServerParameters, stdio_client
 
@@ -161,6 +163,59 @@ jobs:
                           {"if_not": "A", "targets": ["B"]},
                       )
                       assert counterfactual.structuredContent["possibly_blocked"][0]["target"] == "B"
+                      await session.call_tool(
+                          "nesy.load_relations",
+                          {
+                              "source_type": "inline",
+                              "data": {
+                                  "relations": [
+                                      {
+                                          "source": "D",
+                                          "target": "B",
+                                          "relation_type": "sufficient",
+                                      }
+                                  ],
+                                  "independence_records": [
+                                      {"left": "D", "right": "A"}
+                                  ],
+                              },
+                              "check_contradictions": False,
+                          },
+                      )
+                      classified = await session.call_tool(
+                          "nesy.classify",
+                          {"source": "A", "target": "B"},
+                      )
+                      assert classified.structuredContent["necessity_status"]["status"] == "proven_not_necessary"
+
+                      resource_path = Path("resource-uri-smoke.json").resolve()
+                      resource_path.write_text(
+                          json.dumps(
+                              {
+                                  "relations": [
+                                      {
+                                          "source": "R",
+                                          "target": "S",
+                                          "relation_type": "sufficient",
+                                      }
+                                  ]
+                              }
+                          ),
+                          encoding="utf-8",
+                      )
+                      try:
+                          loaded_resource = await session.call_tool(
+                              "nesy.load_relations",
+                              {
+                                  "source_type": "resource_uri",
+                                  "resource_uri": resource_path.as_uri(),
+                                  "validate_only": True,
+                                  "check_contradictions": False,
+                              },
+                          )
+                          assert loaded_resource.structuredContent["loaded_relations"] == 1
+                      finally:
+                          resource_path.unlink(missing_ok=True)
 
           anyio.run(main)
           PY
