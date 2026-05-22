@@ -11,7 +11,8 @@
       "/Users/mac-mini/.nesy-reasoning/relation_sets"
     ],
     "max_file_size_bytes": 5242880,
-    "allow_scope_all_clear": false
+    "allow_scope_all_clear": false,
+    "allow_hidden_relation_paths": false
   },
   "logging": {
     "level": "info",

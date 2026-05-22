@@ -554,6 +554,134 @@ async def test_file_access_rejects_extension_and_symlink_escape(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_file_access_rejects_hidden_paths_by_default(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    hidden_dir = allowed / ".secret"
+    hidden_dir.mkdir(parents=True)
+    hidden_file = allowed / ".relations.json"
+    hidden_nested_file = hidden_dir / "relations.json"
+    hidden_file.write_text('{"relations":[]}', encoding="utf-8")
+    hidden_nested_file.write_text('{"relations":[]}', encoding="utf-8")
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(allowed)])))
+
+    hidden_load = await call_tool(
+        LOAD_RELATIONS,
+        {"source_type": "file", "path": str(hidden_file)},
+        store,
+    )
+    hidden_nested_load = await call_tool(
+        LOAD_RELATIONS,
+        {"source_type": "file", "path": str(hidden_nested_file)},
+        store,
+    )
+    hidden_resource = await call_tool(
+        LOAD_RELATIONS,
+        {"source_type": "resource_uri", "resource_uri": hidden_nested_file.resolve().as_uri()},
+        store,
+    )
+    hidden_export_path = allowed / ".export.json"
+    hidden_export = await call_tool(
+        EXPORT_RELATIONS,
+        {"destination": "file", "path": str(hidden_export_path)},
+        store,
+    )
+
+    assert hidden_load.isError is True
+    assert hidden_load.structuredContent["diagnostics"][0]["code"] == "LOAD_RELATIONS_FAILED"
+    assert (
+        "hidden relation paths blocked unless configured"
+        in hidden_load.structuredContent["diagnostics"][0]["message"]
+    )
+    assert hidden_nested_load.isError is True
+    assert hidden_resource.isError is True
+    assert hidden_export.isError is True
+    assert hidden_export.structuredContent["diagnostics"][0]["code"] == "EXPORT_RELATIONS_FAILED"
+    assert not hidden_export_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_access_allows_hidden_paths_when_configured(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    hidden_dir = allowed / ".secret"
+    hidden_dir.mkdir(parents=True)
+    hidden_file = allowed / ".relations.json"
+    hidden_nested_file = hidden_dir / "relations.json"
+    hidden_file.write_text(
+        json.dumps({"relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}]}),
+        encoding="utf-8",
+    )
+    hidden_nested_file.write_text(
+        json.dumps({"relations": [{"source": "C", "target": "D", "relation_type": "sufficient"}]}),
+        encoding="utf-8",
+    )
+    config = NesyConfig(
+        security=SecurityConfig(
+            allowed_roots=[str(allowed)],
+            allow_hidden_relation_paths=True,
+        )
+    )
+    store = RelationStore(config)
+
+    hidden_load = await call_tool(
+        LOAD_RELATIONS,
+        {"source_type": "file", "path": str(hidden_file), "check_contradictions": False},
+        store,
+    )
+    hidden_nested_load = await call_tool(
+        LOAD_RELATIONS,
+        {"source_type": "file", "path": str(hidden_nested_file), "check_contradictions": False},
+        store,
+    )
+    hidden_resource = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "resource_uri",
+            "resource_uri": hidden_nested_file.resolve().as_uri(),
+            "check_contradictions": False,
+        },
+        store,
+    )
+    hidden_export_path = allowed / ".export.json"
+    hidden_export = await call_tool(
+        EXPORT_RELATIONS,
+        {"destination": "file", "path": str(hidden_export_path)},
+        store,
+    )
+
+    assert hidden_load.isError is False
+    assert hidden_load.structuredContent["loaded_relations"] == 1
+    assert hidden_nested_load.isError is False
+    assert hidden_nested_load.structuredContent["loaded_relations"] == 1
+    assert hidden_resource.isError is False
+    assert hidden_resource.structuredContent["loaded_relations"] == 1
+    assert hidden_export.isError is False
+    assert hidden_export_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_access_allows_non_hidden_child_under_hidden_allowed_root(
+    tmp_path: Path,
+) -> None:
+    hidden_root = tmp_path / ".nesy-reasoning" / "relation_sets"
+    hidden_root.mkdir(parents=True)
+    relation_file = hidden_root / "relations.json"
+    relation_file.write_text(
+        json.dumps({"relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}]}),
+        encoding="utf-8",
+    )
+    store = RelationStore(NesyConfig(security=SecurityConfig(allowed_roots=[str(hidden_root)])))
+
+    hidden_root_load = await call_tool(
+        LOAD_RELATIONS,
+        {"source_type": "file", "path": str(relation_file), "check_contradictions": False},
+        store,
+    )
+
+    assert hidden_root_load.isError is False
+    assert hidden_root_load.structuredContent["loaded_relations"] == 1
+
+
+@pytest.mark.asyncio
 async def test_export_inline_too_large_returns_error() -> None:
     store = RelationStore()
     await call_tool(

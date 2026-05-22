@@ -40,6 +40,7 @@ class SecurityConfig(BaseModel):
     allowed_roots: list[str] = Field(default_factory=list)
     max_file_size_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
     allow_scope_all_clear: bool = False
+    allow_hidden_relation_paths: bool = False
 
 
 class LoggingConfig(BaseModel):
@@ -114,6 +115,8 @@ def load_config(
         data.setdefault("security", {})["allowed_roots"] = [
             item.strip() for item in roots.split(",") if item.strip()
         ]
+    if allow_hidden := env_map.get("NESY_ALLOW_HIDDEN_RELATION_PATHS"):
+        data.setdefault("security", {})["allow_hidden_relation_paths"] = _env_bool(allow_hidden)
     if log_level := env_map.get("NESY_LOG_LEVEL"):
         data.setdefault("logging", {})["level"] = log_level
     if timeout := env_map.get("NESY_HOOK_TIMEOUT_SECONDS"):
@@ -163,6 +166,7 @@ def _default_config_data(cwd: Path) -> dict[str, Any]:
             ],
             "max_file_size_bytes": 5 * 1024 * 1024,
             "allow_scope_all_clear": False,
+            "allow_hidden_relation_paths": False,
         },
         "logging": {"level": "info", "audit_log": True},
         "hook": {"timeout_seconds": 5, "fail_closed": False, "context_from_session": False},

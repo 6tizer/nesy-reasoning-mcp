@@ -5,7 +5,7 @@ document, not a promise that all items already exist.
 
 ## Current Baseline
 
-v0.8 is the current implementation baseline:
+v0.9 is the current implementation baseline:
 
 - MCP stdio server.
 - Authenticated local Streamable HTTP daemon.
@@ -20,6 +20,7 @@ v0.8 is the current implementation baseline:
 - Explicit exclusive groups.
 - Explicit exclusivity-based contradiction checks.
 - Relation load/export with allowed roots and safe local `file://` resource URIs.
+- Hidden relation paths blocked by default unless explicitly configured.
 - Write-operation audit log.
 - Compact graph summary.
 - Claude Code Stop and PreToolUse hook helpers.
@@ -207,6 +208,28 @@ Out of scope:
 - Real LLM/API benchmark runner.
 - Hosted evaluation dashboard.
 - New reasoning semantics.
+
+## v0.9: File Access Security Closure
+
+Goal: close the remaining SPEC 10.2 file-access rule before v1.0.
+
+Scope:
+
+- Block hidden relation file paths under configured `allowed_roots` by default.
+- Add explicit config/env override for intentional hidden `.json` or `.jsonl` paths.
+- Preserve existing allowed-roots, extension, size, and symlink-escape checks.
+
+Public tools:
+
+- No new MCP tools. Existing file-backed `nesy.load_relations`,
+  `nesy.export_relations`, and local `file://` resource URI load gain stricter
+  path behavior.
+
+Acceptance:
+
+- Hidden file loads, exports, and local resource URI loads fail by default.
+- Explicit hidden-path opt-in restores access without weakening other file guards.
+- Hidden configured allowed roots are not rejected as a side effect.
 
 ## Later
 

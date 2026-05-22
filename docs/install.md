@@ -107,7 +107,8 @@ Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
       "/Users/mac-mini/Documents/nesy-reasoning-mcp",
       "/Users/mac-mini/.nesy-reasoning/relation_sets"
     ],
-    "max_file_size_bytes": 5242880
+    "max_file_size_bytes": 5242880,
+    "allow_hidden_relation_paths": false
   }
 }
 ```
@@ -115,6 +116,9 @@ Example config file: [examples/nesy-config.json](../examples/nesy-config.json)
 File load/export only accepts `.json` and `.jsonl` inside `allowed_roots`.
 `nesy.load_relations` also accepts `source_type=resource_uri` for safe `file://`
 URIs that resolve inside `allowed_roots`; remote URI schemes are rejected.
+Hidden relation paths under an allowed root are rejected by default. Set
+`security.allow_hidden_relation_paths=true` or `NESY_ALLOW_HIDDEN_RELATION_PATHS=true`
+only when hidden `.json` or `.jsonl` paths are intentional.
 
 ## Streamable HTTP Mode
 

@@ -39,6 +39,10 @@ The implementation resolves real paths before access, rejects path traversal and
 symlink escapes, enforces file-size limits, and limits `resource_uri` support to
 local `file://` URIs inside `allowed_roots`.
 
+Hidden relation paths under an allowed root are blocked by default. Set
+`security.allow_hidden_relation_paths=true` or `NESY_ALLOW_HIDDEN_RELATION_PATHS=true`
+only when hidden `.json` or `.jsonl` relation files are intentional.
+
 ## HTTP Mode
 
 Streamable HTTP mode defaults to `127.0.0.1` and requires `NESY_LOCAL_TOKEN`.
