@@ -61,6 +61,10 @@ FocusTermSource = Literal[
 ]
 
 
+def _default_focus_term_sources() -> list[FocusTermSource]:
+    return ["tool_name", "cwd_basename", "tool_input_strings"]
+
+
 class HookConfig(BaseModel):
     """Claude Code hook integration settings."""
 
@@ -71,9 +75,7 @@ class HookConfig(BaseModel):
     context_id: str | None = None
     domain: str | None = None
     context_from_session: bool = False
-    focus_term_sources: list[FocusTermSource] = Field(
-        default_factory=lambda: ["tool_name", "cwd_basename", "tool_input_strings"]
-    )
+    focus_term_sources: list[FocusTermSource] = Field(default_factory=_default_focus_term_sources)
     focus_terms: list[str] = Field(default_factory=list)
 
 

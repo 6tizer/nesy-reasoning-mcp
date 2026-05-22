@@ -14,8 +14,10 @@ Run the full local gate:
 uv sync --locked
 uv run ruff format --check .
 uv run ruff check .
+uv run mypy src/nesy_reasoning_mcp
 uv run pytest
 env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
+env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
 printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio
 ```
 

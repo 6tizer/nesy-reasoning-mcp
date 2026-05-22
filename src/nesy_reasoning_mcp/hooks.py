@@ -140,7 +140,8 @@ def _pretooluse_action(
         },
         store,
     )
-    summary = result.structuredContent["summary"]
+    structured = result.structuredContent or {}
+    summary = structured["summary"]
     _write_hook_json(
         stdout,
         {
@@ -182,13 +183,13 @@ def _stop_action(
 
     result = anyio.run(call_tool, CHECK_CONTRADICTIONS, arguments, store)
     if result.isError:
-        diagnostics = result.structuredContent.get("diagnostics", [])
+        structured = result.structuredContent or {}
+        diagnostics = structured.get("diagnostics", [])
         raise ValueError(f"contradiction check failed: {diagnostics}")
 
+    structured = result.structuredContent or {}
     hard_contradictions = [
-        item
-        for item in result.structuredContent.get("contradictions", [])
-        if item.get("severity") == "hard"
+        item for item in structured.get("contradictions", []) if item.get("severity") == "hard"
     ]
     if hard_contradictions:
         _write_hook_json(

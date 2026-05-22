@@ -29,6 +29,8 @@ v1.0 is the current implementation baseline:
 - Local install docs and CI smoke coverage.
 - Offline benchmark fixtures and deterministic eval runner.
 - Optional live OpenAI LLM-only baseline evaluator.
+- Agent tool-access matrix evaluator for internal-test readiness.
+- Static type checking with mypy.
 - Security and evaluation documentation.
 - SPEC compliance matrix.
 
@@ -242,6 +244,8 @@ Goal: mark the SPEC v2 core as complete for local deterministic reasoning use.
 Scope:
 
 - Add optional live OpenAI LLM-only benchmark evaluation.
+- Add Agent tool-access matrix evaluation for internal testing.
+- Add static type checking to the local and CI gate.
 - Keep default CI deterministic and API-key-free.
 - Add root README coverage for install, tools, transports, storage, security,
   hooks, and evaluation.
@@ -249,7 +253,8 @@ Scope:
 
 Public tools:
 
-- No new MCP tools. The new surface is `nesy-reasoning-mcp eval llm`.
+- No new MCP tools. The new surfaces are `nesy-reasoning-mcp eval llm` and
+  `nesy-reasoning-mcp eval agent`.
 
 Acceptance:
 
@@ -257,6 +262,8 @@ Acceptance:
 - Live LLM eval requires explicit `OPENAI_API_KEY` and optional eval dependency.
 - Live reports include MCP score, OpenAI LLM-only score, and marginal
   contribution.
+- Agent matrix reports `no_mcp`, `tool_descriptions_only`, `classify_only`,
+  `classify_verify`, and `full_mcp` mode scores.
 - Root docs accurately state completed, intentionally out-of-scope, and future
   SPEC items.
 

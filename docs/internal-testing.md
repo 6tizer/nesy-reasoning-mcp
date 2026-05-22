@@ -32,6 +32,9 @@ Expected output:
 internal-test smoke ok
 ```
 
+Use [internal-test-report-template.md](internal-test-report-template.md) to record
+setup, eval scores, hook behavior, and follow-up findings for each test pass.
+
 ## MCP Client Setup
 
 For stdio MCP clients, use:
@@ -177,8 +180,11 @@ canonical field names.
 
 - Internal testing defaults to SQLite; memory is only for temporary debugging.
 - Stop hook checks the explicit graph and `NESY_FACTS`, not arbitrary prose.
+- Agent eval covers deterministic tool-access modes by default. Live OpenAI Agent
+  runs are optional, manual-only, and never required by CI.
 - `clear_relations(scope=all)`, `load_relations(mode=replace_store)`, and file
   load/export should require explicit confirmation.
 - Contradiction checks are deterministic over structured facts only. Explicit
   negation uses proposition labels such as `not X`, `not:X`, and `¬X`; arbitrary
   natural-language negation is not extracted automatically.
+- PostToolBatch hooks and hosted multi-user deployment remain future work.
