@@ -111,6 +111,12 @@ jobs:
           bash -n examples/internal-test/run-http.sh
           env PYTHONPATH=src uv run python examples/internal-test/smoke.py
 
+      - name: Console entrypoint smoke
+        run: |
+          uv run --no-editable nesy-reasoning-mcp --help > /dev/null
+          uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run --help > /dev/null
+          uv run --no-editable python scripts/agent_ingest_openai.py --help > /dev/null
+
       - name: Offline eval smoke
         run: |
           env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json > /tmp/nesy-eval.json

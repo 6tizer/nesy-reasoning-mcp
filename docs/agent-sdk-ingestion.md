@@ -107,7 +107,7 @@ metadata.
 The first runnable slice is:
 
 ```bash
-OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --input examples/research-evidence.json \
   --format json
 ```
@@ -115,7 +115,7 @@ OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
 You may also pass explicit URL sources:
 
 ```bash
-OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --url https://example.com/report \
   --task "Extract only evidence-backed sufficient or necessary relations"
 ```
@@ -159,7 +159,7 @@ stored. CI tests mock the Agent SDK runner and do not call external APIs.
 Safe write mode uses the same command with an explicit flag:
 
 ```bash
-OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --input examples/research-evidence.json \
   --auto-write \
   --min-write-confidence 0.85 \
