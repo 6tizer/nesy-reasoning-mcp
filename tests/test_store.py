@@ -5,6 +5,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
     IndependenceRecord,
     PropositionRecord,
+    RelationFilter,
     RelationInput,
     RelationRecord,
     RelationType,
@@ -492,6 +493,41 @@ def test_memory_import_records_keeps_context_metadata() -> None:
     assert store.context_metadata() == {"ctx": {"causal_completeness": True}}
 
 
+def test_memory_import_records_keeps_propositions_and_normalizes_relations() -> None:
+    store = RelationStore()
+
+    store.import_records(
+        [
+            RelationRecord(
+                id="rel_profit",
+                source="利润增加",
+                target="Revenue increases",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ],
+        [],
+        propositions=[
+            PropositionRecord(
+                id="profit_up",
+                label="Profit increases",
+                aliases=["利润增加"],
+            ),
+            PropositionRecord(id="revenue_up", label="Revenue increases"),
+        ],
+        mode="append",
+        store_id="default",
+    )
+
+    relation = store.list_relations()[0]
+    assert [proposition.id for proposition in store.list_propositions()] == [
+        "profit_up",
+        "revenue_up",
+    ]
+    assert relation.source_id == "profit_up"
+    assert relation.target_id == "revenue_up"
+    assert store.implication_edges()[0].antecedent == "profit_up"
+
+
 def test_memory_import_records_keeps_independence_records() -> None:
     store = RelationStore()
 
@@ -526,6 +562,46 @@ def test_sqlite_store_persists_context_metadata(tmp_path) -> None:
     reloaded = SqliteRelationStore(config)
 
     assert reloaded.context_metadata() == {"ctx": {"causal_completeness": True}}
+
+
+def test_sqlite_store_persists_propositions_and_creates_table_for_existing_db(tmp_path) -> None:
+    sqlite_path = tmp_path / "nesy.db"
+    config = NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [RelationInput(id="rel_keep", source="A", target="B", relation_type="sufficient")]
+    )
+
+    reloaded = SqliteRelationStore(config)
+    reloaded.import_records(
+        [
+            RelationRecord(
+                id="rel_profit",
+                source="利润增加",
+                target="收入增加",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ],
+        [],
+        propositions=[
+            PropositionRecord(
+                id="profit_up",
+                label="Profit increases",
+                aliases=["利润增加"],
+            ),
+            PropositionRecord(id="revenue_up", label="收入增加"),
+        ],
+        mode="append",
+        store_id="default",
+    )
+
+    final_store = SqliteRelationStore(config)
+
+    assert [proposition.id for proposition in final_store.list_propositions()] == [
+        "profit_up",
+        "revenue_up",
+    ]
+    assert final_store.list_relations()[-1].source_id == "profit_up"
 
 
 def test_sqlite_store_persists_independence_records(tmp_path) -> None:
@@ -567,6 +643,36 @@ def test_json_store_persists_context_metadata(tmp_path) -> None:
     assert reloaded.context_metadata() == {"ctx": {"causal_completeness": True}}
 
 
+def test_json_store_persists_propositions(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.import_records(
+        [],
+        [],
+        propositions=[
+            PropositionRecord(
+                id="profit_down",
+                label="Profit decreases",
+                aliases=["利润下降"],
+                negates="profit_up",
+                metadata={"lang": "zh"},
+            )
+        ],
+        mode="append",
+        store_id="default",
+    )
+
+    reloaded = JsonRelationStore(config)
+    proposition = reloaded.list_propositions()[0]
+
+    assert proposition.id == "profit_down"
+    assert proposition.aliases == ["利润下降"]
+    assert proposition.negates == "profit_up"
+    assert proposition.metadata == {"lang": "zh"}
+
+
 def test_json_store_persists_independence_records(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
@@ -596,6 +702,27 @@ def test_create_relation_store_uses_json_backend(tmp_path) -> None:
     store = create_relation_store(config)
 
     assert isinstance(store, JsonRelationStore)
+
+
+def test_clear_all_removes_proposition_registry() -> None:
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="profit_up", label="Profit increases")],
+        mode="append",
+        store_id="default",
+    )
+
+    store.clear_relations(
+        scope="all",
+        store_id="default",
+        context_id="default",
+        relation_filter=RelationFilter(),
+        dry_run=False,
+    )
+
+    assert store.list_propositions() == []
 
 
 def test_sqlite_import_failure_rolls_back_existing_rows(tmp_path) -> None:

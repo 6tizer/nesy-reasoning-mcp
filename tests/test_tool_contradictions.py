@@ -7,6 +7,7 @@ from nesy_reasoning_mcp.tools import (
     ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
     CHECK_CONTRADICTIONS,
+    LOAD_RELATIONS,
     call_tool,
 )
 
@@ -327,6 +328,90 @@ async def test_facts_mode_uses_canonical_negation_ids() -> None:
     assert contradiction["severity"] == "hard"
     assert contradiction["targets"] == ["profit_up", "profit_not_up"]
     assert {item.id for item in store.list_relations()} == set()
+
+
+@pytest.mark.asyncio
+async def test_check_contradictions_uses_stored_proposition_registry_aliases() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "propositions": [
+                    {"id": "profit_up", "label": "Profit increases", "aliases": ["利润增加"]},
+                    {
+                        "id": "profit_not_up",
+                        "label": "Profit does not increase",
+                        "aliases": ["利润未增加"],
+                        "negates": "profit_up",
+                    },
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        CHECK_CONTRADICTIONS,
+        {
+            "mode": "facts",
+            "include_soft": False,
+            "facts": [
+                {"source": "Discount", "target": "利润增加", "relation_type": "sufficient"},
+                {"source": "Discount", "target": "利润未增加", "relation_type": "sufficient"},
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "direct_opposition"
+    assert contradiction["targets"] == ["profit_up", "profit_not_up"]
+
+
+@pytest.mark.asyncio
+async def test_assert_relations_uses_stored_proposition_registry_aliases() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "propositions": [
+                    {"id": "profit_up", "label": "Profit increases", "aliases": ["利润增加"]},
+                    {
+                        "id": "profit_not_up",
+                        "label": "Profit does not increase",
+                        "aliases": ["利润未增加"],
+                        "negates": "profit_up",
+                    },
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "Discount", "target": "利润增加", "relation_type": "sufficient"},
+                {"source": "Discount", "target": "利润未增加", "relation_type": "sufficient"},
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["status"] == "warning"
+    assert {relation.target_id for relation in store.list_relations()} == {
+        "profit_up",
+        "profit_not_up",
+    }
+    assert result.structuredContent["contradictions"][0]["type"] == "direct_opposition"
 
 
 @pytest.mark.asyncio

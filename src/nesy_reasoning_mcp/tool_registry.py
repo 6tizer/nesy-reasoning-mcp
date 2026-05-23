@@ -137,8 +137,9 @@ def get_tools() -> list[Tool]:
             name=LOAD_RELATIONS,
             title="Load Relations",
             description=(
-                "Load relation records, exclusive groups, and independence records from "
-                "inline JSON, an allowed local file, or a safe file resource URI."
+                "Load relation records, proposition records, exclusive groups, and "
+                "independence records from inline JSON, an allowed local file, or a "
+                "safe file resource URI."
             ),
             inputSchema=LoadRelationsInput.model_json_schema(),
             outputSchema=_load_relations_output_schema(),
@@ -147,8 +148,8 @@ def get_tools() -> list[Tool]:
             name=EXPORT_RELATIONS,
             title="Export Relations",
             description=(
-                "Export relation records, exclusive groups, and independence records as JSON "
-                "or JSONL, inline or to an allowed local file."
+                "Export relation records, proposition records, exclusive groups, and "
+                "independence records as JSON or JSONL, inline or to an allowed local file."
             ),
             inputSchema=ExportRelationsInput.model_json_schema(),
             outputSchema=_export_relations_output_schema(),

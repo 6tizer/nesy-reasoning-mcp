@@ -17,6 +17,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupRecord,
     GraphStats,
     IndependenceRecord,
+    PropositionRecord,
     RelationFilter,
     RelationInput,
     RelationRecord,
@@ -35,6 +36,8 @@ from nesy_reasoning_mcp.storage.common import (
     _matches_filter,
     _merge_context_metadata,
     _merge_import,
+    _merge_propositions,
+    _normalize_relation_identities,
     _relation_for_store,
     _relation_from_row,
     _upsert_relations,
@@ -86,7 +89,8 @@ class SqliteRelationStore:
         dry_run: bool = False,
     ) -> tuple[list[RelationRecord], int]:
         """Add relation records and return added records plus update count."""
-        records = [RelationRecord.from_input(item) for item in inputs]
+        normalized_inputs = _normalize_relation_identities(inputs, self.list_propositions())
+        records = [RelationRecord.from_input(item) for item in normalized_inputs]
         updated = 0
 
         if mode == "upsert":
@@ -98,6 +102,7 @@ class SqliteRelationStore:
                         self.list_exclusive_groups(),
                         self.list_independence_records(),
                         self.context_metadata(),
+                        self.list_propositions(),
                     )
                     self._conn.commit()
                 except Exception:
@@ -260,6 +265,27 @@ class SqliteRelationStore:
         return [_independence_from_row(row) for row in rows]
 
     @_locked
+    def list_propositions(self) -> list[PropositionRecord]:
+        """List all stored proposition records."""
+        rows = self._conn.execute(
+            """
+            SELECT id, label, aliases_json, negates, metadata_json
+            FROM propositions
+            ORDER BY id
+            """
+        ).fetchall()
+        return [
+            PropositionRecord(
+                id=row["id"],
+                label=row["label"],
+                aliases=_loads(row["aliases_json"], []),
+                negates=row["negates"],
+                metadata=_loads(row["metadata_json"], {}),
+            )
+            for row in rows
+        ]
+
+    @_locked
     def clear_relations(
         self,
         *,
@@ -279,6 +305,7 @@ class SqliteRelationStore:
                 if include_exclusive_groups:
                     self._conn.execute("DELETE FROM exclusive_groups")
                 self._conn.execute("DELETE FROM independence_records")
+                self._conn.execute("DELETE FROM propositions")
                 self._conn.execute("DELETE FROM context_metadata")
                 self._conn.commit()
             return removed, removed_groups
@@ -441,6 +468,7 @@ class SqliteRelationStore:
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
         independence_records: Iterable[IndependenceRecord] = (),
+        propositions: Iterable[PropositionRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -448,7 +476,14 @@ class SqliteRelationStore:
         dry_run: bool = False,
     ) -> tuple[int, int, int, int]:
         """Import validated records into SQLite."""
-        incoming_relations = [_relation_for_store(record, store_id) for record in relations]
+        merged_propositions, _updated_propositions = _merge_propositions(
+            self.list_propositions(),
+            propositions,
+        )
+        normalized_relations = _normalize_relation_identities(relations, merged_propositions)
+        incoming_relations = [
+            _relation_for_store(record, store_id) for record in normalized_relations
+        ]
         incoming_groups = [_group_for_store(group, store_id) for group in exclusive_groups]
         incoming_independence = [
             _independence_for_store(record, store_id) for record in independence_records
@@ -480,6 +515,7 @@ class SqliteRelationStore:
                     merged_groups,
                     merged_independence,
                     merged_metadata,
+                    merged_propositions,
                 )
                 self._conn.commit()
             except Exception:
@@ -558,6 +594,14 @@ class SqliteRelationStore:
               metadata_json TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS propositions (
+              id TEXT PRIMARY KEY,
+              label TEXT NOT NULL,
+              aliases_json TEXT,
+              negates TEXT,
+              metadata_json TEXT
             );
             """
         )
@@ -661,6 +705,24 @@ class SqliteRelationStore:
             ],
         )
 
+    def _insert_propositions(self, records: Iterable[PropositionRecord]) -> None:
+        self._conn.executemany(
+            """
+            INSERT INTO propositions (id, label, aliases_json, negates, metadata_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    record.id,
+                    record.label,
+                    _dumps(record.aliases),
+                    record.negates,
+                    _dumps(record.metadata),
+                )
+                for record in records
+            ],
+        )
+
     def _delete_relation_ids(self, relation_ids: Iterable[str]) -> None:
         self._conn.executemany(
             "DELETE FROM relations WHERE id = ?",
@@ -688,15 +750,18 @@ class SqliteRelationStore:
         groups: Iterable[ExclusiveGroupRecord],
         independence_records: Iterable[IndependenceRecord],
         context_metadata: dict[str, Any],
+        propositions: Iterable[PropositionRecord],
     ) -> None:
         self._conn.execute("DELETE FROM relations")
         self._conn.execute("DELETE FROM exclusive_groups")
         self._conn.execute("DELETE FROM independence_records")
         self._conn.execute("DELETE FROM context_metadata")
+        self._conn.execute("DELETE FROM propositions")
         self._insert_relations(relations)
         self._insert_exclusive_groups(groups)
         self._insert_independence_records(independence_records)
         self._insert_context_metadata(context_metadata)
+        self._insert_propositions(propositions)
 
     def _insert_context_metadata(self, context_metadata: dict[str, Any]) -> None:
         timestamp = datetime.now(UTC).isoformat()

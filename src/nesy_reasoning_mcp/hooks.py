@@ -172,14 +172,16 @@ def _stop_action(
     message = payload.get("last_assistant_message", "")
     if not isinstance(message, str):
         message = ""
-    facts = _extract_nesy_facts(message)
+    facts_payload = _extract_nesy_facts(message)
     context_filter = hook_context_filter(payload, config)
     arguments: dict[str, Any] = {
-        "mode": "combined" if facts is not None else "graph",
+        "mode": "combined" if facts_payload is not None else "graph",
         "context_filter": context_filter.model_dump(mode="json", exclude_none=True),
     }
-    if facts is not None:
-        arguments["facts"] = facts
+    if facts_payload is not None:
+        arguments["facts"] = facts_payload["relations"]
+        if facts_payload["propositions"]:
+            arguments["propositions"] = facts_payload["propositions"]
 
     result = anyio.run(call_tool, CHECK_CONTRADICTIONS, arguments, store)
     if result.isError:
@@ -280,16 +282,28 @@ def _read_hook_payload(stdin: TextIO) -> dict[str, Any]:
     return payload
 
 
-def _extract_nesy_facts(message: str) -> list[dict[str, Any]] | None:
+def _extract_nesy_facts(message: str) -> dict[str, list[dict[str, Any]]] | None:
     raw = _extract_nesy_facts_raw(message)
     if raw is None:
         return None
-    facts, _end = json.JSONDecoder().raw_decode(raw)
-    if not isinstance(facts, list):
-        raise ValueError("NESY_FACTS must be a JSON array")
-    if not all(isinstance(item, dict) for item in facts):
-        raise ValueError("NESY_FACTS entries must be JSON objects")
-    return facts
+    payload, _end = json.JSONDecoder().raw_decode(raw)
+    if isinstance(payload, list):
+        if not all(isinstance(item, dict) for item in payload):
+            raise ValueError("NESY_FACTS entries must be JSON objects")
+        return {"relations": payload, "propositions": []}
+    if isinstance(payload, dict):
+        relations = payload.get("relations")
+        propositions = payload.get("propositions", [])
+        if not isinstance(relations, list):
+            raise ValueError("NESY_FACTS relations must be a JSON array")
+        if not isinstance(propositions, list):
+            raise ValueError("NESY_FACTS propositions must be a JSON array")
+        if not all(isinstance(item, dict) for item in relations):
+            raise ValueError("NESY_FACTS relation entries must be JSON objects")
+        if not all(isinstance(item, dict) for item in propositions):
+            raise ValueError("NESY_FACTS proposition entries must be JSON objects")
+        return {"relations": relations, "propositions": propositions}
+    raise ValueError("NESY_FACTS must be a JSON array or object")
 
 
 def _extract_nesy_facts_raw(message: str) -> str | None:

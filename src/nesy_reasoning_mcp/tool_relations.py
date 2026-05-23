@@ -21,6 +21,7 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     RelationType,
 )
+from nesy_reasoning_mcp.storage.common import _merge_propositions, _normalize_relation_identities
 from nesy_reasoning_mcp.store import RelationStoreProtocol, graph_stats_for
 from nesy_reasoning_mcp.tool_common import (
     _contradiction_trace,
@@ -37,6 +38,7 @@ async def assert_relations(
 ) -> dict[str, Any]:
     """Handle `nesy.assert_relations`."""
     payload = AssertRelationsInput.model_validate(arguments)
+    stored_propositions = store.list_propositions()
     if payload.on_contradiction == OnContradiction.REJECT:
         records, _updated = store.assert_relations(
             payload.relations,
@@ -44,12 +46,16 @@ async def assert_relations(
             dry_run=True,
         )
         current_relations = store.list_relations()
-        effective_relations = _relations_after_assert(current_relations, records, payload.mode)
+        effective_relations = _normalize_relation_identities(
+            _relations_after_assert(current_relations, records, payload.mode),
+            stored_propositions,
+        )
         rejection_contradictions, _context_separated = find_exclusive_contradictions(
             effective_relations,
             store.list_exclusive_groups(),
             context_filter=ContextFilter(),
             max_depth=8,
+            propositions=stored_propositions,
         )
         if rejection_contradictions:
             diagnostic = Diagnostic(
@@ -87,6 +93,7 @@ async def assert_relations(
         if payload.dry_run
         else current_relations
     )
+    effective_relations = _normalize_relation_identities(effective_relations, stored_propositions)
     diagnostics: list[Diagnostic] = []
     merge_trace: list[str] = []
     if payload.merge_equivalent:
@@ -98,6 +105,7 @@ async def assert_relations(
             store.list_exclusive_groups(),
             context_filter=ContextFilter(),
             max_depth=8,
+            propositions=stored_propositions,
         )
 
     trace = [*[_normalization_trace(record) for record in records], *merge_trace]
@@ -299,6 +307,26 @@ async def check_contradictions(
 ) -> dict[str, Any]:
     """Handle `nesy.check_contradictions`."""
     payload = CheckContradictionsInput.model_validate(arguments)
+    try:
+        effective_propositions, _updated_propositions = _merge_propositions(
+            store.list_propositions(),
+            payload.propositions,
+        )
+    except ValueError as exc:
+        diagnostic = Diagnostic(
+            level="error", code="PROPOSITION_REGISTRY_INVALID", message=str(exc)
+        )
+        return {
+            "status": "error",
+            "has_contradictions": False,
+            "contradictions": [],
+            "clean_facts_count": 0,
+            "total_facts_count": len(payload.facts),
+            "context_separated": [],
+            "diagnostics": [diagnostic.model_dump(mode="json")],
+            "trace": ["Rejected contradiction check."],
+            "graph_stats": store.graph_stats().model_dump(mode="json"),
+        }
     fact_records = _temporary_fact_records(payload)
     if payload.mode == ContradictionMode.GRAPH:
         relations = store.list_relations()
@@ -306,6 +334,7 @@ async def check_contradictions(
         relations = fact_records
     else:
         relations = [*store.list_relations(), *fact_records]
+    relations = _normalize_relation_identities(relations, effective_propositions)
 
     groups = store.list_exclusive_groups()
     contradictions, context_separated = find_exclusive_contradictions(
@@ -315,7 +344,7 @@ async def check_contradictions(
         max_depth=payload.max_depth,
         include_soft=payload.include_soft,
         min_confidence=payload.min_confidence,
-        propositions=payload.propositions,
+        propositions=effective_propositions,
     )
     compatible_relations = relations_compatible_with_filter(relations, payload.context_filter)
     graph_stats = graph_stats_for(

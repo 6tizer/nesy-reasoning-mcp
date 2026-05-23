@@ -6,7 +6,7 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from copy import deepcopy
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -15,9 +15,13 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupRecord,
     GraphStats,
     IndependenceRecord,
+    PropositionRecord,
     RelationFilter,
+    RelationInput,
     RelationRecord,
 )
+
+RelationT = TypeVar("RelationT", bound=RelationInput)
 
 
 def graph_stats_for(
@@ -154,6 +158,56 @@ def _independence_for_store(
     store_id: str,
 ) -> IndependenceRecord:
     return record.model_copy(update={"store_id": store_id})
+
+
+def _proposition_alias_index(propositions: Iterable[PropositionRecord]) -> dict[str, str]:
+    index: dict[str, str] = {}
+    for proposition in propositions:
+        for term in (proposition.id, proposition.label, *proposition.aliases):
+            key = term.strip()
+            existing = index.get(key)
+            if existing is not None and existing != proposition.id:
+                raise ValueError(
+                    f"proposition alias conflict: {key!r} maps to both "
+                    f"{existing!r} and {proposition.id!r}"
+                )
+            index[key] = proposition.id
+    return index
+
+
+def _normalize_relation_identities(
+    relations: Iterable[RelationT],
+    propositions: Iterable[PropositionRecord],
+) -> list[RelationT]:
+    """Fill missing relation proposition ids from exact id/label/alias matches."""
+    index = _proposition_alias_index(propositions)
+    normalized: list[RelationT] = []
+    for relation in relations:
+        updates: dict[str, str] = {}
+        if relation.source_id is None and relation.source in index:
+            updates["source_id"] = index[relation.source]
+        if relation.target_id is None and relation.target in index:
+            updates["target_id"] = index[relation.target]
+        normalized.append(relation.model_copy(update=updates) if updates else relation)
+    return normalized
+
+
+def _merge_propositions(
+    current_propositions: Iterable[PropositionRecord],
+    incoming_propositions: Iterable[PropositionRecord],
+) -> tuple[list[PropositionRecord], int]:
+    propositions = list(current_propositions)
+    positions = {proposition.id: index for index, proposition in enumerate(propositions)}
+    updated = 0
+    for proposition in incoming_propositions:
+        if proposition.id in positions:
+            propositions[positions[proposition.id]] = proposition
+            updated += 1
+        else:
+            positions[proposition.id] = len(propositions)
+            propositions.append(proposition)
+    _proposition_alias_index(propositions)
+    return propositions, updated
 
 
 def _merge_import(

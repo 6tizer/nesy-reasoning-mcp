@@ -10,6 +10,7 @@ from nesy_reasoning_mcp.schemas import (
     ContradictionMode,
     ExclusiveGroupRecord,
     IndependenceRecord,
+    PropositionRecord,
     RelationFilter,
     RelationRecord,
 )
@@ -131,6 +132,10 @@ def _exclusive_group_dump(group: ExclusiveGroupRecord) -> dict[str, Any]:
 
 def _independence_record_dump(record: IndependenceRecord) -> dict[str, Any]:
     return record.model_dump(mode="json")
+
+
+def _proposition_dump(record: PropositionRecord) -> dict[str, Any]:
+    return record.model_dump(mode="json", exclude_none=True)
 
 
 def _temporary_fact_records(payload: CheckContradictionsInput) -> list[RelationRecord]:

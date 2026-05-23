@@ -137,6 +137,87 @@ async def test_export_inline_roundtrip_preserves_proposition_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_relations_imports_propositions_and_normalizes_aliases() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "propositions": [
+                    {
+                        "id": "profit_up",
+                        "label": "Profit increases",
+                        "aliases": ["利润增加"],
+                    },
+                    {"id": "revenue_up", "label": "收入增加"},
+                ],
+                "relations": [
+                    {
+                        "source": "利润增加",
+                        "target": "收入增加",
+                        "relation_type": "sufficient",
+                    }
+                ],
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    relation = store.list_relations()[0]
+    assert result.isError is False
+    assert result.structuredContent["loaded_propositions"] == 2
+    assert relation.source_id == "profit_up"
+    assert relation.target_id == "revenue_up"
+
+
+@pytest.mark.asyncio
+async def test_load_relations_validate_only_does_not_write_propositions() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "validate_only": True,
+            "data": {"propositions": [{"id": "profit_up", "label": "Profit increases"}]},
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["loaded_propositions"] == 1
+    assert store.list_propositions() == []
+
+
+@pytest.mark.asyncio
+async def test_load_relations_rejects_duplicate_proposition_aliases() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "propositions": [
+                    {"id": "profit_up", "label": "Profit increases", "aliases": ["利润"]},
+                    {"id": "margin_up", "label": "Margin increases", "aliases": ["利润"]},
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    assert result.isError is True
+    assert "proposition alias conflict" in result.structuredContent["diagnostics"][0]["message"]
+    assert store.list_propositions() == []
+
+
+@pytest.mark.asyncio
 async def test_load_relations_json_file_migrates_legacy_fields(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -283,6 +364,50 @@ async def test_export_inline_roundtrip_through_load() -> None:
 
 
 @pytest.mark.asyncio
+async def test_export_inline_roundtrip_includes_propositions() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "propositions": [
+                    {
+                        "id": "profit_down",
+                        "label": "Profit decreases",
+                        "aliases": ["利润下降"],
+                        "negates": "profit_up",
+                        "metadata": {"lang": "zh"},
+                    }
+                ],
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    exported = await call_tool(EXPORT_RELATIONS, {"destination": "inline"}, store)
+    new_store = RelationStore()
+    loaded = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": exported.structuredContent["data"],
+            "check_contradictions": False,
+        },
+        new_store,
+    )
+    proposition = new_store.list_propositions()[0]
+
+    assert exported.isError is False
+    assert exported.structuredContent["proposition_count"] == 1
+    assert loaded.isError is False
+    assert proposition.id == "profit_down"
+    assert proposition.negates == "profit_up"
+    assert proposition.metadata == {"lang": "zh"}
+
+
+@pytest.mark.asyncio
 async def test_export_jsonl_roundtrip_includes_independence_records(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -294,6 +419,7 @@ async def test_export_jsonl_roundtrip_includes_independence_records(tmp_path: Pa
             "data": {
                 "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
                 "independence_records": [{"id": "ind_c_a", "left": "C", "right": "A"}],
+                "propositions": [{"id": "node_a", "label": "A", "aliases": ["甲"]}],
             },
             "check_contradictions": False,
         },
@@ -319,6 +445,7 @@ async def test_export_jsonl_roundtrip_includes_independence_records(tmp_path: Pa
     assert exported.isError is False
     assert loaded.isError is False
     assert new_store.list_independence_records()[0].id == "ind_c_a"
+    assert new_store.list_propositions()[0].aliases == ["甲"]
 
 
 @pytest.mark.asyncio
