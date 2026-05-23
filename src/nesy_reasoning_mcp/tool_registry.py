@@ -8,6 +8,7 @@ from typing import Any
 from mcp.types import CallToolResult, Tool
 from pydantic import ValidationError
 
+from nesy_reasoning_mcp.auto_ingest.schemas import ValidateCandidateRelationsInput
 from nesy_reasoning_mcp.schemas import (
     AssertExclusiveInput,
     AssertRelationsInput,
@@ -39,6 +40,7 @@ from nesy_reasoning_mcp.tool_names import (
     LOAD_RELATIONS,
     REASON_OVER_RELATIONS,
     SUMMARIZE_GRAPH,
+    VALIDATE_CANDIDATE_RELATIONS,
     VERIFY_CHAIN,
 )
 from nesy_reasoning_mcp.tool_output_schemas import (
@@ -53,6 +55,7 @@ from nesy_reasoning_mcp.tool_output_schemas import (
     _load_relations_output_schema,
     _reason_over_relations_output_schema,
     _summarize_graph_output_schema,
+    _validate_candidate_relations_output_schema,
     _verify_chain_output_schema,
 )
 from nesy_reasoning_mcp.tool_reasoning import classify, verify_chain
@@ -71,6 +74,15 @@ from nesy_reasoning_mcp.tool_result import (
     unknown_tool_content,
 )
 from nesy_reasoning_mcp.tool_summary import summarize_graph
+
+
+async def _validate_candidate_relations_handler(
+    arguments: dict[str, Any],
+    store: RelationStoreProtocol,
+) -> dict[str, Any]:
+    from nesy_reasoning_mcp.tool_candidate_validation import validate_candidate_relations
+
+    return await validate_candidate_relations(arguments, store)
 
 
 def get_tools() -> list[Tool]:
@@ -188,6 +200,16 @@ def get_tools() -> list[Tool]:
             inputSchema=ReasonOverRelationsInput.model_json_schema(),
             outputSchema=_reason_over_relations_output_schema(),
         ),
+        Tool(
+            name=VALIDATE_CANDIDATE_RELATIONS,
+            title="Validate Candidate Relations",
+            description=(
+                "Validate reviewed candidate relations before durable writes, "
+                "without calling Agent SDK or mutating graph storage."
+            ),
+            inputSchema=ValidateCandidateRelationsInput.model_json_schema(),
+            outputSchema=_validate_candidate_relations_output_schema(),
+        ),
     ]
 
 
@@ -213,6 +235,7 @@ async def call_tool(
         SUMMARIZE_GRAPH: summarize_graph,
         COUNTERFACTUAL: counterfactual,
         REASON_OVER_RELATIONS: reason_over_relations,
+        VALIDATE_CANDIDATE_RELATIONS: _validate_candidate_relations_handler,
     }
     handler = handlers.get(name)
     if handler is None:

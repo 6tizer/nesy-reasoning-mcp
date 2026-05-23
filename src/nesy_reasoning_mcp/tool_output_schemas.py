@@ -280,3 +280,38 @@ def _reason_over_relations_output_schema() -> dict[str, Any]:
         "required": ["status", "mode", "persisted", "result"],
         "additionalProperties": False,
     }
+
+
+def _validate_candidate_relations_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "persisted": {"type": "boolean"},
+            "candidate_count": {"type": "integer"},
+            "approved_count": {"type": "integer"},
+            "queued_count": {"type": "integer"},
+            "rejected_count": {"type": "integer"},
+            "gate_results": {"type": "array"},
+            "approved_relations": {"type": "array"},
+            "reasoning": {"type": "object"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": [
+            "status",
+            "persisted",
+            "candidate_count",
+            "approved_count",
+            "queued_count",
+            "rejected_count",
+            "gate_results",
+            "approved_relations",
+            "diagnostics",
+            "reasoning",
+            "graph_stats",
+            "trace",
+        ],
+        "additionalProperties": False,
+    }

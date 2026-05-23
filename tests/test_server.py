@@ -5,11 +5,16 @@ from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
 
 from nesy_reasoning_mcp.server import create_server, initialization_options
 from nesy_reasoning_mcp.store import RelationStore
-from nesy_reasoning_mcp.tools import ASSERT_RELATIONS, CHECK_CONTRADICTIONS, REASON_OVER_RELATIONS
+from nesy_reasoning_mcp.tools import (
+    ASSERT_RELATIONS,
+    CHECK_CONTRADICTIONS,
+    REASON_OVER_RELATIONS,
+    VALIDATE_CANDIDATE_RELATIONS,
+)
 
 
 @pytest.mark.asyncio
-async def test_tools_list_returns_twelve_tools_with_schemas() -> None:
+async def test_tools_list_returns_thirteen_tools_with_schemas() -> None:
     server = create_server(RelationStore())
     handler = server.request_handlers[ListToolsRequest]
     result = await handler(ListToolsRequest(method="tools/list"))
@@ -28,6 +33,7 @@ async def test_tools_list_returns_twelve_tools_with_schemas() -> None:
         "nesy.summarize_graph",
         "nesy.counterfactual",
         "nesy.reason_over_relations",
+        "nesy.validate_candidate_relations",
     ]
     assert all(tool.inputSchema for tool in tools)
     assert all(tool.outputSchema for tool in tools)
@@ -36,6 +42,8 @@ async def test_tools_list_returns_twelve_tools_with_schemas() -> None:
     assert "propositions" in check_tool.inputSchema["properties"]
     ephemeral_tool = next(tool for tool in tools if tool.name == REASON_OVER_RELATIONS)
     assert "query" in ephemeral_tool.inputSchema["properties"]
+    validation_tool = next(tool for tool in tools if tool.name == VALIDATE_CANDIDATE_RELATIONS)
+    assert "candidates" in validation_tool.inputSchema["properties"]
 
 
 @pytest.mark.asyncio
