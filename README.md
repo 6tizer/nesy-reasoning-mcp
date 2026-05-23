@@ -193,9 +193,14 @@ See [Agent usage policy](docs/agent-usage.md) for the do/don't table, prompts,
 autonomous extraction workflow, and overclaiming examples.
 
 For automated candidate extraction and review, see
-[Agent SDK ingestion design](docs/agent-sdk-ingestion.md). The ingestion app is
-planned as an external Agent SDK workflow; NeSy MCP remains the reasoning and
-storage layer.
+[Agent SDK ingestion design](docs/agent-sdk-ingestion.md). The dry-run prototype
+runs extractor/reviewer agents and emits an `IngestionReport` without writing
+durable graph memory:
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --input evidence.json --format json
+```
 
 ## Tools
 

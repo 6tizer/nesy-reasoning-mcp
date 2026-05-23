@@ -32,6 +32,7 @@ def test_help_writes_no_stdout_banner() -> None:
     assert "http" in completed.stdout
     assert "eval" in completed.stdout
     assert "audit" in completed.stdout
+    assert "ingest" in completed.stdout
     assert completed.stderr == ""
 
 
@@ -46,6 +47,19 @@ def test_eval_help_lists_llm_subcommand() -> None:
 
     assert "run" in completed.stdout
     assert "llm" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_help_lists_agent_dry_run_subcommand() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "nesy_reasoning_mcp", "ingest", "--help"],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    assert "agent-dry-run" in completed.stdout
     assert completed.stderr == ""
 
 

@@ -5,11 +5,14 @@ from nesy_reasoning_mcp.auto_ingest import (
     DRY_RUN_TOOL_ALLOWLIST,
     WRITE_MODE_TOOL_ALLOWLIST,
     CandidateRelation,
+    CandidateRelationBatch,
     EvidenceRecord,
     GateAction,
     GateResult,
+    IngestionInput,
     IngestionReport,
     ReviewDecision,
+    ReviewDecisionBatch,
     ReviewDecisionValue,
 )
 from nesy_reasoning_mcp.tool_names import ASSERT_RELATIONS, LOAD_RELATIONS, REASON_OVER_RELATIONS
@@ -134,3 +137,31 @@ def test_tool_allowlists_keep_write_tools_out_of_dry_run() -> None:
     assert LOAD_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST
     assert ASSERT_RELATIONS in WRITE_MODE_TOOL_ALLOWLIST
     assert LOAD_RELATIONS in WRITE_MODE_TOOL_ALLOWLIST
+
+
+def test_ingestion_input_and_agent_batches_are_strict() -> None:
+    candidate = CandidateRelation(
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+    review = ReviewDecision(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type="sufficient",
+        final_confidence=0.9,
+    )
+
+    ingestion_input = IngestionInput(
+        evidence=[_evidence()],
+        urls=[" https://example.com/more "],
+        task=" Extract relations ",
+    )
+
+    assert ingestion_input.urls == ["https://example.com/more"]
+    assert CandidateRelationBatch(candidates=[candidate]).candidates[0].source == "A"
+    assert ReviewDecisionBatch(reviews=[review]).reviews[0].candidate_id == candidate.id
+
+    with pytest.raises(ValidationError):
+        IngestionInput.model_validate({"evidence": [], "unknown": True})

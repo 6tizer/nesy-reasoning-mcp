@@ -1,8 +1,8 @@
 # Agent SDK Ingestion Design
 
-This document defines the first design slice for automated candidate relation
-ingestion. It is a planning and schema layer only; it does not add an ingestion
-runtime, crawler, model dependency, or new MCP tool.
+This document defines automated candidate relation ingestion. The current
+implementation includes a live-capable OpenAI Agents SDK dry-run prototype. It
+does not add a crawler, write mode, queue persistence, or a new MCP tool.
 
 ## Boundary
 
@@ -83,6 +83,58 @@ nesy.load_relations
 
 Write tools must stay disabled unless a caller explicitly chooses write mode.
 
+## Dry-Run CLI Prototype
+
+The first runnable slice is:
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --format json
+```
+
+You may also pass explicit URL sources:
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --url https://example.com/report \
+  --task "Extract only evidence-backed sufficient or necessary relations"
+```
+
+The script wrapper calls the same implementation:
+
+```bash
+OPENAI_API_KEY=... uv run python scripts/agent_ingest_openai.py \
+  --input examples/research-evidence.json
+```
+
+JSON input accepts:
+
+```json
+{
+  "task": "Find evidence-backed product dependency relations.",
+  "question": "Does A require B?",
+  "evidence": [
+    {
+      "url": "https://example.com/source",
+      "span": "A cannot run unless B is configured."
+    }
+  ],
+  "urls": ["https://example.com/explicit-source"],
+  "metadata": {"case_id": "demo"}
+}
+```
+
+URL support is intentionally narrow: only explicit public `http` and `https`
+URLs are fetched, each with timeout and max-byte limits. Local URLs such as
+`file://`, `localhost`, and loopback/private IPs are rejected. The command does
+not search, crawl links, build embeddings, or write durable graph memory.
+
+The prototype runs extractor and reviewer agents, then runs the deterministic
+dry-run gate through NeSy read-only tools. The output is always an
+`IngestionReport`. Approved relations appear in the report only; they are not
+stored. CI tests mock the Agent SDK runner and do not call external APIs.
+
 ## Gate Rules
 
 Auto-write requires all of the following:
@@ -104,6 +156,5 @@ correlation, or weak wording such as "may", "can", or "helps" was upgraded into
 
 ## Next PRs
 
-The next implementation slice should add an OpenAI Agents SDK dry-run prototype.
-It should import these shared schemas, call NeSy read-only tools, and emit an
-`IngestionReport` without writing durable graph memory.
+The next implementation slices can add review queue persistence and explicit
+write mode after model, tracing, retry, and gating behavior are validated.
