@@ -1,5 +1,7 @@
 import pytest
+from pydantic import ValidationError
 
+from nesy_reasoning_mcp.schemas import CheckContradictionsInput, PropositionRecord
 from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tools import (
     ASSERT_EXCLUSIVE,
@@ -7,6 +9,33 @@ from nesy_reasoning_mcp.tools import (
     CHECK_CONTRADICTIONS,
     call_tool,
 )
+
+
+def test_check_contradictions_accepts_canonical_negation_propositions() -> None:
+    payload = CheckContradictionsInput.model_validate(
+        {
+            "propositions": [
+                {
+                    "id": " profit_not_up ",
+                    "label": " Profit does not increase ",
+                    "negates": " profit_up ",
+                }
+            ]
+        }
+    )
+
+    proposition = payload.propositions[0]
+    assert proposition.id == "profit_not_up"
+    assert proposition.label == "Profit does not increase"
+    assert proposition.negates == "profit_up"
+
+
+def test_proposition_negates_rejects_empty_and_self_reference() -> None:
+    with pytest.raises(ValidationError):
+        PropositionRecord(id="profit_not_up", label="Profit does not increase", negates=" ")
+
+    with pytest.raises(ValidationError):
+        PropositionRecord(id="profit_up", label="Profit increases", negates="profit_up")
 
 
 @pytest.mark.asyncio
@@ -212,6 +241,173 @@ async def test_direct_opposition_detects_explicit_negation_forms(negated_target:
 
 
 @pytest.mark.asyncio
+async def test_direct_opposition_uses_canonical_negation_ids() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "Discount",
+                    "target": "Profit increases",
+                    "target_id": "profit_up",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "Discount",
+                    "target": "Profit does not increase",
+                    "target_id": "profit_not_up",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        CHECK_CONTRADICTIONS,
+        {
+            "include_soft": False,
+            "propositions": [
+                {
+                    "id": "profit_not_up",
+                    "label": "Profit does not increase",
+                    "negates": "profit_up",
+                }
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "direct_opposition"
+    assert contradiction["severity"] == "hard"
+    assert contradiction["targets"] == ["profit_up", "profit_not_up"]
+
+
+@pytest.mark.asyncio
+async def test_facts_mode_uses_canonical_negation_ids() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        CHECK_CONTRADICTIONS,
+        {
+            "mode": "facts",
+            "include_soft": False,
+            "facts": [
+                {
+                    "source": "Discount",
+                    "target": "Profit increases",
+                    "target_id": "profit_up",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "Discount",
+                    "target": "Profit does not increase",
+                    "target_id": "profit_not_up",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "propositions": [
+                {
+                    "id": "profit_not_up",
+                    "label": "Profit does not increase",
+                    "negates": "profit_up",
+                }
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "direct_opposition"
+    assert contradiction["severity"] == "hard"
+    assert contradiction["targets"] == ["profit_up", "profit_not_up"]
+    assert {item.id for item in store.list_relations()} == set()
+
+
+@pytest.mark.asyncio
+async def test_plain_language_negation_needs_canonical_declaration() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "Discount",
+                    "target": "Profit increases",
+                    "target_id": "profit_up",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "Discount",
+                    "target": "Profit does not increase",
+                    "target_id": "profit_not_up",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"include_soft": False}, store)
+
+    assert result.structuredContent["has_contradictions"] is False
+    assert result.structuredContent["contradictions"] == []
+
+
+@pytest.mark.asyncio
+async def test_canonical_negation_respects_min_confidence() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "Discount",
+                    "target": "Profit increases",
+                    "target_id": "profit_up",
+                    "relation_type": "sufficient",
+                    "confidence": 0.2,
+                },
+                {
+                    "source": "Discount",
+                    "target": "Profit does not increase",
+                    "target_id": "profit_not_up",
+                    "relation_type": "sufficient",
+                    "confidence": 0.9,
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        CHECK_CONTRADICTIONS,
+        {
+            "include_soft": False,
+            "min_confidence": 0.5,
+            "propositions": [
+                {
+                    "id": "profit_not_up",
+                    "label": "Profit does not increase",
+                    "negates": "profit_up",
+                }
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["has_contradictions"] is False
+    assert result.structuredContent["contradictions"] == []
+
+
+@pytest.mark.asyncio
 async def test_cycle_to_exclusion_detects_path_to_own_negation() -> None:
     store = RelationStore()
     await call_tool(
@@ -233,6 +429,56 @@ async def test_cycle_to_exclusion_detects_path_to_own_negation() -> None:
     assert contradiction["type"] == "cycle_to_exclusion"
     assert contradiction["severity"] == "hard"
     assert contradiction["path"] == ["A", "B", "not A"]
+
+
+@pytest.mark.asyncio
+async def test_cycle_to_exclusion_uses_canonical_negation_ids() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "A",
+                    "source_id": "a",
+                    "target": "B",
+                    "target_id": "b",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "B",
+                    "source_id": "b",
+                    "target": "Not A",
+                    "target_id": "not_a",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        CHECK_CONTRADICTIONS,
+        {
+            "max_depth": 2,
+            "propositions": [
+                {
+                    "id": "not_a",
+                    "label": "Not A",
+                    "negates": "a",
+                }
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "cycle_to_exclusion"
+    assert contradiction["severity"] == "hard"
+    assert contradiction["targets"] == ["a", "not_a"]
+    assert contradiction["path"] == ["a", "b", "not_a"]
 
 
 @pytest.mark.asyncio

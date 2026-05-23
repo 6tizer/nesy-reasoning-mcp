@@ -18,6 +18,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveScope,
     ExpectedRelation,
     PathStrategy,
+    PropositionRecord,
     RelationRecord,
     RelationType,
 )
@@ -328,6 +329,7 @@ def find_exclusive_contradictions(
     max_depth: int,
     include_soft: bool = False,
     min_confidence: float = 0.0,
+    propositions: list[PropositionRecord] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Find exclusivity-based contradictions and context-separated tensions."""
     contradictions: list[dict[str, Any]] = []
@@ -338,6 +340,7 @@ def find_exclusive_contradictions(
             compatible_relations,
             max_depth,
             min_confidence=min_confidence,
+            propositions=propositions,
         )
     )
     if include_soft:
@@ -715,19 +718,20 @@ def _explicit_negation_contradictions(
     max_depth: int,
     *,
     min_confidence: float = 0.0,
+    propositions: list[PropositionRecord] | None = None,
 ) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for (store_id, context_id), scoped_relations in _relations_by_scope(relations).items():
         index = GraphIndex(scoped_relations)
-        negated_nodes = sorted(
-            (node, base)
-            for node in (str(item) for item in index.graph.nodes)
-            if (base := _explicit_negation_base(node)) is not None
+        nodes = sorted(str(item) for item in index.graph.nodes)
+        negated_nodes = _negation_pairs_for_nodes(
+            nodes,
+            propositions or [],
         )
         if not negated_nodes:
             continue
 
-        for source in sorted(str(item) for item in index.graph.nodes):
+        for source in nodes:
             contradictions.extend(
                 _cycle_to_exclusion_contradictions(
                     index,
@@ -890,7 +894,26 @@ def _relations_by_scope(
     return grouped
 
 
+def _negation_pairs_for_nodes(
+    nodes: list[str],
+    propositions: list[PropositionRecord],
+) -> list[tuple[str, str]]:
+    node_set = set(nodes)
+    pairs: list[tuple[str, str]] = []
+    for proposition in propositions:
+        if proposition.negates is None:
+            continue
+        if proposition.id in node_set and proposition.negates in node_set:
+            pairs.append((proposition.id, proposition.negates))
+    for node in nodes:
+        base = _explicit_negation_base(node)
+        if base is not None and base in node_set:
+            pairs.append((node, base))
+    return sorted(dict.fromkeys(pairs))
+
+
 def _explicit_negation_base(value: str) -> str | None:
+    """Return the legacy text-derived negation base for compatibility."""
     stripped = value.strip()
     if stripped.startswith("¬"):
         base = stripped[1:].strip()

@@ -927,7 +927,25 @@ GraphIndex 可在内存中由 SQLite 表重建，不需要单独持久化。
 `source` and `target` are display labels and remain required for compatibility.
 `source_id` and `target_id` are optional stable proposition IDs. If present,
 canonical graph reasoning uses the IDs; otherwise it falls back to labels. This
-does not implement alias lookup or a `negates` proposition model.
+does not implement alias lookup. Temporary `PropositionRecord` inputs can declare
+`negates` for `nesy.check_contradictions`; persistence/export of proposition
+metadata remains future work.
+
+#### PropositionRecord
+
+```json
+{
+  "id": { "type": "string", "minLength": 1 },
+  "label": { "type": "string", "minLength": 1 },
+  "aliases": { "type": "array", "items": { "type": "string" }, "default": [] },
+  "negates": { "type": "string", "minLength": 1 },
+  "metadata": { "type": "object", "default": {} }
+}
+```
+
+`negates` is optional. When supplied to `nesy.check_contradictions`, it declares
+that this proposition ID is the canonical negation of another proposition ID.
+Self-negation is invalid.
 
 #### ContextFilter
 
@@ -1405,6 +1423,10 @@ does not implement alias lookup or a `negates` proposition model.
       "facts": {
         "type": "array",
         "items": { "$ref": "#/$defs/RelationInput" }
+      },
+      "propositions": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/PropositionRecord" }
       },
       "mode": {
         "type": "string",

@@ -315,6 +315,7 @@ async def check_contradictions(
         max_depth=payload.max_depth,
         include_soft=payload.include_soft,
         min_confidence=payload.min_confidence,
+        propositions=payload.propositions,
     )
     compatible_relations = relations_compatible_with_filter(relations, payload.context_filter)
     graph_stats = graph_stats_for(

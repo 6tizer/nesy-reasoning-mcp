@@ -5,7 +5,7 @@ from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
 
 from nesy_reasoning_mcp.server import create_server, initialization_options
 from nesy_reasoning_mcp.store import RelationStore
-from nesy_reasoning_mcp.tools import ASSERT_RELATIONS
+from nesy_reasoning_mcp.tools import ASSERT_RELATIONS, CHECK_CONTRADICTIONS
 
 
 @pytest.mark.asyncio
@@ -30,6 +30,9 @@ async def test_tools_list_returns_eleven_tools_with_schemas() -> None:
     ]
     assert all(tool.inputSchema for tool in tools)
     assert all(tool.outputSchema for tool in tools)
+
+    check_tool = next(tool for tool in tools if tool.name == CHECK_CONTRADICTIONS)
+    assert "propositions" in check_tool.inputSchema["properties"]
 
 
 @pytest.mark.asyncio
