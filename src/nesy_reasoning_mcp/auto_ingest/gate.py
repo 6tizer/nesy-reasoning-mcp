@@ -24,6 +24,7 @@ async def run_dry_run_gate(
     reviews: list[ReviewDecision],
     store: RelationStoreProtocol,
     min_write_confidence: float = 0.0,
+    write_enabled: bool = False,
 ) -> tuple[list[GateResult], list[RelationInput], list[Diagnostic], dict[str, Any]]:
     """Gate reviewed candidates without calling any persistent write tool."""
     if REASON_OVER_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST:
@@ -122,7 +123,11 @@ async def run_dry_run_gate(
             GateResult(
                 candidate_id=candidate.id,
                 action=GateAction.AUTO_WRITE,
-                reasons=["dry-run approved; no persistent write performed"],
+                reasons=[
+                    "write approved; persistent assertion may proceed"
+                    if write_enabled
+                    else "dry-run approved; no persistent write performed"
+                ],
                 metadata={"review_reasons": review.reasons},
             )
         )

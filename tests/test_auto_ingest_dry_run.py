@@ -164,6 +164,7 @@ async def test_openai_agents_dry_run_maps_runner_outputs_to_report(
     assert report.approved_relations[0].source == "A"
     assert report.written_relation_ids == []
     assert report.gate_results[0].action == "auto_write"
+    assert report.gate_results[0].reasons == ["dry-run approved; no persistent write performed"]
 
 
 async def test_dry_run_gate_never_writes_and_queues_hard_contradictions() -> None:

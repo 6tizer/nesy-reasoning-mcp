@@ -92,6 +92,7 @@ async def run_openai_agents_ingestion(
         reviews=review_batch.reviews,
         store=store,
         min_write_confidence=min_write_confidence if auto_write else 0.0,
+        write_enabled=auto_write,
     )
     written_relation_ids: list[str] = []
     write_result: dict[str, Any] = {}

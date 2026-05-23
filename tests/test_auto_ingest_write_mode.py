@@ -115,6 +115,7 @@ async def test_auto_write_persists_gate_approved_relations(
     assert report.mode == "write"
     assert len(report.written_relation_ids) == 1
     assert report.written_relation_ids == [stored[0].id]
+    assert report.gate_results[0].reasons == ["write approved; persistent assertion may proceed"]
     assert stored[0].source == "A"
     assert stored[0].provenance["candidate_id"] == candidate.id
     assert stored[0].provenance["review"]["reviewer_model"] == "gpt-test"
