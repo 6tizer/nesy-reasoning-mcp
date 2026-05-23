@@ -22,16 +22,23 @@ memory.
 ```bash
 cd /path/to/nesy-reasoning-mcp
 uv sync
+uv run --no-editable nesy-reasoning-mcp --help
 uv run ruff check .
 uv run pytest
-printf '' | env PYTHONPATH=src uv run nesy-reasoning-mcp --transport stdio
+printf '' | uv run --no-editable nesy-reasoning-mcp --transport stdio
 ```
 
 Expected:
 
+- The CLI help command prints usage text.
 - Ruff passes.
 - Pytest passes.
 - The stdio smoke command prints nothing.
+
+Use `uv run --no-editable ...` for stable command-line checks from a local
+checkout. Normal `uv run ...` uses editable metadata; on some macOS setups,
+editable `.pth` files can be marked hidden, so command entrypoints may need the
+troubleshooting steps below.
 
 ## MCP Client Config
 
@@ -156,7 +163,7 @@ HTTP mode starts a local daemon at `127.0.0.1:8765/mcp` by default. It requires
 
 ```bash
 cd /path/to/nesy-reasoning-mcp
-NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
+NESY_LOCAL_TOKEN='change-me' uv run --no-editable nesy-reasoning-mcp --transport http
 ```
 
 Common HTTP env overrides:
@@ -192,8 +199,8 @@ same graph as the MCP server.
 Hook commands:
 
 ```bash
-uv run nesy-reasoning-mcp hook pretooluse
-uv run nesy-reasoning-mcp hook stop
+uv run --no-editable nesy-reasoning-mcp hook pretooluse
+uv run --no-editable nesy-reasoning-mcp hook stop
 ```
 
 Stop hook checks `last_assistant_message`. If the answer contains a `NESY_FACTS:`
@@ -230,7 +237,7 @@ internal-test smoke ok
 Inspect write-tool audit entries from the configured store:
 
 ```bash
-NESY_CONFIG=/path/to/nesy-config.json uv run nesy-reasoning-mcp audit list --format json
+NESY_CONFIG=/path/to/nesy-config.json uv run --no-editable nesy-reasoning-mcp audit list --format json
 ```
 
 The audit CLI reports tool name, input hash, status, timestamp, and metadata. It
@@ -259,7 +266,7 @@ does not print raw tool arguments.
 v1.0 includes deterministic benchmark fixtures:
 
 ```bash
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
+env PYTHONPATH=src uv run --no-editable nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json
 ```
 
 The default evaluator does not call a real LLM and does not require API keys.
@@ -276,12 +283,21 @@ env PYTHONPATH=src uv run --extra eval nesy-reasoning-mcp eval llm \
 ## Troubleshooting
 
 If CLI import fails with `ModuleNotFoundError: No module named 'nesy_reasoning_mcp'`,
-run:
+the editable install metadata in the local virtualenv is stale or hidden. For
+normal MCP/CLI use from a checkout, run the command with `--no-editable`:
 
 ```bash
 cd /path/to/nesy-reasoning-mcp
+uv run --no-editable nesy-reasoning-mcp --help
+```
+
+If you need editable mode on macOS and the command still fails, clear hidden
+flags on the virtualenv and reinstall:
+
+```bash
 chflags -R nohidden .venv
 uv sync --reinstall-package nesy-reasoning-mcp
+uv run --no-editable nesy-reasoning-mcp --help
 ```
 
 The MCP config includes `PYTHONPATH=.../src` to avoid this editable-install issue on

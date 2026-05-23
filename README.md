@@ -51,12 +51,13 @@ Install from a local checkout:
 
 ```bash
 uv sync
+uv run --no-editable nesy-reasoning-mcp --help
 ```
 
 Run the stdio MCP server:
 
 ```bash
-uv run nesy-reasoning-mcp --transport stdio
+uv run --no-editable nesy-reasoning-mcp --transport stdio
 ```
 
 Use persistent SQLite storage:
@@ -64,19 +65,19 @@ Use persistent SQLite storage:
 ```bash
 mkdir -p ~/.nesy-reasoning
 NESY_STORAGE_BACKEND=sqlite NESY_SQLITE_PATH=~/.nesy-reasoning/nesy.db \
-  uv run nesy-reasoning-mcp --transport stdio
+  uv run --no-editable nesy-reasoning-mcp --transport stdio
 ```
 
 Run the authenticated local Streamable HTTP daemon:
 
 ```bash
-NESY_LOCAL_TOKEN='change-me' uv run nesy-reasoning-mcp --transport http
+NESY_LOCAL_TOKEN='change-me' uv run --no-editable nesy-reasoning-mcp --transport http
 ```
 
 Verify the deterministic benchmark:
 
 ```bash
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
+env PYTHONPATH=src uv run --no-editable nesy-reasoning-mcp eval run \
   --fixture benchmarks/fixtures/core.json \
   --format json
 ```
@@ -198,14 +199,14 @@ extractor/reviewer agents and emits an `IngestionReport` without writing durable
 graph memory:
 
 ```bash
-OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --input evidence.json --format json
 ```
 
 Durable writes require the explicit safe-write boundary:
 
 ```bash
-OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
@@ -296,8 +297,8 @@ HTTP mode binds locally by default and requires `NESY_LOCAL_TOKEN`.
 The CLI includes Claude Code hook helpers:
 
 ```bash
-uv run nesy-reasoning-mcp hook pretooluse
-uv run nesy-reasoning-mcp hook stop
+uv run --no-editable nesy-reasoning-mcp hook pretooluse
+uv run --no-editable nesy-reasoning-mcp hook stop
 ```
 
 - **PreToolUse** injects a compact graph summary as additional context.
@@ -322,7 +323,7 @@ This project is local-first:
 Inspect audit history:
 
 ```bash
-NESY_CONFIG=/path/to/nesy-config.json uv run nesy-reasoning-mcp audit list --format json
+NESY_CONFIG=/path/to/nesy-config.json uv run --no-editable nesy-reasoning-mcp audit list --format json
 ```
 
 See [docs/security.md](docs/security.md) for details.
@@ -332,7 +333,7 @@ See [docs/security.md](docs/security.md) for details.
 Offline deterministic evaluation:
 
 ```bash
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
+env PYTHONPATH=src uv run --no-editable nesy-reasoning-mcp eval run \
   --fixture benchmarks/fixtures/core.json \
   --format json
 ```
@@ -340,7 +341,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
 Agent mode-matrix evaluation:
 
 ```bash
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent \
+env PYTHONPATH=src uv run --no-editable nesy-reasoning-mcp eval agent \
   --fixture benchmarks/fixtures/core.json \
   --format json
 ```
@@ -375,8 +376,8 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy src/nesy_reasoning_mcp
 uv run pytest
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
-env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
+env PYTHONPATH=src uv run --no-editable nesy-reasoning-mcp eval run --fixture benchmarks/fixtures/core.json --format json
+env PYTHONPATH=src uv run --no-editable nesy-reasoning-mcp eval agent --fixture benchmarks/fixtures/core.json --format json
 ```
 
 ## Documentation
