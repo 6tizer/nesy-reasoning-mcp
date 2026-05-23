@@ -80,6 +80,80 @@ async def test_classify_spec_matrix(relations, source, target, expected) -> None
 
 
 @pytest.mark.asyncio
+async def test_classify_uses_canonical_ids_when_present() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "利润增加",
+                    "source_id": "profit_up",
+                    "target": "收入增加",
+                    "target_id": "revenue_up",
+                    "relation_type": "sufficient",
+                }
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    by_id = await call_tool(CLASSIFY, {"source": "profit_up", "target": "revenue_up"}, store)
+    by_label = await call_tool(CLASSIFY, {"source": "利润增加", "target": "收入增加"}, store)
+
+    assert by_id.isError is False
+    assert by_id.structuredContent["classification"] == "sufficient"
+    assert by_id.structuredContent["source_implies_target"]["best_path"] == [
+        "profit_up",
+        "revenue_up",
+    ]
+    assert by_label.structuredContent["classification"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_verify_chain_uses_canonical_ids_when_present() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "利润增加",
+                    "source_id": "profit_up",
+                    "target": "收入增加",
+                    "target_id": "revenue_up",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "收入增加",
+                    "source_id": "revenue_up",
+                    "target": "预算增加",
+                    "target_id": "budget_up",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        VERIFY_CHAIN,
+        {"source": "profit_up", "target": "budget_up", "max_depth": 2},
+        store,
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["reachable"] is True
+    assert result.structuredContent["best_path"]["nodes"] == [
+        "profit_up",
+        "revenue_up",
+        "budget_up",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_alternative_sufficient_cause_does_not_prove_not_necessary() -> None:
     store = RelationStore()
     await call_tool(

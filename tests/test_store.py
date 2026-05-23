@@ -4,6 +4,7 @@ from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
     IndependenceRecord,
+    PropositionRecord,
     RelationInput,
     RelationRecord,
     RelationType,
@@ -41,6 +42,50 @@ def test_defaults_and_sufficient_edge() -> None:
     assert len(edges) == 1
     assert edges[0].antecedent == "A"
     assert edges[0].consequent == "B"
+
+
+def test_proposition_record_and_relation_ids_strip_values() -> None:
+    proposition = PropositionRecord(
+        id=" profit_up ",
+        label=" Profit increases ",
+        aliases=[" 利润增加 ", "profit rises"],
+    )
+    relation = RelationInput(
+        source=" Profit increases ",
+        source_id=" profit_up ",
+        target=" Revenue increases ",
+        target_id=" revenue_up ",
+        relation_type=RelationType.SUFFICIENT,
+    )
+
+    assert proposition.id == "profit_up"
+    assert proposition.label == "Profit increases"
+    assert proposition.aliases == ["利润增加", "profit rises"]
+    assert relation.source == "Profit increases"
+    assert relation.source_id == "profit_up"
+    assert relation.canonical_source == "profit_up"
+    assert relation.canonical_target == "revenue_up"
+
+
+def test_canonical_ids_drive_memory_edges_and_stats() -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                source="利润增加",
+                source_id="profit_up",
+                target="收入增加",
+                target_id="revenue_up",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    edge = store.implication_edges()[0]
+
+    assert edge.antecedent == "profit_up"
+    assert edge.consequent == "revenue_up"
+    assert store.graph_stats().propositions == 2
 
 
 def test_necessary_generates_reverse_edge() -> None:
@@ -212,6 +257,40 @@ def test_replace_same_pair_only_matches_pair_context_store() -> None:
     }
 
 
+def test_replace_same_pair_uses_canonical_ids() -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                source="Label A",
+                source_id="node_a",
+                target="Label B",
+                target_id="node_b",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    _records, updated = store.assert_relations(
+        [
+            RelationInput(
+                source="Renamed A",
+                source_id="node_a",
+                target="Renamed B",
+                target_id="node_b",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="replace_same_pair",
+    )
+
+    listed = store.list_relations()
+    assert updated == 1
+    assert len(listed) == 1
+    assert listed[0].source == "Renamed A"
+    assert listed[0].relation_type == RelationType.NECESSARY
+
+
 def test_sqlite_store_persists_relations_and_exclusive_groups(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
@@ -222,7 +301,9 @@ def test_sqlite_store_persists_relations_and_exclusive_groups(tmp_path) -> None:
             RelationInput(
                 id="rel_keep",
                 source="A",
+                source_id="node_a",
                 target="B",
+                target_id="node_b",
                 relation_type=RelationType.SUFFICIENT,
             )
         ]
@@ -235,7 +316,10 @@ def test_sqlite_store_persists_relations_and_exclusive_groups(tmp_path) -> None:
 
     assert reloaded.list_relations()[0].id == records[0].id
     assert reloaded.list_relations()[0].source == "A"
-    assert reloaded.implication_edges()[0].consequent == "B"
+    assert reloaded.list_relations()[0].source_id == "node_a"
+    assert reloaded.list_relations()[0].target_id == "node_b"
+    assert reloaded.implication_edges()[0].antecedent == "node_a"
+    assert reloaded.implication_edges()[0].consequent == "node_b"
     assert reloaded.list_exclusive_groups()[0].group_id == groups[0].group_id
     assert reloaded.list_exclusive_groups()[0].members == ["B", "C"]
 
@@ -342,13 +426,22 @@ def test_json_store_persists_relations(tmp_path) -> None:
     )
     store = JsonRelationStore(config)
     store.assert_relations(
-        [RelationInput(source="A", target="B", relation_type=RelationType.SUFFICIENT)]
+        [
+            RelationInput(
+                source="A",
+                source_id="node_a",
+                target="B",
+                target_id="node_b",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
     )
 
     reloaded = JsonRelationStore(config)
 
     assert reloaded.list_relations()[0].source == "A"
-    assert reloaded.implication_edges()[0].consequent == "B"
+    assert reloaded.list_relations()[0].source_id == "node_a"
+    assert reloaded.implication_edges()[0].consequent == "node_b"
 
 
 def test_json_upsert_persists_updated_relation(tmp_path) -> None:

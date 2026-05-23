@@ -36,14 +36,14 @@ def _path_independence_from_if_not(
     relation = relation_map.get(first_edge.relation_id)
     if relation is None:
         return "unknown"
-    if relation.source == first_edge.antecedent and _metadata_independent_of(
+    if relation.canonical_source == first_edge.antecedent and _metadata_independent_of(
         relation.metadata,
         if_not,
     ):
         return "proven"
-    if relation.source == first_edge.antecedent and _assumptions_independent_of(
+    if relation.canonical_source == first_edge.antecedent and _assumptions_independent_of(
         relation.assumptions,
-        relation.source,
+        relation.canonical_source,
         if_not,
     ):
         return "proven"

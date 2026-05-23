@@ -24,6 +24,38 @@ class RelationType(StrEnum):
     EQUIVALENT = "equivalent"
 
 
+class PropositionRecord(BaseModel):
+    """Structured proposition identity for canonical graph nodes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    label: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    aliases: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", "label")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        """Strip surrounding whitespace and reject empty strings."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @field_validator("aliases")
+    @classmethod
+    def strip_aliases(cls, value: list[str]) -> list[str]:
+        """Strip aliases and reject empty provided values."""
+        aliases: list[str] = []
+        for alias in value:
+            stripped = alias.strip()
+            if not stripped:
+                raise ValueError("must not be empty")
+            aliases.append(stripped)
+        return aliases
+
+
 class Classification(StrEnum):
     """Logical relation classification values."""
 
@@ -182,7 +214,9 @@ class RelationInput(BaseModel):
 
     id: str | None = None
     source: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    source_id: str | None = Field(default=None, min_length=1, max_length=MAX_PROPOSITION_LENGTH)
     target: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    target_id: str | None = Field(default=None, min_length=1, max_length=MAX_PROPOSITION_LENGTH)
     relation_type: RelationType
     confidence: float = Field(default=1.0, ge=0, le=1)
     context_id: str = DEFAULT_CONTEXT_ID
@@ -200,6 +234,27 @@ class RelationInput(BaseModel):
         if not stripped:
             raise ValueError("must not be empty")
         return stripped
+
+    @field_validator("source_id", "target_id")
+    @classmethod
+    def strip_optional_id(cls, value: str | None) -> str | None:
+        """Strip optional proposition IDs and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @property
+    def canonical_source(self) -> str:
+        """Return the stable source proposition ID, falling back to its label."""
+        return self.source_id or self.source
+
+    @property
+    def canonical_target(self) -> str:
+        """Return the stable target proposition ID, falling back to its label."""
+        return self.target_id or self.target
 
     @field_serializer("temporal")
     def serialize_temporal(self, value: TemporalWindow | None) -> dict[str, str] | None:

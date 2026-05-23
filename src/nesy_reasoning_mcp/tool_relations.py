@@ -124,12 +124,18 @@ def _relations_after_assert(
         return [*current, *records]
     if mode == "replace_same_pair":
         replace_keys = {
-            (record.source, record.target, record.context_id, record.store_id) for record in records
+            (record.canonical_source, record.canonical_target, record.context_id, record.store_id)
+            for record in records
         }
         return [
             relation
             for relation in current
-            if (relation.source, relation.target, relation.context_id, relation.store_id)
+            if (
+                relation.canonical_source,
+                relation.canonical_target,
+                relation.context_id,
+                relation.store_id,
+            )
             not in replace_keys
         ] + records
     if mode == "upsert":
@@ -152,7 +158,12 @@ def _equivalent_normalization(
     for relation in relations:
         if relation.relation_type not in {RelationType.SUFFICIENT, RelationType.NECESSARY}:
             continue
-        key = (relation.source, relation.target, relation.context_id, relation.store_id)
+        key = (
+            relation.canonical_source,
+            relation.canonical_target,
+            relation.context_id,
+            relation.store_id,
+        )
         grouped.setdefault(key, {}).setdefault(relation.relation_type, []).append(relation.id)
 
     diagnostics: list[Diagnostic] = []

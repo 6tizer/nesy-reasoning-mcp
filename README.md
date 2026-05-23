@@ -160,6 +160,17 @@ can block a final answer when the answer includes conflicting structured
 | `nesy.summarize_graph` | Return a compact deterministic graph summary. | No |
 | `nesy.counterfactual` | Analyze what changes if a proposition is assumed false. | No |
 
+## Proposition Identity
+
+Relation records always keep `source` and `target` as human-readable labels.
+Callers can optionally provide `source_id` and `target_id` as stable canonical
+proposition IDs. When IDs are present, graph reasoning uses the IDs as nodes;
+when they are absent, the labels remain the canonical nodes for compatibility.
+
+This release does not add an alias registry, label/ID lookup, or explicit
+`negates` model. Queries against ID-backed relations should use the canonical
+IDs.
+
 ## Storage And Transports
 
 Storage backends:
