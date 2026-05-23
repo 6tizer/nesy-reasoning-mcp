@@ -286,6 +286,54 @@ async def test_classify_independent_counterexample_proves_not_necessary() -> Non
 
 
 @pytest.mark.asyncio
+async def test_classify_id_backed_independence_record_proves_not_necessary() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [
+                    {
+                        "source": "Price decrease",
+                        "source_id": "price_down",
+                        "target": "Sales increase",
+                        "target_id": "sales_up",
+                        "relation_type": "sufficient",
+                    },
+                    {
+                        "source": "Channel expansion",
+                        "source_id": "channel_expansion",
+                        "target": "Sales increase",
+                        "target_id": "sales_up",
+                        "relation_type": "sufficient",
+                    },
+                ],
+                "independence_records": [
+                    {
+                        "id": "ind_channel_price",
+                        "left": "channel_expansion",
+                        "right": "price_down",
+                    }
+                ],
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CLASSIFY, {"source": "price_down", "target": "sales_up"}, store)
+
+    assert result.structuredContent["classification"] == "sufficient"
+    assert result.structuredContent["necessity_status"]["status"] == "proven_not_necessary"
+    assert result.structuredContent["necessity_status"]["counterexample"] == "channel_expansion"
+    assert result.structuredContent["necessity_status"]["path"]["nodes"] == [
+        "channel_expansion",
+        "sales_up",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cycle_search_does_not_loop() -> None:
     store = RelationStore()
     await call_tool(

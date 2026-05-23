@@ -105,6 +105,47 @@ async def test_counterfactual_independent_alternative_is_still_possible() -> Non
 
 
 @pytest.mark.asyncio
+async def test_counterfactual_id_backed_metadata_independence_is_still_possible() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": "Price decrease",
+                    "source_id": "price_down",
+                    "target": "Sales increase",
+                    "target_id": "sales_up",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "Channel expansion",
+                    "source_id": "channel_expansion",
+                    "target": "Sales increase",
+                    "target_id": "sales_up",
+                    "relation_type": "sufficient",
+                    "metadata": {"independent_of": ["price_down"]},
+                },
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        COUNTERFACTUAL,
+        {"if_not": "price_down", "targets": ["sales_up"]},
+        store,
+    )
+
+    alternative = result.structuredContent["still_possible"][0]["alternative_paths"][0]
+    assert result.structuredContent["possibly_blocked"] == []
+    assert result.structuredContent["still_possible"][0]["target"] == "sales_up"
+    assert alternative["nodes"] == ["channel_expansion", "sales_up"]
+    assert alternative["independence_from_if_not"] == "proven"
+
+
+@pytest.mark.asyncio
 async def test_counterfactual_formal_independence_record_is_still_possible() -> None:
     store = RelationStore()
     await call_tool(
