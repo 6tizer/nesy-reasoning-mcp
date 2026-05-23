@@ -59,7 +59,13 @@ from nesy_reasoning_mcp.tool_relations import (
     clear_relations,
     list_relations,
 )
-from nesy_reasoning_mcp.tool_result import _validation_error_content, make_result
+from nesy_reasoning_mcp.tool_result import (
+    _validation_error_content,
+    audit_failure_diagnostic,
+    make_result,
+    runtime_error_content,
+    unknown_tool_content,
+)
 from nesy_reasoning_mcp.tool_summary import summarize_graph
 
 
@@ -194,12 +200,19 @@ async def call_tool(
     }
     handler = handlers.get(name)
     if handler is None:
-        raise ValueError(f"Unknown tool: {name}")
+        return make_result(unknown_tool_content(name, store), is_error=True)
 
     try:
         structured = await handler(arguments, store)
-        _record_audit_if_needed(name, arguments, structured, store)
-        return make_result(structured, is_error=structured.get("status") == "error")
     except ValidationError as exc:
-        structured = _validation_error_content(exc)
+        structured = _validation_error_content(exc, store)
         return make_result(structured, is_error=True)
+    except Exception as exc:
+        structured = runtime_error_content(name, exc, store)
+        return make_result(structured, is_error=True)
+
+    try:
+        _record_audit_if_needed(name, arguments, structured, store)
+    except Exception as exc:
+        structured.setdefault("diagnostics", []).append(audit_failure_diagnostic(exc))
+    return make_result(structured, is_error=structured.get("status") == "error")

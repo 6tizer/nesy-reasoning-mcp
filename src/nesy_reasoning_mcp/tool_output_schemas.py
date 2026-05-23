@@ -99,6 +99,9 @@ def _verify_chain_output_schema() -> dict[str, Any]:
     props.update(
         {
             "reachable": {"type": "boolean"},
+            "relation_established": {"type": "boolean"},
+            "source_to_target_reachable": {"type": "boolean"},
+            "target_to_source_reachable": {"type": "boolean"},
             "relation_type": {"type": "string"},
             "logic_validity": {"type": "boolean"},
             "best_path": {"type": ["object", "null"]},
@@ -109,7 +112,14 @@ def _verify_chain_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": props,
-        "required": ["status", "reachable", "logic_validity"],
+        "required": [
+            "status",
+            "reachable",
+            "relation_established",
+            "source_to_target_reachable",
+            "target_to_source_reachable",
+            "logic_validity",
+        ],
         "additionalProperties": False,
     }
 

@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from nesy_reasoning_mcp.config import NesyConfig, SecurityConfig
+from nesy_reasoning_mcp import tool_registry
+from nesy_reasoning_mcp.config import LoggingConfig, NesyConfig, SecurityConfig
 from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tools import (
     ASSERT_EXCLUSIVE,
@@ -12,6 +13,11 @@ from nesy_reasoning_mcp.tools import (
     LIST_RELATIONS,
     call_tool,
 )
+
+
+class AuditFailureStore(RelationStore):
+    def record_audit(self, **_kwargs) -> None:
+        raise RuntimeError("audit backend unavailable")
 
 
 @pytest.mark.asyncio
@@ -57,6 +63,14 @@ async def test_assert_and_list_relations_mcp_shape() -> None:
 @pytest.mark.asyncio
 async def test_invalid_input_returns_error_result() -> None:
     store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "Existing", "target": "Graph", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
     result = await call_tool(
         ASSERT_RELATIONS,
         {"relations": [{"source": "A", "target": "B", "relation_type": "bad"}]},
@@ -66,6 +80,58 @@ async def test_invalid_input_returns_error_result() -> None:
     assert result.isError is True
     assert result.structuredContent["status"] == "error"
     assert result.structuredContent["diagnostics"][0]["code"] == "INPUT_VALIDATION_ERROR"
+    assert result.structuredContent["graph_stats"]["relations"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_returns_structured_error_result() -> None:
+    store = RelationStore()
+    result = await call_tool("nesy.nope", {}, store)
+
+    assert result.isError is True
+    assert result.structuredContent["status"] == "error"
+    assert result.structuredContent["diagnostics"][0]["code"] == "UNKNOWN_TOOL"
+    assert json.loads(result.content[0].text) == result.structuredContent
+
+
+@pytest.mark.asyncio
+async def test_runtime_failure_returns_structured_error_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+
+    async def broken_handler(_arguments, _store):
+        raise RuntimeError("handler exploded")
+
+    monkeypatch.setattr(tool_registry, "assert_relations", broken_handler)
+
+    result = await call_tool(ASSERT_RELATIONS, {"relations": []}, store)
+
+    assert result.isError is True
+    assert result.structuredContent["status"] == "error"
+    assert result.structuredContent["diagnostics"][0]["code"] == "TOOL_RUNTIME_ERROR"
+    assert result.structuredContent["diagnostics"][0]["message"] == "handler exploded"
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_appends_warning_without_hiding_result() -> None:
+    store = AuditFailureStore(
+        NesyConfig(logging=LoggingConfig(audit_log=True)),
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["status"] == "ok"
+    assert result.structuredContent["added"] == 1
+    assert result.structuredContent["diagnostics"][0]["code"] == "AUDIT_LOG_FAILED"
 
 
 @pytest.mark.asyncio
