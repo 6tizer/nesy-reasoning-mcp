@@ -288,6 +288,48 @@ async def test_direct_opposition_uses_canonical_negation_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_facts_mode_uses_canonical_negation_ids() -> None:
+    store = RelationStore()
+
+    result = await call_tool(
+        CHECK_CONTRADICTIONS,
+        {
+            "mode": "facts",
+            "include_soft": False,
+            "facts": [
+                {
+                    "source": "Discount",
+                    "target": "Profit increases",
+                    "target_id": "profit_up",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "Discount",
+                    "target": "Profit does not increase",
+                    "target_id": "profit_not_up",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "propositions": [
+                {
+                    "id": "profit_not_up",
+                    "label": "Profit does not increase",
+                    "negates": "profit_up",
+                }
+            ],
+        },
+        store,
+    )
+
+    assert result.structuredContent["has_contradictions"] is True
+    contradiction = result.structuredContent["contradictions"][0]
+    assert contradiction["type"] == "direct_opposition"
+    assert contradiction["severity"] == "hard"
+    assert contradiction["targets"] == ["profit_up", "profit_not_up"]
+    assert {item.id for item in store.list_relations()} == set()
+
+
+@pytest.mark.asyncio
 async def test_plain_language_negation_needs_canonical_declaration() -> None:
     store = RelationStore()
     await call_tool(
