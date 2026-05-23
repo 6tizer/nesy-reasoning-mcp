@@ -112,6 +112,7 @@ class MemoryRelationStore:
         relation_filter: RelationFilter | None = None,
         *,
         limit: int | None = None,
+        offset: int = 0,
     ) -> list[RelationRecord]:
         """List relation records matching an optional filter."""
         matched = [
@@ -119,6 +120,7 @@ class MemoryRelationStore:
             for relation in self._relations
             if relation_filter is None or _matches_filter(relation, relation_filter)
         ]
+        matched = matched[offset:]
         if limit is not None:
             return matched[:limit]
         return matched

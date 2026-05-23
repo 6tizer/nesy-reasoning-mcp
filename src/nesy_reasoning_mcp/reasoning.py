@@ -139,6 +139,7 @@ class GraphIndex:
         max_paths: int = 5,
         confidence_policy: ConfidencePolicy = ConfidencePolicy.PRODUCT_INDEPENDENT,
         direct_only: bool = False,
+        min_confidence: float = 0.0,
     ) -> list[ReasoningPath]:
         """Find simple implication paths between two propositions."""
         if start == end:
@@ -150,12 +151,13 @@ class GraphIndex:
                     confidence_policy=confidence_policy,
                 )
             ]
-        if start not in self.graph or end not in self.graph:
+        graph = self._search_graph(min_confidence)
+        if start not in graph or end not in graph:
             return []
 
         cutoff = 1 if direct_only else max_depth
         if direct_only:
-            edge = self.best_direct_edge(start, end)
+            edge = self.best_direct_edge(start, end, min_confidence=min_confidence)
             if edge is None:
                 return []
             return [
@@ -169,21 +171,24 @@ class GraphIndex:
 
         if strategy in {PathStrategy.BEST_CONFIDENCE, PathStrategy.SHORTEST}:
             path = self._shortest_path(
+                graph,
                 start,
                 end,
                 max_depth=cutoff,
                 confidence_policy=confidence_policy,
                 weighted=strategy == PathStrategy.BEST_CONFIDENCE,
+                min_confidence=min_confidence,
             )
             return [path] if path is not None else []
 
-        node_paths = nx.all_simple_paths(self.graph, start, end, cutoff=cutoff)
+        node_paths = nx.all_simple_paths(graph, start, end, cutoff=cutoff)
         paths = [
             ReasoningPath(
                 nodes=list(nodes),
-                edges=self._best_edges_for_nodes(nodes),
+                edges=self._best_edges_for_nodes(nodes, min_confidence=min_confidence),
                 evidence_confidence=aggregate_confidence(
-                    self._best_edges_for_nodes(nodes), confidence_policy
+                    self._best_edges_for_nodes(nodes, min_confidence=min_confidence),
+                    confidence_policy,
                 ),
                 confidence_policy=confidence_policy,
             )
@@ -197,21 +202,23 @@ class GraphIndex:
 
     def _shortest_path(
         self,
+        graph: nx.MultiDiGraph,
         start: str,
         end: str,
         *,
         max_depth: int,
         confidence_policy: ConfidencePolicy,
         weighted: bool,
+        min_confidence: float,
     ) -> ReasoningPath | None:
         weight = "weight" if weighted else None
         try:
-            nodes = nx.shortest_path(self.graph, start, end, weight=weight)
+            nodes = nx.shortest_path(graph, start, end, weight=weight)
         except nx.NetworkXNoPath:
             return None
         if len(nodes) - 1 > max_depth:
             return None
-        edges = self._best_edges_for_nodes(nodes)
+        edges = self._best_edges_for_nodes(nodes, min_confidence=min_confidence)
         return ReasoningPath(
             nodes=nodes,
             edges=edges,
@@ -219,12 +226,20 @@ class GraphIndex:
             confidence_policy=confidence_policy,
         )
 
-    def best_direct_edge(self, antecedent: str, consequent: str) -> CanonicalImplicationEdge | None:
+    def best_direct_edge(
+        self,
+        antecedent: str,
+        consequent: str,
+        *,
+        min_confidence: float = 0.0,
+    ) -> CanonicalImplicationEdge | None:
         """Return the highest-confidence direct edge for an ordered node pair."""
         if not self.graph.has_edge(antecedent, consequent):
             return None
         edge_data = self.graph.get_edge_data(antecedent, consequent, default={})
-        edges = [data["edge"] for data in edge_data.values()]
+        edges = [
+            data["edge"] for data in edge_data.values() if data["edge"].confidence >= min_confidence
+        ]
         return max(edges, key=lambda edge: edge.confidence) if edges else None
 
     def verify_explicit_chain(
@@ -232,15 +247,16 @@ class GraphIndex:
         chain: list[str],
         *,
         confidence_policy: ConfidencePolicy,
+        min_confidence: float = 0.0,
     ) -> tuple[ReasoningPath | None, BrokenChain | None]:
         """Verify that every adjacent pair in an explicit chain has a direct implication edge."""
         edges: list[CanonicalImplicationEdge] = []
         for index, (left, right) in enumerate(zip(chain, chain[1:], strict=False)):
-            edge = self.best_direct_edge(left, right)
+            edge = self.best_direct_edge(left, right, min_confidence=min_confidence)
             if edge is not None:
                 edges.append(edge)
                 continue
-            reverse = self.best_direct_edge(right, left)
+            reverse = self.best_direct_edge(right, left, min_confidence=min_confidence)
             if reverse is not None:
                 return None, BrokenChain(
                     index=index,
@@ -269,14 +285,31 @@ class GraphIndex:
             None,
         )
 
-    def _best_edges_for_nodes(self, nodes: list[str]) -> list[CanonicalImplicationEdge]:
+    def _best_edges_for_nodes(
+        self,
+        nodes: list[str],
+        *,
+        min_confidence: float = 0.0,
+    ) -> list[CanonicalImplicationEdge]:
         edges: list[CanonicalImplicationEdge] = []
         for left, right in zip(nodes, nodes[1:], strict=False):
-            edge = self.best_direct_edge(left, right)
+            edge = self.best_direct_edge(left, right, min_confidence=min_confidence)
             if edge is None:  # pragma: no cover - guarded by NetworkX path generation
                 raise ValueError(f"missing edge for generated path: {left} -> {right}")
             edges.append(edge)
         return edges
+
+    def _search_graph(self, min_confidence: float) -> nx.MultiDiGraph:
+        if min_confidence <= 0:
+            return self.graph
+        graph: nx.MultiDiGraph = nx.MultiDiGraph()
+        for node in self.graph.nodes:
+            graph.add_node(node)
+        for left, right, key, data in self.graph.edges(keys=True, data=True):
+            edge = data["edge"]
+            if edge.confidence >= min_confidence:
+                graph.add_edge(left, right, key=key, **data)
+        return graph
 
 
 def build_graph(
@@ -294,22 +327,42 @@ def find_exclusive_contradictions(
     *,
     max_depth: int,
     include_soft: bool = False,
+    min_confidence: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Find exclusivity-based contradictions and context-separated tensions."""
     contradictions: list[dict[str, Any]] = []
     context_separated: list[dict[str, Any]] = []
     compatible_relations = relations_compatible_with_filter(relations, context_filter)
-    contradictions.extend(_explicit_negation_contradictions(compatible_relations, max_depth))
+    contradictions.extend(
+        _explicit_negation_contradictions(
+            compatible_relations,
+            max_depth,
+            min_confidence=min_confidence,
+        )
+    )
     if include_soft:
         contradictions.extend(_confidence_tensions(compatible_relations))
     for group in exclusive_groups:
         if not _exclusive_group_compatible(group, context_filter):
             continue
         group_relations = _relations_for_group(relations, group, context_filter)
-        contradictions.extend(_hard_group_contradictions(group_relations, group, max_depth))
+        contradictions.extend(
+            _hard_group_contradictions(
+                group_relations,
+                group,
+                max_depth,
+                min_confidence=min_confidence,
+            )
+        )
         if group.scope == ExclusiveScope.SAME_CONTEXT:
             context_separated.extend(
-                _context_separated_conflicts(relations, group, context_filter, max_depth)
+                _context_separated_conflicts(
+                    relations,
+                    group,
+                    context_filter,
+                    max_depth,
+                    min_confidence=min_confidence,
+                )
             )
     return contradictions, _dedupe_context_separated(context_separated)
 
@@ -360,6 +413,7 @@ def find_classification_contradiction(
     max_depth: int,
     confidence_policy: ConfidencePolicy,
     direct_only: bool,
+    min_confidence: float = 0.0,
 ) -> ClassificationContradiction | None:
     """Find whether a classification target conflicts with an exclusive sibling."""
     for group in exclusive_groups:
@@ -377,6 +431,7 @@ def find_classification_contradiction(
             max_paths=1,
             confidence_policy=confidence_policy,
             direct_only=direct_only,
+            min_confidence=min_confidence,
         )
         if not target_paths:
             continue
@@ -390,6 +445,7 @@ def find_classification_contradiction(
                 max_paths=1,
                 confidence_policy=confidence_policy,
                 direct_only=direct_only,
+                min_confidence=min_confidence,
             )
             if not conflicting_paths:
                 continue
@@ -529,13 +585,21 @@ def _hard_group_contradictions(
     relations: list[RelationRecord],
     group: ExclusiveGroupRecord,
     max_depth: int,
+    *,
+    min_confidence: float = 0.0,
 ) -> list[dict[str, Any]]:
     if not relations:
         return []
     index = GraphIndex(relations)
     contradictions: list[dict[str, Any]] = []
     for source in sorted(index.graph.nodes):
-        hits = _reachable_group_members(index, source, group.members, max_depth)
+        hits = _reachable_group_members(
+            index,
+            source,
+            group.members,
+            max_depth,
+            min_confidence=min_confidence,
+        )
         if len(hits) < 2:
             continue
         hit_paths = list(hits.values())
@@ -585,6 +649,8 @@ def _context_separated_conflicts(
     group: ExclusiveGroupRecord,
     context_filter: ContextFilter,
     max_depth: int,
+    *,
+    min_confidence: float = 0.0,
 ) -> list[dict[str, Any]]:
     compatible = relations_compatible_with_filter(relations, context_filter)
     contexts = sorted(
@@ -601,7 +667,13 @@ def _context_separated_conflicts(
             continue
         index = GraphIndex(context_relations)
         for source in sorted(index.graph.nodes):
-            hits = _reachable_group_members(index, source, group.members, max_depth)
+            hits = _reachable_group_members(
+                index,
+                source,
+                group.members,
+                max_depth,
+                min_confidence=min_confidence,
+            )
             if not hits:
                 continue
             source_hits = hits_by_source.setdefault(source, {})
@@ -641,6 +713,8 @@ def _context_separated_conflicts(
 def _explicit_negation_contradictions(
     relations: list[RelationRecord],
     max_depth: int,
+    *,
+    min_confidence: float = 0.0,
 ) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for (store_id, context_id), scoped_relations in _relations_by_scope(relations).items():
@@ -662,6 +736,7 @@ def _explicit_negation_contradictions(
                     context_id=context_id,
                     store_id=store_id,
                     max_depth=max_depth,
+                    min_confidence=min_confidence,
                 )
             )
             contradictions.extend(
@@ -672,6 +747,7 @@ def _explicit_negation_contradictions(
                     context_id=context_id,
                     store_id=store_id,
                     max_depth=max_depth,
+                    min_confidence=min_confidence,
                 )
             )
     return _dedupe_contradictions(contradictions)
@@ -685,6 +761,7 @@ def _cycle_to_exclusion_contradictions(
     context_id: str,
     store_id: str,
     max_depth: int,
+    min_confidence: float = 0.0,
 ) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for negated_node, base in negated_nodes:
@@ -696,6 +773,7 @@ def _cycle_to_exclusion_contradictions(
             max_depth=max_depth,
             strategy=PathStrategy.SHORTEST,
             max_paths=1,
+            min_confidence=min_confidence,
         )
         if not paths or len(paths[0].edges) <= 1:
             continue
@@ -726,6 +804,7 @@ def _direct_opposition_contradictions(
     context_id: str,
     store_id: str,
     max_depth: int,
+    min_confidence: float = 0.0,
 ) -> list[dict[str, Any]]:
     contradictions: list[dict[str, Any]] = []
     for negated_node, base in negated_nodes:
@@ -735,6 +814,7 @@ def _direct_opposition_contradictions(
             max_depth=max_depth,
             strategy=PathStrategy.SHORTEST,
             max_paths=1,
+            min_confidence=min_confidence,
         )
         negative_paths = index.find_paths(
             source,
@@ -742,6 +822,7 @@ def _direct_opposition_contradictions(
             max_depth=max_depth,
             strategy=PathStrategy.SHORTEST,
             max_paths=1,
+            min_confidence=min_confidence,
         )
         if not positive_paths or not negative_paths:
             continue
@@ -852,6 +933,8 @@ def _reachable_group_members(
     source: str,
     members: list[str],
     max_depth: int,
+    *,
+    min_confidence: float = 0.0,
 ) -> dict[str, ReasoningPath]:
     hits: dict[str, ReasoningPath] = {}
     for member in members:
@@ -862,6 +945,7 @@ def _reachable_group_members(
             strategy=PathStrategy.SHORTEST,
             max_paths=1,
             confidence_policy=ConfidencePolicy.PRODUCT_INDEPENDENT,
+            min_confidence=min_confidence,
         )
         if paths:
             hits[member] = paths[0]
@@ -886,9 +970,14 @@ def _dedupe_context_separated(items: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def _valid_at_matches(relation: RelationRecord, valid_at: datetime) -> bool:
-    temporal = relation.temporal or {}
-    valid_from = _parse_temporal_value(temporal.get("valid_from"), valid_at)
-    valid_to = _parse_temporal_value(temporal.get("valid_to"), valid_at)
+    valid_from = _parse_temporal_value(
+        relation.temporal.valid_from if relation.temporal is not None else None,
+        valid_at,
+    )
+    valid_to = _parse_temporal_value(
+        relation.temporal.valid_to if relation.temporal is not None else None,
+        valid_at,
+    )
     if valid_from is not None and valid_at < valid_from:
         return False
     return not (valid_to is not None and valid_at > valid_to)

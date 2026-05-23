@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
@@ -148,6 +150,27 @@ def test_upsert_dry_run_does_not_change_store() -> None:
     assert listed[0].target == "B"
 
 
+def test_memory_list_relations_supports_offset() -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_a", source="A", target="B", relation_type=RelationType.SUFFICIENT
+            ),
+            RelationInput(
+                id="rel_b", source="C", target="D", relation_type=RelationType.SUFFICIENT
+            ),
+            RelationInput(
+                id="rel_c", source="E", target="F", relation_type=RelationType.SUFFICIENT
+            ),
+        ]
+    )
+
+    listed = store.list_relations(limit=2, offset=1)
+
+    assert [record.id for record in listed] == ["rel_b", "rel_c"]
+
+
 def test_replace_same_pair_only_matches_pair_context_store() -> None:
     store = RelationStore()
     store.assert_relations(
@@ -251,6 +274,56 @@ def test_sqlite_upsert_persists_updated_relation(tmp_path) -> None:
     assert len(reloaded.list_relations()) == 1
     assert reloaded.list_relations()[0].target == "C"
     assert reloaded.list_relations()[0].relation_type == RelationType.NECESSARY
+
+
+def test_sqlite_list_relations_supports_offset(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_a", source="A", target="B", relation_type=RelationType.SUFFICIENT
+            ),
+            RelationInput(
+                id="rel_b", source="C", target="D", relation_type=RelationType.SUFFICIENT
+            ),
+            RelationInput(
+                id="rel_c", source="E", target="F", relation_type=RelationType.SUFFICIENT
+            ),
+        ]
+    )
+
+    listed = store.list_relations(limit=2, offset=1)
+
+    assert [record.id for record in listed] == ["rel_b", "rel_c"]
+
+
+def test_sqlite_store_allows_concurrent_assert_and_list(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    def assert_and_list(index: int) -> int:
+        store.assert_relations(
+            [
+                RelationInput(
+                    id=f"rel_{index}",
+                    source=f"A{index}",
+                    target=f"B{index}",
+                    relation_type=RelationType.SUFFICIENT,
+                )
+            ]
+        )
+        return len(store.list_relations())
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(assert_and_list, range(20)))
+
+    assert len(results) == 20
+    assert len(store.list_relations()) == 20
 
 
 def test_create_relation_store_uses_sqlite_backend(tmp_path) -> None:

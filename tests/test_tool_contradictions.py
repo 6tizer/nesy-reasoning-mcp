@@ -90,6 +90,32 @@ async def test_check_transitive_exclusive_contradiction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_check_contradictions_min_confidence_filters_low_confidence_path() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_EXCLUSIVE,
+        {"groups": [{"group_id": "state", "members": ["B", "C"]}]},
+        store,
+    )
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient", "confidence": 0.2},
+                {"source": "A", "target": "C", "relation_type": "sufficient", "confidence": 0.9},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(CHECK_CONTRADICTIONS, {"min_confidence": 0.5}, store)
+
+    assert result.structuredContent["has_contradictions"] is False
+    assert result.structuredContent["contradictions"] == []
+
+
+@pytest.mark.asyncio
 async def test_different_contexts_are_context_separated_not_hard() -> None:
     store = RelationStore()
     await call_tool(
@@ -413,3 +439,37 @@ async def test_assert_relations_reports_warning_when_relation_creates_contradict
 
     assert result.structuredContent["status"] == "warning"
     assert result.structuredContent["contradictions"]
+
+
+@pytest.mark.asyncio
+async def test_assert_relations_rejects_contradiction_without_writing() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_EXCLUSIVE,
+        {"groups": [{"group_id": "state", "members": ["B", "C"]}]},
+        store,
+    )
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "C", "relation_type": "sufficient"}],
+            "on_contradiction": "reject",
+        },
+        store,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent["status"] == "error"
+    assert result.structuredContent["rejected"] == 1
+    assert result.structuredContent["relation_ids"] == []
+    assert result.structuredContent["diagnostics"][0]["code"] == "CONTRADICTION_REJECTED"
+    assert [relation.target for relation in store.list_relations()] == ["B"]

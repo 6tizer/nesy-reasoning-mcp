@@ -262,6 +262,32 @@ async def test_verify_chain_best_confidence_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_min_confidence_filters_reasoning_paths() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient", "confidence": 0.2},
+                {"source": "B", "target": "C", "relation_type": "sufficient", "confidence": 0.9},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    compatible = await call_tool(CLASSIFY, {"source": "A", "target": "C"}, store)
+    filtered = await call_tool(
+        CLASSIFY,
+        {"source": "A", "target": "C", "min_confidence": 0.5},
+        store,
+    )
+
+    assert compatible.structuredContent["classification"] == "sufficient"
+    assert filtered.structuredContent["classification"] == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_verify_chain_distinguishes_reverse_only_reachability() -> None:
     store = RelationStore()
     await call_tool(

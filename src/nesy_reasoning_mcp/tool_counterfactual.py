@@ -49,6 +49,7 @@ async def counterfactual(arguments: dict[str, Any], store: RelationStoreProtocol
             strategy=PathStrategy.BEST_CONFIDENCE,
             max_paths=1,
             confidence_policy=payload.confidence_policy,
+            min_confidence=payload.min_confidence,
         )
         if dependency_paths:
             necessarily_blocked.append(
@@ -64,6 +65,7 @@ async def counterfactual(arguments: dict[str, Any], store: RelationStoreProtocol
             strategy=PathStrategy.BEST_CONFIDENCE,
             max_paths=1,
             confidence_policy=payload.confidence_policy,
+            min_confidence=payload.min_confidence,
         )
         if blocked_paths:
             alternatives = _counterfactual_alternative_paths(
@@ -273,6 +275,7 @@ def _counterfactual_alternative_paths(
             strategy=PathStrategy.BEST_CONFIDENCE,
             max_paths=1,
             confidence_policy=payload.confidence_policy,
+            min_confidence=payload.min_confidence,
         )
         for path in paths:
             key = tuple(path.nodes)
@@ -357,5 +360,6 @@ def _counterfactual_cause_blocked(index: Any, payload: CounterfactualInput, caus
             strategy=PathStrategy.BEST_CONFIDENCE,
             max_paths=1,
             confidence_policy=payload.confidence_policy,
+            min_confidence=payload.min_confidence,
         )
     )

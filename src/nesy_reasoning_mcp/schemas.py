@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 MAX_PROPOSITION_LENGTH = 512
 MAX_ASSERT_RELATIONS = 500
@@ -74,6 +74,13 @@ class ContradictionMode(StrEnum):
     COMBINED = "combined"
 
 
+class OnContradiction(StrEnum):
+    """Actions for contradictions detected during relation assertion."""
+
+    WARN = "warn"
+    REJECT = "reject"
+
+
 class WorldMode(StrEnum):
     """Counterfactual world assumption modes."""
 
@@ -128,6 +135,46 @@ class Diagnostic(BaseModel):
     related_ids: list[str] = Field(default_factory=list)
 
 
+class TemporalWindow(BaseModel):
+    """Temporal metadata for relation validity and delay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    delay: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+
+    def __eq__(self, other: object) -> bool:
+        """Compare with dicts using the public JSON shape for compatibility."""
+        if isinstance(other, dict):
+            return self.model_dump(mode="json", exclude_none=True) == other
+        return super().__eq__(other)
+
+    def get(self, key: str, default: Any = None) -> str | None:
+        """Return a temporal value by key like the legacy dict shape."""
+        value = getattr(self, key, default)
+        return value if value is not None else default
+
+    @field_validator("delay", "valid_from", "valid_to")
+    @classmethod
+    def strip_optional_temporal_value(cls, value: str | None) -> str | None:
+        """Strip temporal strings and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @field_validator("valid_from", "valid_to")
+    @classmethod
+    def validate_datetime_value(cls, value: str | None) -> str | None:
+        """Validate ISO datetime/date strings while preserving the original JSON value."""
+        if value is not None:
+            _parse_datetime(value)
+        return value
+
+
 class RelationInput(BaseModel):
     """Input shape for asserting relation records."""
 
@@ -140,7 +187,7 @@ class RelationInput(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
     context_id: str = DEFAULT_CONTEXT_ID
     store_id: str = DEFAULT_STORE_ID
-    temporal: dict[str, Any] | None = None
+    temporal: TemporalWindow | None = None
     assumptions: list[str] = Field(default_factory=list)
     provenance: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -153,6 +200,13 @@ class RelationInput(BaseModel):
         if not stripped:
             raise ValueError("must not be empty")
         return stripped
+
+    @field_serializer("temporal")
+    def serialize_temporal(self, value: TemporalWindow | None) -> dict[str, str] | None:
+        """Serialize temporal metadata without null fields."""
+        if value is None:
+            return None
+        return value.model_dump(mode="json", exclude_none=True)
 
 
 class RelationRecord(RelationInput):
@@ -186,15 +240,16 @@ class CanonicalImplicationEdge(BaseModel):
     context_id: str
     store_id: str
     assumptions: list[str] = Field(default_factory=list)
-    temporal: dict[str, Any] | None = None
+    temporal: TemporalWindow | None = None
 
     @property
     def temporal_window(self) -> tuple[datetime | None, datetime | None]:
         """Return parsed temporal valid_from/valid_to bounds."""
-        temporal = self.temporal or {}
+        if self.temporal is None:
+            return None, None
         return (
-            _parse_datetime(temporal.get("valid_from")),
-            _parse_datetime(temporal.get("valid_to")),
+            _parse_datetime(self.temporal.valid_from),
+            _parse_datetime(self.temporal.valid_to),
         )
 
 
@@ -204,7 +259,10 @@ def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
     return None
 
 
@@ -331,7 +389,14 @@ class AssertRelationsInput(BaseModel):
     relations: list[RelationInput] = Field(min_length=1, max_length=MAX_ASSERT_RELATIONS)
     mode: Literal["append", "upsert", "replace_same_pair"] = "append"
     check_contradictions: bool = True
-    merge_equivalent: bool = True
+    merge_equivalent: bool = Field(
+        default=True,
+        description=(
+            "Report canonical graph normalization for matching sufficient+necessary "
+            "evidence without merging or deleting stored evidence records."
+        ),
+    )
+    on_contradiction: OnContradiction = OnContradiction.WARN
     dry_run: bool = False
 
 
@@ -358,6 +423,17 @@ class ListRelationsInput(BaseModel):
     include_exclusive_groups: bool = False
     limit: int = Field(default=100, ge=1, le=500)
     cursor: str | None = None
+
+    @field_validator("cursor")
+    @classmethod
+    def validate_cursor(cls, value: str | None) -> str | None:
+        """Validate offset cursor strings."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or not stripped.isdecimal():
+            raise ValueError("cursor must be a non-negative integer offset")
+        return stripped
 
 
 class ClearRelationsInput(BaseModel):
@@ -433,6 +509,7 @@ class CheckContradictionsInput(BaseModel):
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
     include_soft: bool = True
     max_depth: int = Field(default=8, ge=1, le=20)
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
 
 
 class SummarizeGraphInput(BaseModel):
@@ -465,6 +542,7 @@ class CounterfactualInput(BaseModel):
     max_depth: int = Field(default=8, ge=1, le=20)
     include_alternative_paths: bool = True
     confidence_policy: ConfidencePolicy = ConfidencePolicy.PRODUCT_INDEPENDENT
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
 
     @field_validator("if_not")
     @classmethod
@@ -509,6 +587,7 @@ class ClassifyInput(_PropositionPairInput):
     include_paths: bool = True
     require_direct: bool = False
     confidence_policy: ConfidencePolicy = ConfidencePolicy.PRODUCT_INDEPENDENT
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
 
 
 class VerifyChainInput(_PropositionPairInput):
@@ -521,6 +600,7 @@ class VerifyChainInput(_PropositionPairInput):
     path_strategy: PathStrategy = PathStrategy.BEST_CONFIDENCE
     max_paths: int = Field(default=5, ge=1, le=50)
     confidence_policy: ConfidencePolicy = ConfidencePolicy.PRODUCT_INDEPENDENT
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
 
     @field_validator("chain")
     @classmethod

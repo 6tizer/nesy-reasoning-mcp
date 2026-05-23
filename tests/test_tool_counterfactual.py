@@ -49,6 +49,30 @@ async def test_counterfactual_sufficient_path_is_only_possibly_blocked_open_worl
 
 
 @pytest.mark.asyncio
+async def test_counterfactual_min_confidence_filters_blocked_path() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient", "confidence": 0.2}
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        COUNTERFACTUAL,
+        {"if_not": "A", "targets": ["B"], "min_confidence": 0.5},
+        store,
+    )
+
+    assert result.structuredContent["possibly_blocked"] == []
+    assert result.structuredContent["unknown"][0]["target"] == "B"
+
+
+@pytest.mark.asyncio
 async def test_counterfactual_independent_alternative_is_still_possible() -> None:
     store = RelationStore()
     await call_tool(

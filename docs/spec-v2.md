@@ -981,7 +981,11 @@ GraphIndex 可在内存中由 SQLite 表重建，不需要单独持久化。
         "default": "append"
       },
       "check_contradictions": { "type": "boolean", "default": true },
-      "merge_equivalent": { "type": "boolean", "default": true },
+      "merge_equivalent": {
+        "type": "boolean",
+        "default": true,
+        "description": "Report canonical graph normalization for matching sufficient+necessary evidence without merging or deleting stored evidence records."
+      },
       "dry_run": { "type": "boolean", "default": false }
     },
     "required": ["relations"],
@@ -1056,7 +1060,7 @@ GraphIndex 可在内存中由 SQLite 表重建，不需要单独持久化。
 
 #### 实现规则
 
-- 如果同一 context 下同一 `(source, target)` 同时存在 `sufficient` 和 `necessary`，且 `merge_equivalent=true`，可规范化为 `equivalent`，但必须保留原始证据记录。
+- 如果同一 context 下同一 `(source, target)` 同时存在 `sufficient` 和 `necessary`，且 `merge_equivalent=true`，只在 canonical graph/诊断中报告为 `equivalent`；不得合并、删除或改写原始 evidence records。
 - 如果新增关系导致已声明互斥目标被同一 source 充分推出，返回 `warning` 或 `error` 取决于配置。
 - `dry_run=true` 时只返回将要添加、更新、拒绝的记录，不改变状态。
 - `mode=replace_same_pair` 只替换同一 `source/target/context/store` 的关系，不清空其他关系。

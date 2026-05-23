@@ -8,6 +8,8 @@ from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
 
+from pydantic import BaseModel
+
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
     ExclusiveGroupRecord,
@@ -295,6 +297,8 @@ def _merge_context_metadata(
 def _dumps(value: Any) -> str | None:
     if value is None:
         return None
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json", exclude_none=True)
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 

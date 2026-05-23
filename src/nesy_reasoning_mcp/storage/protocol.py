@@ -43,6 +43,7 @@ class RelationStoreProtocol(Protocol):
         relation_filter: RelationFilter | None = None,
         *,
         limit: int | None = None,
+        offset: int = 0,
     ) -> list[RelationRecord]:
         """List relation records matching an optional filter."""
 
