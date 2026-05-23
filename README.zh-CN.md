@@ -7,9 +7,21 @@
 
 [English](README.md) | 简体中文
 
-一个本地 MCP server，为 AI Agent 提供确定性的推理记忆：结构化关系存储、因果分类、链路验证、矛盾检查、图摘要和反事实分析。
+NeSy Reasoning MCP 为 Agent 提供一个符号推理图，用来检查蕴含、必要性、矛盾和反事实影响。
 
-它不替代 LLM。LLM 可以提出结构化事实；这个 server 用小而可测试的符号引擎检查这些事实。
+它是 Agent 侧的逻辑审计层。它让关键推理关系显式、可检查，而不是只藏在自然语言总结里。它提升的是推理可审计性，不是搜索质量、来源真实性或召回率。
+
+## 它是什么 / 不是什么
+
+| 它是 | 它不是 |
+|---|---|
+| 符号推理图 | 搜索引擎 |
+| 一致性检查器 | 通用记忆库 |
+| 外部推理草稿本 | 向量数据库 |
+| 蕴含、必要性、矛盾和反事实 verifier | 文档总结器 |
+| 关键推理关系的持久图 | 存放所有相关事实的地方 |
+
+适合用在隐藏推理容易出错的任务：长研究、代码依赖分析、产品或工程决策分析。不适合简单搜索、短总结、闲聊问答，或“记住所有相关事实”的工作流。
 
 ## 它给 Agent 带来什么
 
@@ -89,6 +101,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
 - [examples/nesy-config.json](examples/nesy-config.json)
 - [examples/claude-hooks.json](examples/claude-hooks.json)
 - [examples/internal-test](examples/internal-test/README.md)
+- [Agent 使用策略](docs/agent-usage.md)
 
 ## Claude Code 安装
 
@@ -129,6 +142,30 @@ internal-test smoke ok
 然后用 `nesy.classify` 查询 `A` 和 `C`。Server 会推出 `A -> C`，并返回带路径 trace 的 `classification="sufficient"`。
 
 如果 `B` 和 `C` 被声明为互斥，而同一个 source 可以推出两者，`nesy.check_contradictions` 会返回 hard contradiction。Stop hook 可以在最终回答包含冲突的结构化 `NESY_FACTS` 时阻断。
+
+## 推荐 Agent 用法
+
+不要把 Agent 找到的所有相关事实都写进图。只有来源材料足以支持某个逻辑蕴含、必要性、等价或显式互斥时，才断言关系，并写清 context、confidence 和 provenance。
+
+适合的 prompt：
+
+```text
+研究 A 是否真的能解决 B。建立一个小的 NeSy 因果链图，带 provenance，然后验证最终结论。
+
+阅读这个代码库，建模 feature flag、配置依赖和互斥路径。然后回答移除 config X 后什么一定会坏。
+
+比较方案 A/B/C。编码目标、约束、风险和互斥项，然后验证哪个方案足以达成目标。
+```
+
+不适合的 prompt：
+
+```text
+搜索 AI 新闻。
+总结这篇文章。
+记住所有相关事实。
+```
+
+详见 [Agent 使用策略](docs/agent-usage.md)，其中包含 Do/Don't 表、可复制 prompt、自动抽取流程和过度断言反例。
 
 ## 工具列表
 
@@ -248,6 +285,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fix
 - [完整规格](docs/spec-v2.md)
 - [SPEC 合规矩阵](SPEC_COMPLIANCE.md)
 - [Agent 指令](AGENTS.md)
+- [Agent 使用策略](docs/agent-usage.md)
 - [Claude Code 指令](CLAUDE.md)
 - [MCP 安装](docs/install.md)
 - [内部测试 profile](docs/internal-testing.md)

@@ -6,6 +6,11 @@ For internal testing, prefer the SQLite profile in
 [Internal Testing](internal-testing.md). It packages MCP config, hook config,
 HTTP launch, and a smoke test that share one SQLite store.
 
+Before enabling autonomous graph building, read the
+[Agent usage policy](agent-usage.md). It explains when agents should write
+relations, when they should return `unknown`, and why NeSy is not generic
+memory.
+
 ## Requirements
 
 - Python 3.11 to 3.14
