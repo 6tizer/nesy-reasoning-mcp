@@ -18,7 +18,7 @@ from nesy_reasoning_mcp.auto_ingest.fetcher import (
 )
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
-    run_openai_agents_dry_run,
+    run_openai_agents_ingestion,
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import IngestionInput, IngestionReport
 from nesy_reasoning_mcp.config import load_config
@@ -46,6 +46,17 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=None, help="Optional extraction task.")
     parser.add_argument("--question", default=None, help="Optional question to answer.")
     parser.add_argument("--model", default=None, help="OpenAI Agents SDK model override.")
+    parser.add_argument(
+        "--auto-write",
+        action="store_true",
+        help="Persist gate-approved relations with safe write checks.",
+    )
+    parser.add_argument(
+        "--min-write-confidence",
+        type=float,
+        default=0.85,
+        help="Minimum reviewed confidence required for --auto-write.",
+    )
     parser.add_argument("--format", choices=["json", "text"], default="json")
     parser.add_argument("--output", default=None, help="Optional report output path.")
     parser.add_argument(
@@ -99,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
+    if not 0 <= args.min_write_confidence <= 1:
+        raise ValueError("--min-write-confidence must be between 0 and 1")
     ingestion_input = _load_ingestion_input(args)
     if not ingestion_input.evidence and not ingestion_input.urls:
         raise ValueError("agent-dry-run requires --input evidence or at least one --url")
@@ -114,7 +127,13 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         }
     )
     store = create_relation_store(load_config())
-    return await run_openai_agents_dry_run(effective_input, store=store, model=args.model)
+    return await run_openai_agents_ingestion(
+        effective_input,
+        store=store,
+        model=args.model,
+        auto_write=args.auto_write,
+        min_write_confidence=args.min_write_confidence,
+    )
 
 
 def _load_ingestion_input(args: argparse.Namespace) -> IngestionInput:
@@ -143,6 +162,7 @@ def _render_report(report: IngestionReport, output_format: str) -> str:
         f"mode: {report.mode}\n"
         f"candidates: {len(report.candidates)}\n"
         f"approved_relations: {approved}\n"
+        f"written_relations: {len(report.written_relation_ids)}\n"
         f"queued: {queued}\n"
         f"rejected: {rejected}"
     )

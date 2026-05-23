@@ -265,6 +265,7 @@ class IngestionReport(BaseModel):
     reviews: list[ReviewDecision] = Field(default_factory=list)
     gate_results: list[GateResult] = Field(default_factory=list)
     approved_relations: list[RelationInput] = Field(default_factory=list)
+    written_relation_ids: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

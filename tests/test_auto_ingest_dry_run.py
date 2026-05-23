@@ -162,7 +162,9 @@ async def test_openai_agents_dry_run_maps_runner_outputs_to_report(
     assert report.candidates == [candidate]
     assert report.reviews == [review]
     assert report.approved_relations[0].source == "A"
+    assert report.written_relation_ids == []
     assert report.gate_results[0].action == "auto_write"
+    assert report.gate_results[0].reasons == ["dry-run approved; no persistent write performed"]
 
 
 async def test_dry_run_gate_never_writes_and_queues_hard_contradictions() -> None:
@@ -252,13 +254,17 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
         *,
         store: Any,
         model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
     ) -> IngestionReport:
         assert ingestion_input.evidence[0].url == "https://example.com/source"
         assert store.list_relations() == []
         assert model == "gpt-test"
+        assert auto_write is False
+        assert min_write_confidence == 0.85
         return IngestionReport(candidates=[_candidate()])
 
-    monkeypatch.setattr(ingest_cli, "run_openai_agents_dry_run", fake_run)
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
     stdout = StringIO()
     stderr = StringIO()
     args = argparse.Namespace(
@@ -267,6 +273,8 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
         task=None,
         question=None,
         model="gpt-test",
+        auto_write=False,
+        min_write_confidence=0.85,
         format="json",
         output=None,
         timeout_seconds=1.0,
@@ -282,6 +290,51 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
     assert stderr.getvalue() == ""
 
 
+def test_script_wrapper_accepts_auto_write_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    output_path = tmp_path / "report.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model is None
+        assert auto_write is True
+        assert min_write_confidence == 0.91
+        return IngestionReport(written_relation_ids=["rel-1"])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+
+    exit_code = ingest_cli.main(
+        [
+            "--input",
+            str(input_path),
+            "--auto-write",
+            "--min-write-confidence",
+            "0.91",
+            "--output",
+            str(output_path),
+        ]
+    )
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["written_relation_ids"] == ["rel-1"]
+
+
 def test_cli_agent_dry_run_invalid_input_returns_nonzero(tmp_path: Path) -> None:
     input_path = tmp_path / "input.json"
     input_path.write_text("[]", encoding="utf-8")
@@ -291,6 +344,8 @@ def test_cli_agent_dry_run_invalid_input_returns_nonzero(tmp_path: Path) -> None
         task=None,
         question=None,
         model=None,
+        auto_write=False,
+        min_write_confidence=0.85,
         format="json",
         output=None,
         timeout_seconds=1.0,
