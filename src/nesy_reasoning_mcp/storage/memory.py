@@ -13,6 +13,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupRecord,
     GraphStats,
     IndependenceRecord,
+    PropositionRecord,
     RelationFilter,
     RelationInput,
     RelationRecord,
@@ -28,6 +29,8 @@ from nesy_reasoning_mcp.storage.common import (
     _matches_filter,
     _merge_context_metadata,
     _merge_import,
+    _merge_propositions,
+    _normalize_relation_identities,
     _relation_for_store,
     _upsert_relations,
     graph_stats_for,
@@ -42,6 +45,7 @@ class MemoryRelationStore:
         self._relations: list[RelationRecord] = []
         self._exclusive_groups: list[ExclusiveGroupRecord] = []
         self._independence_records: list[IndependenceRecord] = []
+        self._propositions: list[PropositionRecord] = []
         self._audit_log: list[AuditEntry] = []
         self._context_metadata: dict[str, Any] = {}
 
@@ -53,7 +57,8 @@ class MemoryRelationStore:
         dry_run: bool = False,
     ) -> tuple[list[RelationRecord], int]:
         """Add relation records and return added records plus update count."""
-        records = [RelationRecord.from_input(item) for item in inputs]
+        normalized_inputs = _normalize_relation_identities(inputs, self._propositions)
+        records = [RelationRecord.from_input(item) for item in normalized_inputs]
         updated = 0
 
         if mode == "upsert":
@@ -148,6 +153,10 @@ class MemoryRelationStore:
         """List all stored independence records."""
         return list(self._independence_records)
 
+    def list_propositions(self) -> list[PropositionRecord]:
+        """List all stored proposition records."""
+        return [proposition.model_copy(deep=True) for proposition in self._propositions]
+
     def clear_relations(
         self,
         *,
@@ -167,6 +176,7 @@ class MemoryRelationStore:
                 if include_exclusive_groups:
                     self._exclusive_groups.clear()
                 self._independence_records.clear()
+                self._propositions.clear()
                 self._context_metadata.clear()
             return removed, removed_groups
 
@@ -278,6 +288,7 @@ class MemoryRelationStore:
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
         independence_records: Iterable[IndependenceRecord] = (),
+        propositions: Iterable[PropositionRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -285,7 +296,14 @@ class MemoryRelationStore:
         dry_run: bool = False,
     ) -> tuple[int, int, int, int]:
         """Import validated records into memory."""
-        incoming_relations = [_relation_for_store(record, store_id) for record in relations]
+        merged_propositions, _updated_propositions = _merge_propositions(
+            self._propositions,
+            propositions,
+        )
+        normalized_relations = _normalize_relation_identities(relations, merged_propositions)
+        incoming_relations = [
+            _relation_for_store(record, store_id) for record in normalized_relations
+        ]
         incoming_groups = [_group_for_store(group, store_id) for group in exclusive_groups]
         incoming_independence = [
             _independence_for_store(record, store_id) for record in independence_records
@@ -314,5 +332,6 @@ class MemoryRelationStore:
             self._relations = merged_relations
             self._exclusive_groups = merged_groups
             self._independence_records = merged_independence
+            self._propositions = merged_propositions
             self._context_metadata = merged_metadata
         return len(incoming_relations), len(incoming_groups), updated_relations, updated_groups

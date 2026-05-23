@@ -135,6 +135,89 @@ def test_http_with_sqlite_store_allows_concurrent_tool_calls(tmp_path) -> None:
     assert len(store.list_relations()) == 12
 
 
+def test_http_load_and_check_supports_proposition_registry() -> None:
+    config = _config()
+    store = RelationStore(config)
+    app = create_http_app(config, store)
+    headers = {
+        "Authorization": "Bearer secret",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+    with TestClient(app) as client:
+        session_id = _initialize_http_session(client, headers)
+        load_response = client.post(
+            "/mcp",
+            headers={**headers, "mcp-session-id": session_id},
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "nesy.load_relations",
+                    "arguments": {
+                        "source_type": "inline",
+                        "data": {
+                            "propositions": [
+                                {
+                                    "id": "profit_up",
+                                    "label": "Profit increases",
+                                    "aliases": ["利润增加"],
+                                },
+                                {
+                                    "id": "profit_not_up",
+                                    "label": "Profit does not increase",
+                                    "aliases": ["利润未增加"],
+                                    "negates": "profit_up",
+                                },
+                            ]
+                        },
+                        "check_contradictions": False,
+                    },
+                },
+            },
+        )
+        check_response = client.post(
+            "/mcp",
+            headers={**headers, "mcp-session-id": session_id},
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "nesy.check_contradictions",
+                    "arguments": {
+                        "mode": "facts",
+                        "include_soft": False,
+                        "facts": [
+                            {
+                                "source": "Discount",
+                                "target": "利润增加",
+                                "relation_type": "sufficient",
+                            },
+                            {
+                                "source": "Discount",
+                                "target": "利润未增加",
+                                "relation_type": "sufficient",
+                            },
+                        ],
+                    },
+                },
+            },
+        )
+
+    loaded = _sse_payload(load_response)
+    checked = _sse_payload(check_response)
+
+    assert loaded["result"]["structuredContent"]["loaded_propositions"] == 2
+    assert checked["result"]["structuredContent"]["has_contradictions"] is True
+    assert checked["result"]["structuredContent"]["contradictions"][0]["targets"] == [
+        "profit_up",
+        "profit_not_up",
+    ]
+
+
 def _initialize_http_session(client: TestClient, headers: dict[str, str]) -> str:
     response = client.post(
         "/mcp",

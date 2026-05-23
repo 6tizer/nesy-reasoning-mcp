@@ -522,6 +522,7 @@ class RelationSetData(BaseModel):
 
     version: str = "2.0"
     stores: list[dict[str, Any]] = Field(default_factory=list)
+    propositions: list[PropositionRecord] = Field(default_factory=list)
     relations: list[RelationRecord] = Field(default_factory=list, max_length=MAX_LOAD_RELATIONS)
     exclusive_groups: list[ExclusiveGroupRecord] = Field(default_factory=list)
     independence_records: list[IndependenceRecord] = Field(default_factory=list)

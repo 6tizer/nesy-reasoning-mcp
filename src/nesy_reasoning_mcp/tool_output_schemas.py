@@ -166,6 +166,7 @@ def _load_relations_output_schema() -> dict[str, Any]:
         {
             "loaded_relations": {"type": "integer"},
             "loaded_exclusive_groups": {"type": "integer"},
+            "loaded_propositions": {"type": "integer"},
             "updated_relations": {"type": "integer"},
             "updated_exclusive_groups": {"type": "integer"},
             "rejected": {"type": "integer"},
@@ -176,7 +177,13 @@ def _load_relations_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": props,
-        "required": ["status", "loaded_relations", "loaded_exclusive_groups", "rejected"],
+        "required": [
+            "status",
+            "loaded_relations",
+            "loaded_exclusive_groups",
+            "loaded_propositions",
+            "rejected",
+        ],
         "additionalProperties": False,
     }
 
@@ -188,6 +195,7 @@ def _export_relations_output_schema() -> dict[str, Any]:
             "format": {"type": "string", "enum": ["json", "jsonl"]},
             "relation_count": {"type": "integer"},
             "exclusive_group_count": {"type": "integer"},
+            "proposition_count": {"type": "integer"},
             "data": {"type": ["object", "string", "null"]},
             "path": {"type": ["string", "null"]},
             "bytes": {"type": "integer"},
@@ -196,7 +204,13 @@ def _export_relations_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": props,
-        "required": ["status", "format", "relation_count", "exclusive_group_count"],
+        "required": [
+            "status",
+            "format",
+            "relation_count",
+            "exclusive_group_count",
+            "proposition_count",
+        ],
         "additionalProperties": False,
     }
 

@@ -185,7 +185,7 @@ canonical field names.
 - `clear_relations(scope=all)`, `load_relations(mode=replace_store)`, and file
   load/export should require explicit confirmation.
 - Contradiction checks are deterministic over structured facts only. Explicit
-  negation can use temporary `propositions[].negates` declarations in
-  `nesy.check_contradictions`, or legacy labels such as `not X`, `not:X`, and
-  `¬X`; arbitrary natural-language negation is not extracted automatically.
+  negation can use stored or temporary `propositions[].negates` declarations, or
+  legacy labels such as `not X`, `not:X`, and `¬X`; arbitrary natural-language
+  negation is not extracted automatically.
 - PostToolBatch hooks and hosted multi-user deployment remain future work.

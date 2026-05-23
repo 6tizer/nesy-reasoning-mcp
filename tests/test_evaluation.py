@@ -12,6 +12,7 @@ from nesy_reasoning_mcp.evaluation import (
     BenchmarkFixture,
     run_agent_eval_file,
     run_eval_file,
+    run_fixture,
     run_llm_eval_file,
 )
 
@@ -117,6 +118,60 @@ async def test_eval_runner_min_score_failure() -> None:
 
     assert report["status"] == "fail"
     assert report["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_eval_relation_set_can_include_propositions() -> None:
+    fixture = BenchmarkFixture.model_validate(
+        {
+            "name": "proposition-registry",
+            "cases": [
+                {
+                    "id": "stored_canonical_negation",
+                    "category": "contradiction",
+                    "description": "Stored propositions normalize aliases before checking.",
+                    "relation_set": {
+                        "propositions": [
+                            {
+                                "id": "profit_up",
+                                "label": "Profit increases",
+                                "aliases": ["利润增加"],
+                            },
+                            {
+                                "id": "profit_not_up",
+                                "label": "Profit does not increase",
+                                "aliases": ["利润未增加"],
+                                "negates": "profit_up",
+                            },
+                        ],
+                        "relations": [
+                            {
+                                "source": "Discount",
+                                "target": "利润增加",
+                                "relation_type": "sufficient",
+                            },
+                            {
+                                "source": "Discount",
+                                "target": "利润未增加",
+                                "relation_type": "sufficient",
+                            },
+                        ],
+                    },
+                    "tool_name": "nesy.check_contradictions",
+                    "tool_input": {"include_soft": False},
+                    "expected": {
+                        "equals": {"has_contradictions": True},
+                        "contains": {"contradictions[].targets": ["profit_up", "profit_not_up"]},
+                    },
+                }
+            ],
+        }
+    )
+
+    report = await run_fixture(fixture)
+
+    assert report["status"] == "pass"
+    assert report["passed"] == 1
 
 
 def test_eval_cli_outputs_parseable_json() -> None:

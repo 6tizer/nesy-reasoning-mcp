@@ -167,11 +167,13 @@ Callers can optionally provide `source_id` and `target_id` as stable canonical
 proposition IDs. When IDs are present, graph reasoning uses the IDs as nodes;
 when they are absent, the labels remain the canonical nodes for compatibility.
 
-This release does not add an alias registry, label/ID lookup, or explicit
-`negates` persistence model. `nesy.check_contradictions` can accept temporary
-`propositions` entries with `negates` to detect canonical opposition by ID, but
-those proposition declarations are not stored or exported yet. Queries against
-ID-backed relations should use the canonical IDs.
+Relation sets can include `propositions` with `id`, `label`, `aliases`,
+optional `negates`, and metadata. `nesy.load_relations` stores these
+propositions, `nesy.export_relations` exports them, and relation labels are
+normalized to IDs when they exactly match a stored ID, label, or alias. Matching
+is exact after normal schema trimming; there is no fuzzy or semantic alias
+matching. `negates` declares canonical ID opposition for deterministic
+contradiction checks.
 
 ## Storage And Transports
 
@@ -198,8 +200,9 @@ uv run nesy-reasoning-mcp hook stop
 ```
 
 - **PreToolUse** injects a compact graph summary as additional context.
-- **Stop** checks the current graph or an explicit `NESY_FACTS:` JSON array in
-  the final answer.
+- **Stop** checks the current graph or explicit `NESY_FACTS:` in the final
+  answer. `NESY_FACTS` may be a legacy relation array or an object with
+  `relations` and `propositions`.
 
 Hooks run in separate processes, so they should use SQLite, JSON, or the same
 HTTP daemon. Process memory is not shared between stdio MCP and hook processes.

@@ -927,9 +927,11 @@ GraphIndex 可在内存中由 SQLite 表重建，不需要单独持久化。
 `source` and `target` are display labels and remain required for compatibility.
 `source_id` and `target_id` are optional stable proposition IDs. If present,
 canonical graph reasoning uses the IDs; otherwise it falls back to labels. This
-does not implement alias lookup. Temporary `PropositionRecord` inputs can declare
-`negates` for `nesy.check_contradictions`; persistence/export of proposition
-metadata remains future work.
+supports exact alias lookup from the stored proposition registry: `id`, `label`,
+and `aliases` can fill missing relation IDs at load/assert/check boundaries.
+No fuzzy or semantic alias lookup is performed. `PropositionRecord` entries can
+declare `negates`; relation-set load/export and SQLite/JSON stores preserve this
+metadata.
 
 #### PropositionRecord
 

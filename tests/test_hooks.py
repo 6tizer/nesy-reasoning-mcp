@@ -14,7 +14,12 @@ from nesy_reasoning_mcp.hooks import (
     run_pretooluse_hook,
     run_stop_hook,
 )
-from nesy_reasoning_mcp.schemas import ExclusiveGroupInput, RelationInput, RelationType
+from nesy_reasoning_mcp.schemas import (
+    ExclusiveGroupInput,
+    PropositionRecord,
+    RelationInput,
+    RelationType,
+)
 
 
 def test_hook_context_filter_defaults_and_env_choices() -> None:
@@ -283,6 +288,89 @@ def test_stop_hook_blocks_hard_contradiction_from_nesy_facts(
     assert code == 0
     assert payload["decision"] == "block"
     assert "hard contradiction" in payload["reason"]
+
+
+def test_stop_hook_blocks_canonical_negation_from_nesy_facts_object(tmp_path: Path) -> None:
+    config_path, _sqlite_path = _write_sqlite_config(tmp_path)
+    message = "Done.\nNESY_FACTS:\n" + json.dumps(
+        {
+            "relations": [
+                {
+                    "source": "Discount",
+                    "target": "利润增加",
+                    "relation_type": "sufficient",
+                },
+                {
+                    "source": "Discount",
+                    "target": "利润未增加",
+                    "relation_type": "sufficient",
+                },
+            ],
+            "propositions": [
+                {"id": "profit_up", "label": "Profit increases", "aliases": ["利润增加"]},
+                {
+                    "id": "profit_not_up",
+                    "label": "Profit does not increase",
+                    "aliases": ["利润未增加"],
+                    "negates": "profit_up",
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+    stdout = StringIO()
+
+    code = run_stop_hook(
+        stdin=StringIO(json.dumps({"last_assistant_message": message})),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert code == 0
+    assert payload["decision"] == "block"
+    assert "hard contradiction" in payload["reason"]
+
+
+def test_stop_hook_array_facts_use_stored_proposition_registry(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    writer = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    writer.import_records(
+        [],
+        [],
+        propositions=[
+            PropositionRecord(id="profit_up", label="Profit increases", aliases=["利润增加"]),
+            PropositionRecord(
+                id="profit_not_up",
+                label="Profit does not increase",
+                aliases=["利润未增加"],
+                negates="profit_up",
+            ),
+        ],
+        mode="append",
+        store_id="default",
+    )
+    message = (
+        "Done.\nNESY_FACTS:\n"
+        "["
+        '{"source":"Discount","target":"利润增加","relation_type":"sufficient"},'
+        '{"source":"Discount","target":"利润未增加","relation_type":"sufficient"}'
+        "]"
+    )
+    stdout = StringIO()
+
+    run_stop_hook(
+        stdin=StringIO(json.dumps({"last_assistant_message": message})),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    assert json.loads(stdout.getvalue())["decision"] == "block"
 
 
 def test_stop_hook_checks_current_graph_without_nesy_facts(tmp_path: Path) -> None:

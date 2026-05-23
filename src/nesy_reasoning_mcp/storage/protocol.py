@@ -12,6 +12,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupRecord,
     GraphStats,
     IndependenceRecord,
+    PropositionRecord,
     RelationFilter,
     RelationInput,
     RelationRecord,
@@ -52,6 +53,9 @@ class RelationStoreProtocol(Protocol):
 
     def list_independence_records(self) -> list[IndependenceRecord]:
         """List all stored independence records."""
+
+    def list_propositions(self) -> list[PropositionRecord]:
+        """List all stored proposition records."""
 
     def clear_relations(
         self,
@@ -96,6 +100,7 @@ class RelationStoreProtocol(Protocol):
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
         independence_records: Iterable[IndependenceRecord] = (),
+        propositions: Iterable[PropositionRecord] = (),
         *,
         mode: str,
         store_id: str,

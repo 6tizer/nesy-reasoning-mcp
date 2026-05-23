@@ -13,6 +13,7 @@ from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
     ExclusiveGroupRecord,
     IndependenceRecord,
+    PropositionRecord,
     RelationFilter,
     RelationInput,
     RelationRecord,
@@ -101,6 +102,7 @@ class JsonRelationStore(MemoryRelationStore):
         relations: Iterable[RelationRecord],
         exclusive_groups: Iterable[ExclusiveGroupRecord],
         independence_records: Iterable[IndependenceRecord] = (),
+        propositions: Iterable[PropositionRecord] = (),
         *,
         mode: str,
         store_id: str,
@@ -112,6 +114,7 @@ class JsonRelationStore(MemoryRelationStore):
             relations,
             exclusive_groups,
             independence_records,
+            propositions,
             mode=mode,
             store_id=store_id,
             context_metadata=context_metadata,
@@ -136,6 +139,9 @@ class JsonRelationStore(MemoryRelationStore):
         self._independence_records = [
             IndependenceRecord.model_validate(item) for item in data.get("independence_records", [])
         ]
+        self._propositions = [
+            PropositionRecord.model_validate(item) for item in data.get("propositions", [])
+        ]
         self._audit_log = [_audit_from_dict(item) for item in data.get("audit_log", [])]
         self._context_metadata = data.get("context_metadata", {})
 
@@ -148,6 +154,10 @@ class JsonRelationStore(MemoryRelationStore):
             "exclusive_groups": [group.model_dump(mode="json") for group in self._exclusive_groups],
             "independence_records": [
                 record.model_dump(mode="json") for record in self._independence_records
+            ],
+            "propositions": [
+                proposition.model_dump(mode="json", exclude_none=True)
+                for proposition in self._propositions
             ],
             "audit_log": [entry.to_dict() for entry in self._audit_log],
             "context_metadata": self._context_metadata,

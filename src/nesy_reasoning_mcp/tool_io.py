@@ -22,10 +22,12 @@ from nesy_reasoning_mcp.schemas import (
     IndependenceRecord,
     LoadRelationsInput,
     LoadSourceType,
+    PropositionRecord,
     RelationRecord,
     RelationSetData,
     RelationType,
 )
+from nesy_reasoning_mcp.storage.common import _merge_propositions, _normalize_relation_identities
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_common import (
     _exclusive_group_dump,
@@ -34,6 +36,7 @@ from nesy_reasoning_mcp.tool_common import (
     _independence_for_store,
     _independence_record_dump,
     _independence_record_matches_filter,
+    _proposition_dump,
     _record_dump,
     _relations_for_store,
 )
@@ -49,7 +52,19 @@ async def load_relations(arguments: dict[str, Any], store: RelationStoreProtocol
         return _load_error("LOAD_RELATIONS_FAILED", str(exc), store)
     diagnostics = [*migration_diagnostics, *parse_diagnostics]
 
-    incoming_relations = _relations_for_store(data.relations, payload.store_id)
+    try:
+        effective_propositions, _updated_propositions = _merge_propositions(
+            store.list_propositions(),
+            data.propositions,
+        )
+        normalized_data_relations = _normalize_relation_identities(
+            data.relations,
+            effective_propositions,
+        )
+    except ValueError as exc:
+        return _load_error("LOAD_RELATIONS_FAILED", str(exc), store)
+
+    incoming_relations = _relations_for_store(normalized_data_relations, payload.store_id)
     incoming_groups = _groups_for_store(data.exclusive_groups, payload.store_id)
     incoming_independence = _independence_for_store(data.independence_records, payload.store_id)
     contradictions: list[dict[str, Any]] = []
@@ -61,12 +76,16 @@ async def load_relations(arguments: dict[str, Any], store: RelationStoreProtocol
                 relation for relation in stored_relations if relation.store_id != payload.store_id
             ]
             stored_groups = [group for group in stored_groups if group.store_id != payload.store_id]
-        check_relations = [*stored_relations, *incoming_relations]
+        check_relations = [
+            *_normalize_relation_identities(stored_relations, effective_propositions),
+            *incoming_relations,
+        ]
         contradictions, _context_separated = find_exclusive_contradictions(
             check_relations,
             [*stored_groups, *incoming_groups],
             context_filter=ContextFilter(store_id=payload.store_id),
             max_depth=8,
+            propositions=effective_propositions,
         )
 
     try:
@@ -74,6 +93,7 @@ async def load_relations(arguments: dict[str, Any], store: RelationStoreProtocol
             incoming_relations,
             incoming_groups,
             incoming_independence,
+            data.propositions,
             mode=payload.mode.value,
             store_id=payload.store_id,
             context_metadata=data.context_metadata,
@@ -85,6 +105,7 @@ async def load_relations(arguments: dict[str, Any], store: RelationStoreProtocol
         "status": "warning" if contradictions else "ok",
         "loaded_relations": loaded_relations,
         "loaded_exclusive_groups": loaded_groups,
+        "loaded_propositions": len(data.propositions),
         "updated_relations": updated_relations,
         "updated_exclusive_groups": updated_groups,
         "rejected": 0,
@@ -110,6 +131,7 @@ async def export_relations(
     """Handle `nesy.export_relations`."""
     payload = ExportRelationsInput.model_validate(arguments)
     relations = store.list_relations(payload.filter, limit=None)
+    propositions = store.list_propositions()
     independence_records = [
         record
         for record in store.list_independence_records()
@@ -128,6 +150,7 @@ async def export_relations(
         relations,
         exclusive_groups,
         independence_records,
+        propositions,
         context_metadata=(
             _context_metadata_for_export(
                 store.context_metadata(),
@@ -156,6 +179,7 @@ async def export_relations(
             "format": payload.format.value,
             "relation_count": len(relations),
             "exclusive_group_count": len(exclusive_groups),
+            "proposition_count": len(propositions),
             "data": exported if payload.format == ExportFormat.JSON else text,
             "path": None,
             "bytes": byte_count,
@@ -189,6 +213,7 @@ async def export_relations(
         "format": payload.format.value,
         "relation_count": len(relations),
         "exclusive_group_count": len(exclusive_groups),
+        "proposition_count": len(propositions),
         "data": None,
         "path": str(real_path),
         "bytes": byte_count,
@@ -244,6 +269,7 @@ def _parse_relation_set_text(text: str, suffix: str) -> tuple[RelationSetData, l
         relations = []
         exclusive_groups = []
         independence_records = []
+        propositions = []
         context_metadata: dict[str, Any] = {}
         migrated_count = 0
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -262,6 +288,8 @@ def _parse_relation_set_text(text: str, suffix: str) -> tuple[RelationSetData, l
                 if not context_id:
                     raise ValueError(f"line {line_number} context_metadata is missing context_id")
                 context_metadata[str(context_id)] = record
+            elif item_type == "proposition":
+                propositions.append(record)
             elif item_type == "independence_record" or record.get("relation") == "independent_of":
                 independence_records.append(record)
             elif item_type == "exclusive_group" or "members" in record:
@@ -273,13 +301,14 @@ def _parse_relation_set_text(text: str, suffix: str) -> tuple[RelationSetData, l
             else:
                 raise ValueError(
                     f"line {line_number} is not a relation, exclusive group, "
-                    "independence record, or context metadata"
+                    "independence record, proposition, or context metadata"
                 )
         data = RelationSetData.model_validate(
             {
                 "relations": relations,
                 "exclusive_groups": exclusive_groups,
                 "independence_records": independence_records,
+                "propositions": propositions,
                 "context_metadata": context_metadata,
             }
         )
@@ -373,6 +402,7 @@ def _relation_set_export(
     relations: list[RelationRecord],
     exclusive_groups: list[ExclusiveGroupRecord],
     independence_records: list[IndependenceRecord],
+    propositions: list[PropositionRecord],
     *,
     context_metadata: dict[str, Any],
     include_metadata: bool,
@@ -380,6 +410,7 @@ def _relation_set_export(
     relation_items = [_record_dump(record) for record in relations]
     group_items = [_exclusive_group_dump(group) for group in exclusive_groups]
     independence_items = [_independence_record_dump(record) for record in independence_records]
+    proposition_items = [_proposition_dump(record) for record in propositions]
     if not include_metadata:
         for item in relation_items:
             item.pop("metadata", None)
@@ -388,13 +419,18 @@ def _relation_set_export(
             item.pop("metadata", None)
         for item in independence_items:
             item.pop("metadata", None)
-    return {
+        for item in proposition_items:
+            item.pop("metadata", None)
+    data = {
         "version": "2.0",
         "relations": relation_items,
         "exclusive_groups": group_items,
         "independence_records": independence_items,
         "context_metadata": context_metadata,
     }
+    if proposition_items:
+        data["propositions"] = proposition_items
+    return data
 
 
 def _context_metadata_for_export(
@@ -441,6 +477,14 @@ def _serialize_relation_set(data: dict[str, Any], export_format: ExportFormat) -
     )
     lines.extend(
         json.dumps(
+            {"type": "proposition", "record": proposition},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for proposition in data.get("propositions", [])
+    )
+    lines.extend(
+        json.dumps(
             {
                 "type": "context_metadata",
                 "context_id": context_id,
@@ -460,6 +504,7 @@ def _load_error(code: str, message: str, store: RelationStoreProtocol) -> dict[s
         "status": "error",
         "loaded_relations": 0,
         "loaded_exclusive_groups": 0,
+        "loaded_propositions": 0,
         "updated_relations": 0,
         "updated_exclusive_groups": 0,
         "rejected": 0,
@@ -483,6 +528,7 @@ def _export_error(
         "format": export_format.value,
         "relation_count": 0,
         "exclusive_group_count": 0,
+        "proposition_count": 0,
         "data": None,
         "path": None,
         "bytes": 0,
