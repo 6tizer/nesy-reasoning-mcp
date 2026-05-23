@@ -29,7 +29,9 @@ def graph_stats_for(
     """Build graph statistics for a relation and edge view."""
     relation_list = list(relations)
     edge_list = list(edges)
-    propositions = {item.source for item in relation_list} | {item.target for item in relation_list}
+    propositions = {item.canonical_source for item in relation_list} | {
+        item.canonical_target for item in relation_list
+    }
     contexts = {item.context_id for item in relation_list}
     stores = {item.store_id for item in relation_list}
     return GraphStats(
@@ -327,7 +329,9 @@ def _relation_from_row(row: sqlite3.Row) -> RelationRecord:
     return RelationRecord(
         id=row["id"],
         source=row["source"],
+        source_id=row["source_id"],
         target=row["target"],
+        target_id=row["target_id"],
         relation_type=row["relation_type"],
         polarity=row["polarity"],
         confidence=row["confidence"],

@@ -62,20 +62,35 @@ class MemoryRelationStore:
                 self._relations = merged
         elif mode == "replace_same_pair":
             replace_keys = {
-                (record.source, record.target, record.context_id, record.store_id)
+                (
+                    record.canonical_source,
+                    record.canonical_target,
+                    record.context_id,
+                    record.store_id,
+                )
                 for record in records
             }
             updated = sum(
                 1
                 for relation in self._relations
-                if (relation.source, relation.target, relation.context_id, relation.store_id)
+                if (
+                    relation.canonical_source,
+                    relation.canonical_target,
+                    relation.context_id,
+                    relation.store_id,
+                )
                 in replace_keys
             )
             if not dry_run:
                 self._relations = [
                     relation
                     for relation in self._relations
-                    if (relation.source, relation.target, relation.context_id, relation.store_id)
+                    if (
+                        relation.canonical_source,
+                        relation.canonical_target,
+                        relation.context_id,
+                        relation.store_id,
+                    )
                     not in replace_keys
                 ]
 
@@ -204,12 +219,20 @@ class MemoryRelationStore:
         edges: list[CanonicalImplicationEdge] = []
         for relation in selected:
             if relation.relation_type == RelationType.SUFFICIENT:
-                edges.append(_edge(relation, relation.source, relation.target, "a"))
+                edges.append(
+                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
+                )
             elif relation.relation_type == RelationType.NECESSARY:
-                edges.append(_edge(relation, relation.target, relation.source, "a"))
+                edges.append(
+                    _edge(relation, relation.canonical_target, relation.canonical_source, "a")
+                )
             elif relation.relation_type == RelationType.EQUIVALENT:
-                edges.append(_edge(relation, relation.source, relation.target, "a"))
-                edges.append(_edge(relation, relation.target, relation.source, "b"))
+                edges.append(
+                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
+                )
+                edges.append(
+                    _edge(relation, relation.canonical_target, relation.canonical_source, "b")
+                )
         return edges
 
     def graph_stats(self) -> GraphStats:

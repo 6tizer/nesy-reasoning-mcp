@@ -124,9 +124,9 @@ class GraphIndex:
     def direct_relations_between(self, source: str, target: str) -> list[dict[str, Any]]:
         """Return stored records directly connecting source and target in either direction."""
         return [
-            relation.model_dump(mode="json")
+            relation.model_dump(mode="json", exclude_none=True)
             for relation in self.relations
-            if {relation.source, relation.target} == {source, target}
+            if {relation.canonical_source, relation.canonical_target} == {source, target}
         ]
 
     def find_paths(
@@ -370,12 +370,12 @@ def find_exclusive_contradictions(
 def normalize_relation(relation: RelationRecord) -> list[CanonicalImplicationEdge]:
     """Normalize an external relation record into canonical implication edges."""
     if relation.relation_type == RelationType.SUFFICIENT:
-        return [_edge(relation, relation.source, relation.target, "a")]
+        return [_edge(relation, relation.canonical_source, relation.canonical_target, "a")]
     if relation.relation_type == RelationType.NECESSARY:
-        return [_edge(relation, relation.target, relation.source, "a")]
+        return [_edge(relation, relation.canonical_target, relation.canonical_source, "a")]
     return [
-        _edge(relation, relation.source, relation.target, "a"),
-        _edge(relation, relation.target, relation.source, "b"),
+        _edge(relation, relation.canonical_source, relation.canonical_target, "a"),
+        _edge(relation, relation.canonical_target, relation.canonical_source, "b"),
     ]
 
 
@@ -849,8 +849,8 @@ def _confidence_tensions(relations: list[RelationRecord]) -> list[dict[str, Any]
     grouped: dict[tuple[str, str, RelationType, str, str], list[RelationRecord]] = {}
     for relation in relations:
         key = (
-            relation.source,
-            relation.target,
+            relation.canonical_source,
+            relation.canonical_target,
             relation.relation_type,
             relation.context_id,
             relation.store_id,

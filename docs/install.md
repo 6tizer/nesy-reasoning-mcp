@@ -130,6 +130,10 @@ only when hidden `.json` or `.jsonl` paths are intentional.
 `nesy.load_relations` can import legacy relation field names at the load boundary:
 `from`, `to`, `type`, and `temporal_delay`. Stored records and exports always use
 canonical fields: `source`, `target`, `relation_type`, and `temporal.delay`.
+Relation records may also include optional `source_id` and `target_id` stable
+proposition IDs. When present, reasoning uses those IDs as canonical graph nodes;
+`source` and `target` remain display labels. Alias lookup and explicit `negates`
+metadata are not implemented in this additive identity layer.
 
 ## Streamable HTTP Mode
 

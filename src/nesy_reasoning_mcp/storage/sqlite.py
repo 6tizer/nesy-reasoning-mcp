@@ -105,23 +105,44 @@ class SqliteRelationStore:
                     raise
         elif mode == "replace_same_pair":
             replace_keys = {
-                (record.source, record.target, record.context_id, record.store_id)
+                (
+                    record.canonical_source,
+                    record.canonical_target,
+                    record.context_id,
+                    record.store_id,
+                )
                 for record in records
             }
+            existing_relations = self.list_relations()
             updated = sum(
                 1
-                for relation in self.list_relations()
-                if (relation.source, relation.target, relation.context_id, relation.store_id)
+                for relation in existing_relations
+                if (
+                    relation.canonical_source,
+                    relation.canonical_target,
+                    relation.context_id,
+                    relation.store_id,
+                )
                 in replace_keys
             )
             if not dry_run:
-                for source, target, context_id, store_id in replace_keys:
+                for relation_id in [
+                    relation.id
+                    for relation in existing_relations
+                    if (
+                        relation.canonical_source,
+                        relation.canonical_target,
+                        relation.context_id,
+                        relation.store_id,
+                    )
+                    in replace_keys
+                ]:
                     self._conn.execute(
                         """
                         DELETE FROM relations
-                        WHERE source = ? AND target = ? AND context_id = ? AND store_id = ?
+                        WHERE id = ?
                         """,
-                        (source, target, context_id, store_id),
+                        (relation_id,),
                     )
 
         elif mode != "append":
@@ -178,8 +199,9 @@ class SqliteRelationStore:
         """List relation records matching an optional filter."""
         rows = self._conn.execute(
             """
-            SELECT id, source, target, relation_type, polarity, confidence, context_id, store_id,
-                   temporal_json, assumptions_json, provenance_json, metadata_json,
+            SELECT id, source, source_id, target, target_id, relation_type, polarity,
+                   confidence, context_id, store_id, temporal_json, assumptions_json,
+                   provenance_json, metadata_json,
                    created_at, updated_at
             FROM relations
             ORDER BY created_at, id
@@ -313,12 +335,20 @@ class SqliteRelationStore:
         edges: list[CanonicalImplicationEdge] = []
         for relation in selected:
             if relation.relation_type == RelationType.SUFFICIENT:
-                edges.append(_edge(relation, relation.source, relation.target, "a"))
+                edges.append(
+                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
+                )
             elif relation.relation_type == RelationType.NECESSARY:
-                edges.append(_edge(relation, relation.target, relation.source, "a"))
+                edges.append(
+                    _edge(relation, relation.canonical_target, relation.canonical_source, "a")
+                )
             elif relation.relation_type == RelationType.EQUIVALENT:
-                edges.append(_edge(relation, relation.source, relation.target, "a"))
-                edges.append(_edge(relation, relation.target, relation.source, "b"))
+                edges.append(
+                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
+                )
+                edges.append(
+                    _edge(relation, relation.canonical_target, relation.canonical_source, "b")
+                )
         return edges
 
     @_locked
@@ -464,7 +494,9 @@ class SqliteRelationStore:
             CREATE TABLE IF NOT EXISTS relations (
               id TEXT PRIMARY KEY,
               source TEXT NOT NULL,
+              source_id TEXT,
               target TEXT NOT NULL,
+              target_id TEXT,
               relation_type TEXT NOT NULL CHECK (
                 relation_type IN ('sufficient','necessary','equivalent')
               ),
@@ -529,23 +561,36 @@ class SqliteRelationStore:
             );
             """
         )
+        self._ensure_relation_identity_columns()
         self._conn.commit()
+
+    def _ensure_relation_identity_columns(self) -> None:
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(relations)").fetchall()
+        }
+        if "source_id" not in columns:
+            self._conn.execute("ALTER TABLE relations ADD COLUMN source_id TEXT")
+        if "target_id" not in columns:
+            self._conn.execute("ALTER TABLE relations ADD COLUMN target_id TEXT")
 
     def _insert_relations(self, records: Iterable[RelationRecord]) -> None:
         self._conn.executemany(
             """
             INSERT INTO relations (
-                id, source, target, relation_type, polarity, confidence, context_id, store_id,
-                temporal_json, assumptions_json, provenance_json, metadata_json,
+                id, source, source_id, target, target_id, relation_type, polarity,
+                confidence, context_id, store_id, temporal_json, assumptions_json,
+                provenance_json, metadata_json,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     record.id,
                     record.source,
+                    record.source_id,
                     record.target,
+                    record.target_id,
                     record.relation_type.value,
                     record.polarity.value,
                     record.confidence,

@@ -122,7 +122,7 @@ def _should_audit(name: str, arguments: dict[str, Any]) -> bool:
 
 
 def _record_dump(record: RelationRecord) -> dict[str, Any]:
-    return record.model_dump(mode="json")
+    return record.model_dump(mode="json", exclude_none=True)
 
 
 def _exclusive_group_dump(group: ExclusiveGroupRecord) -> dict[str, Any]:
@@ -159,17 +159,19 @@ def _contradiction_trace(
 
 
 def _normalization_trace(record: RelationRecord) -> str:
+    source = record.canonical_source
+    target = record.canonical_target
     if record.relation_type == "necessary":
         return (
             f"normalized necessary({record.source}, {record.target}) into implication edge "
-            f"{record.target} -> {record.source}"
+            f"{target} -> {source}"
         )
     if record.relation_type == "equivalent":
         return (
             f"normalized equivalent({record.source}, {record.target}) into implication edges "
-            f"{record.source} -> {record.target} and {record.target} -> {record.source}"
+            f"{source} -> {target} and {target} -> {source}"
         )
     return (
         f"normalized sufficient({record.source}, {record.target}) into implication edge "
-        f"{record.source} -> {record.target}"
+        f"{source} -> {target}"
     )

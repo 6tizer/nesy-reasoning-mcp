@@ -142,7 +142,9 @@ class JsonRelationStore(MemoryRelationStore):
     def _persist(self) -> None:
         data = {
             "version": "2.0",
-            "relations": [record.model_dump(mode="json") for record in self._relations],
+            "relations": [
+                record.model_dump(mode="json", exclude_none=True) for record in self._relations
+            ],
             "exclusive_groups": [group.model_dump(mode="json") for group in self._exclusive_groups],
             "independence_records": [
                 record.model_dump(mode="json") for record in self._independence_records

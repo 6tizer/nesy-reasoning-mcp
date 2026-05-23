@@ -73,6 +73,70 @@ async def test_load_relations_inline_migrates_legacy_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_export_inline_omits_missing_proposition_ids() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {"relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}]},
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    exported = await call_tool(EXPORT_RELATIONS, {"destination": "inline"}, store)
+    exported_relation = exported.structuredContent["data"]["relations"][0]
+
+    assert exported.isError is False
+    assert "source_id" not in exported_relation
+    assert "target_id" not in exported_relation
+
+
+@pytest.mark.asyncio
+async def test_export_inline_roundtrip_preserves_proposition_ids() -> None:
+    store = RelationStore()
+    await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": {
+                "relations": [
+                    {
+                        "source": "利润增加",
+                        "source_id": "profit_up",
+                        "target": "收入增加",
+                        "target_id": "revenue_up",
+                        "relation_type": "sufficient",
+                    }
+                ]
+            },
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    exported = await call_tool(EXPORT_RELATIONS, {"destination": "inline"}, store)
+    new_store = RelationStore()
+    loaded = await call_tool(
+        LOAD_RELATIONS,
+        {
+            "source_type": "inline",
+            "data": exported.structuredContent["data"],
+            "check_contradictions": False,
+        },
+        new_store,
+    )
+
+    relation = new_store.list_relations()[0]
+    assert exported.isError is False
+    assert loaded.isError is False
+    assert relation.source_id == "profit_up"
+    assert relation.target_id == "revenue_up"
+    assert new_store.implication_edges()[0].antecedent == "profit_up"
+
+
+@pytest.mark.asyncio
 async def test_load_relations_json_file_migrates_legacy_fields(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
