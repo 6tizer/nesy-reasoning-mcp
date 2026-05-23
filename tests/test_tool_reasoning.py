@@ -254,8 +254,32 @@ async def test_verify_chain_best_confidence_path() -> None:
 
     assert result.isError is False
     assert result.structuredContent["reachable"] is True
+    assert result.structuredContent["relation_established"] is True
+    assert result.structuredContent["source_to_target_reachable"] is True
+    assert result.structuredContent["target_to_source_reachable"] is False
     assert result.structuredContent["best_path"]["nodes"] == ["A", "D", "C"]
     assert result.structuredContent["best_path"]["evidence_confidence"] == pytest.approx(0.81)
+
+
+@pytest.mark.asyncio
+async def test_verify_chain_distinguishes_reverse_only_reachability() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "C", "target": "A", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(VERIFY_CHAIN, {"source": "A", "target": "C"}, store)
+
+    assert result.structuredContent["reachable"] is True
+    assert result.structuredContent["relation_established"] is True
+    assert result.structuredContent["source_to_target_reachable"] is False
+    assert result.structuredContent["target_to_source_reachable"] is True
+    assert result.structuredContent["relation_type"] == "necessary"
 
 
 @pytest.mark.asyncio
@@ -280,6 +304,9 @@ async def test_verify_explicit_chain_broken_direction_mismatch() -> None:
     )
 
     assert result.structuredContent["reachable"] is False
+    assert result.structuredContent["relation_established"] is False
+    assert result.structuredContent["source_to_target_reachable"] is False
+    assert result.structuredContent["target_to_source_reachable"] is False
     assert result.structuredContent["broken_at"]["index"] == 1
     assert result.structuredContent["diagnostics"][0]["code"] == "DIRECTION_MISMATCH"
 
@@ -303,6 +330,9 @@ async def test_verify_expected_relation_mismatch_warns() -> None:
     )
 
     assert result.structuredContent["reachable"] is True
+    assert result.structuredContent["relation_established"] is True
+    assert result.structuredContent["source_to_target_reachable"] is True
+    assert result.structuredContent["target_to_source_reachable"] is False
     assert result.structuredContent["logic_validity"] is False
     assert result.structuredContent["diagnostics"][0]["code"] == "EXPECTED_RELATION_MISMATCH"
 

@@ -223,7 +223,38 @@ def test_run_pretooluse_hook_failure_can_fail_closed() -> None:
     assert "PreToolUse hook failed" in payload["reason"]
 
 
-def test_stop_hook_blocks_hard_contradiction_from_nesy_facts(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "message",
+    [
+        (
+            "Done.\nNESY_FACTS:\n"
+            "["
+            '{"source":"A","target":"B","relation_type":"sufficient"},'
+            '{"source":"A","target":"C","relation_type":"sufficient"}'
+            "]"
+        ),
+        (
+            "Done.\nNESY_FACTS:\n```json\n"
+            "[\n"
+            '{"source":"A","target":"B","relation_type":"sufficient"},\n'
+            '{"source":"A","target":"C","relation_type":"sufficient"}\n'
+            "]\n"
+            "```"
+        ),
+        (
+            "Done.\n<NESY_FACTS>"
+            "["
+            '{"source":"A","target":"B","relation_type":"sufficient"},'
+            '{"source":"A","target":"C","relation_type":"sufficient"}'
+            "]"
+            "</NESY_FACTS>"
+        ),
+    ],
+)
+def test_stop_hook_blocks_hard_contradiction_from_nesy_facts(
+    tmp_path: Path,
+    message: str,
+) -> None:
     config_path, sqlite_path = _write_sqlite_config(tmp_path)
     writer = create_hook_store(
         NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
@@ -235,13 +266,7 @@ def test_stop_hook_blocks_hard_contradiction_from_nesy_facts(tmp_path: Path) -> 
             {
                 "hook_event_name": "Stop",
                 "stop_hook_active": False,
-                "last_assistant_message": (
-                    "Done.\nNESY_FACTS:\n"
-                    "["
-                    '{"source":"A","target":"B","relation_type":"sufficient"},'
-                    '{"source":"A","target":"C","relation_type":"sufficient"}'
-                    "]"
-                ),
+                "last_assistant_message": message,
             }
         )
     )
@@ -387,6 +412,23 @@ def test_stop_hook_invalid_facts_fail_open_by_default() -> None:
     )
 
     assert json.loads(stdout.getvalue()) == {}
+    assert "Stop hook failed" in stderr.getvalue()
+
+
+def test_stop_hook_invalid_facts_can_fail_closed() -> None:
+    stdout = StringIO()
+    stderr = StringIO()
+
+    run_stop_hook(
+        stdin=StringIO(json.dumps({"last_assistant_message": "NESY_FACTS:\n```json\n{bad\n```"})),
+        stdout=stdout,
+        stderr=stderr,
+        env={"NESY_HOOK_FAIL_CLOSED": "true"},
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert payload["decision"] == "block"
+    assert "Stop hook failed" in payload["reason"]
     assert "Stop hook failed" in stderr.getvalue()
 
 

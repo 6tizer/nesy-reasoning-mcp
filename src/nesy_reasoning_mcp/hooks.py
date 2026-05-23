@@ -281,17 +281,46 @@ def _read_hook_payload(stdin: TextIO) -> dict[str, Any]:
 
 
 def _extract_nesy_facts(message: str) -> list[dict[str, Any]] | None:
-    marker = "NESY_FACTS:"
-    marker_index = message.find(marker)
-    if marker_index < 0:
+    raw = _extract_nesy_facts_raw(message)
+    if raw is None:
         return None
-    raw = message[marker_index + len(marker) :].strip()
     facts, _end = json.JSONDecoder().raw_decode(raw)
     if not isinstance(facts, list):
         raise ValueError("NESY_FACTS must be a JSON array")
     if not all(isinstance(item, dict) for item in facts):
         raise ValueError("NESY_FACTS entries must be JSON objects")
     return facts
+
+
+def _extract_nesy_facts_raw(message: str) -> str | None:
+    tag_start = message.find("<NESY_FACTS>")
+    if tag_start >= 0:
+        raw_start = tag_start + len("<NESY_FACTS>")
+        tag_end = message.find("</NESY_FACTS>", raw_start)
+        if tag_end < 0:
+            raise ValueError("NESY_FACTS closing tag is missing")
+        return message[raw_start:tag_end].strip()
+
+    marker = "NESY_FACTS:"
+    marker_index = message.find(marker)
+    if marker_index < 0:
+        return None
+    raw = message[marker_index + len(marker) :].strip()
+    if raw.startswith("```"):
+        return _extract_fenced_json(raw)
+    return raw
+
+
+def _extract_fenced_json(raw: str) -> str:
+    lines = raw.splitlines()
+    if not lines:
+        return raw
+    body: list[str] = []
+    for line in lines[1:]:
+        if line.strip().startswith("```"):
+            return "\n".join(body).strip()
+        body.append(line)
+    return "\n".join(body).strip()
 
 
 def _stop_block_reason(contradiction: Mapping[str, Any]) -> str:

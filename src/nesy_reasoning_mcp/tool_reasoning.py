@@ -119,6 +119,9 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStoreProtocol) 
         return {
             "status": "error",
             "reachable": False,
+            "relation_established": False,
+            "source_to_target_reachable": False,
+            "target_to_source_reachable": False,
             "relation_type": Classification.UNKNOWN.value,
             "logic_validity": False,
             "best_path": None,
@@ -153,7 +156,15 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStoreProtocol) 
             payload.chain,
             confidence_policy=payload.confidence_policy,
         )
-        return _explicit_chain_result(payload, index.graph_stats, classification, path, broken)
+        return _explicit_chain_result(
+            payload,
+            index.graph_stats,
+            classification,
+            path,
+            broken,
+            source_to_target_reachable=bool(fwd_paths),
+            target_to_source_reachable=bool(rev_paths),
+        )
 
     return _searched_chain_result(payload, index.graph_stats, classification, fwd_paths, rev_paths)
 
@@ -333,9 +344,13 @@ def _explicit_chain_result(
     classification: Classification,
     path: Any,
     broken: Any,
+    *,
+    source_to_target_reachable: bool,
+    target_to_source_reachable: bool,
 ) -> dict[str, Any]:
     diagnostics = []
     reachable = path is not None
+    relation_established = source_to_target_reachable or target_to_source_reachable
     expected_ok = reachable and expected_relation_matches(payload.expected_relation, classification)
     if broken is not None and broken.direction_mismatch:
         diagnostics.append(
@@ -350,6 +365,9 @@ def _explicit_chain_result(
     return {
         "status": "ok",
         "reachable": reachable,
+        "relation_established": relation_established,
+        "source_to_target_reachable": source_to_target_reachable,
+        "target_to_source_reachable": target_to_source_reachable,
         "relation_type": classification.value,
         "logic_validity": expected_ok,
         "best_path": path_to_dict(path) if path is not None else None,
@@ -368,6 +386,8 @@ def _searched_chain_result(
     fwd_paths: list,
     rev_paths: list,
 ) -> dict[str, Any]:
+    source_to_target_reachable = bool(fwd_paths)
+    target_to_source_reachable = bool(rev_paths)
     reachable = classification != Classification.UNKNOWN
     expected_ok = expected_relation_matches(payload.expected_relation, classification)
     best_path = fwd_paths[0] if fwd_paths else (rev_paths[0] if rev_paths else None)
@@ -388,6 +408,9 @@ def _searched_chain_result(
     return {
         "status": "ok",
         "reachable": reachable,
+        "relation_established": reachable,
+        "source_to_target_reachable": source_to_target_reachable,
+        "target_to_source_reachable": target_to_source_reachable,
         "relation_type": classification.value,
         "logic_validity": reachable and expected_ok,
         "best_path": path_to_dict(best_path) if best_path is not None else None,
