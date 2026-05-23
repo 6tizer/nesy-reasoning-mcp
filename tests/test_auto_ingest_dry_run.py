@@ -14,9 +14,11 @@ from nesy_reasoning_mcp.auto_ingest import (
     IngestionReport,
     ReviewDecision,
     ReviewDecisionValue,
+    fetcher,
     openai_agents,
 )
 from nesy_reasoning_mcp.auto_ingest import cli as ingest_cli
+from nesy_reasoning_mcp.auto_ingest import gate as gate_module
 from nesy_reasoning_mcp.auto_ingest.fetcher import fetch_url_evidence
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
@@ -70,12 +72,19 @@ def test_fetch_url_evidence_allows_only_http_https(monkeypatch: pytest.MonkeyPat
             assert size == 6
             return b"abcdef"
 
-    def fake_urlopen(req: Any, timeout: float) -> Response:
+    class Opener:
+        def open(self, req: Any, timeout: float) -> Response:
+            return fake_open(req, timeout)
+
+    def fake_open(req: Any, timeout: float) -> Response:
         assert req.full_url == "https://example.com/source"
         assert timeout == 3
         return Response()
 
-    monkeypatch.setattr("nesy_reasoning_mcp.auto_ingest.fetcher.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        fetcher, "getaddrinfo", lambda *args: [(None, None, None, None, ("93.184.216.34", 443))]
+    )
+    monkeypatch.setattr(fetcher.request, "build_opener", lambda *args: Opener())
 
     record = fetch_url_evidence("https://example.com/source", timeout_seconds=3, max_bytes=5)
 
@@ -87,6 +96,33 @@ def test_fetch_url_evidence_allows_only_http_https(monkeypatch: pytest.MonkeyPat
         fetch_url_evidence("http://localhost/source")
     with pytest.raises(ValueError):
         fetch_url_evidence("http://127.0.0.1/source")
+
+
+def test_fetch_url_evidence_rejects_private_dns_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_build_opener(*args: Any) -> Any:
+        raise AssertionError("private DNS target must be rejected before fetch")
+
+    monkeypatch.setattr(
+        fetcher, "getaddrinfo", lambda *args: [(None, None, None, None, ("10.0.0.5", 443))]
+    )
+    monkeypatch.setattr(fetcher.request, "build_opener", fail_build_opener)
+
+    with pytest.raises(ValueError, match="resolved URL host is local or private"):
+        fetch_url_evidence("https://example.com/source")
+
+
+def test_fetch_url_evidence_revalidates_redirect_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        fetcher, "getaddrinfo", lambda *args: [(None, None, None, None, ("93.184.216.34", 443))]
+    )
+    handler = fetcher._SafeRedirectHandler()
+
+    with pytest.raises(ValueError, match="local URLs are not supported"):
+        handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1/source")
 
 
 async def test_openai_agents_dry_run_requires_api_key_without_mock_runner() -> None:
@@ -160,6 +196,44 @@ async def test_dry_run_gate_approved_path_reports_without_writing() -> None:
 
     assert gate_results[0].action == "auto_write"
     assert approved_relations[0].source == "A"
+    assert store.list_relations() == []
+
+
+async def test_dry_run_gate_queues_when_reasoning_tool_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    candidate = _candidate()
+
+    async def fake_call_tool(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            isError=True,
+            structuredContent={
+                "status": "error",
+                "diagnostics": [
+                    {
+                        "level": "error",
+                        "code": "DRY_RUN_FAILED",
+                        "message": "ephemeral reasoning failed",
+                        "related_ids": [],
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(gate_module, "call_tool", fake_call_tool)
+
+    gate_results, approved_relations, diagnostics, reasoning = await run_dry_run_gate(
+        candidates=[candidate],
+        reviews=[_approval(candidate)],
+        store=store,
+    )
+
+    assert gate_results[0].action == "queue"
+    assert gate_results[0].reasons == ["dry-run reasoning failed"]
+    assert approved_relations == []
+    assert diagnostics[0].code == "DRY_RUN_FAILED"
+    assert reasoning["status"] == "error"
     assert store.list_relations() == []
 
 

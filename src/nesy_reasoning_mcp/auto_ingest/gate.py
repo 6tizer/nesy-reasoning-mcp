@@ -74,10 +74,23 @@ async def run_dry_run_gate(
     hard_contradiction = False
     if approved_relations:
         reasoning = await _check_approved_relations(approved_relations, store)
+        reasoning_failed = reasoning.get("status") == "error"
         hard_contradiction = _has_hard_contradiction(reasoning)
-        diagnostics = [Diagnostic.model_validate(item) for item in reasoning.get("diagnostics", [])]
+        diagnostics = _diagnostics_from_reasoning(reasoning)
+    else:
+        reasoning_failed = False
 
     for candidate, review in approved_candidates:
+        if reasoning_failed:
+            gate_results.append(
+                GateResult(
+                    candidate_id=candidate.id,
+                    action=GateAction.QUEUE,
+                    reasons=["dry-run reasoning failed"],
+                    metadata={"review_reasons": review.reasons},
+                )
+            )
+            continue
         if hard_contradiction:
             gate_results.append(
                 GateResult(
@@ -97,7 +110,7 @@ async def run_dry_run_gate(
             )
         )
 
-    durable_approved = [] if hard_contradiction else approved_relations
+    durable_approved = [] if hard_contradiction or reasoning_failed else approved_relations
     return gate_results, durable_approved, diagnostics, reasoning
 
 
@@ -149,3 +162,11 @@ def _has_hard_contradiction(reasoning: dict[str, Any]) -> bool:
         for item in result.get("contradictions", [])
         if isinstance(item, dict)
     )
+
+
+def _diagnostics_from_reasoning(reasoning: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    for item in reasoning.get("diagnostics", []):
+        if isinstance(item, dict):
+            diagnostics.append(Diagnostic.model_validate(item))
+    return diagnostics

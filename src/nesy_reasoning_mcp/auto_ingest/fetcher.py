@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from ipaddress import ip_address
+from socket import getaddrinfo
 from typing import Any
 from urllib import request
 from urllib.parse import urlparse
@@ -31,7 +32,8 @@ def fetch_url_evidence(
         normalized_url,
         headers={"User-Agent": "nesy-reasoning-mcp-agent-ingest/1.0"},
     )
-    with request.urlopen(req, timeout=timeout_seconds) as response:  # noqa: S310
+    opener = request.build_opener(_SafeRedirectHandler)
+    with opener.open(req, timeout=timeout_seconds) as response:
         body = response.read(max_bytes + 1)
         truncated = len(body) > max_bytes
         if truncated:
@@ -82,7 +84,18 @@ def _validate_url(url: str) -> str:
         raise ValueError("url must include a host")
     if _is_local_host(parsed.hostname):
         raise ValueError("local URLs are not supported")
+    _validate_resolved_host(parsed.hostname, parsed.port)
     return normalized
+
+
+class _SafeRedirectHandler(request.HTTPRedirectHandler):
+    """Validate redirect targets before following them."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        _validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _is_local_host(hostname: str) -> bool:
@@ -104,6 +117,21 @@ def _is_local_host(hostname: str) -> bool:
         or address.is_reserved
         or address.is_multicast
     )
+
+
+def _validate_resolved_host(hostname: str, port: int | None) -> None:
+    try:
+        results = getaddrinfo(hostname, port or 443)
+    except OSError as exc:
+        raise ValueError(f"could not resolve URL host: {hostname}") from exc
+
+    for result in results:
+        sockaddr = result[4]
+        if not sockaddr:
+            continue
+        resolved_host = str(sockaddr[0]).split("%", maxsplit=1)[0]
+        if _is_local_host(resolved_host):
+            raise ValueError("resolved URL host is local or private")
 
 
 def _header_get(headers: Any, key: str) -> str | None:
