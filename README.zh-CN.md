@@ -169,12 +169,19 @@ internal-test smoke ok
 详见 [Agent 使用策略](docs/agent-usage.md)，其中包含 Do/Don't 表、可复制 prompt、自动抽取流程和过度断言反例。
 
 自动候选关系抽取与审核见
-[Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。当前 dry-run prototype 会运行
+[Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。默认会运行
 extractor/reviewer agent，并输出 `IngestionReport`，但不会写长期图：
 
 ```bash
 OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
   --input evidence.json --format json
+```
+
+持久写入必须显式打开 safe write 边界：
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
 ## 工具列表
@@ -213,7 +220,8 @@ external memory retrieval -> candidate relations -> NeSy ephemeral reasoning -> 
 
 自动外部证据摄取见
 [Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。默认模式为 dry-run；只有显式开启
-write mode 且通过 gate 后才允许持久写图。
+`--auto-write`、通过 gate、通过矛盾拒绝检查，并走 `nesy.assert_relations`
+后才允许持久写图。
 
 ## 存储和传输
 

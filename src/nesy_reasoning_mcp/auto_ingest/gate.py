@@ -23,6 +23,7 @@ async def run_dry_run_gate(
     candidates: list[CandidateRelation],
     reviews: list[ReviewDecision],
     store: RelationStoreProtocol,
+    min_write_confidence: float = 0.0,
 ) -> tuple[list[GateResult], list[RelationInput], list[Diagnostic], dict[str, Any]]:
     """Gate reviewed candidates without calling any persistent write tool."""
     if REASON_OVER_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST:
@@ -61,6 +62,22 @@ async def run_dry_run_gate(
                     candidate_id=candidate.id,
                     action=GateAction.QUEUE,
                     reasons=review.reasons or [f"reviewer decision: {review.decision}"],
+                )
+            )
+            continue
+        final_confidence = (
+            review.final_confidence if review.final_confidence is not None else candidate.confidence
+        )
+        if final_confidence < min_write_confidence:
+            gate_results.append(
+                GateResult(
+                    candidate_id=candidate.id,
+                    action=GateAction.QUEUE,
+                    reasons=[
+                        f"final confidence {final_confidence:.3f} below write threshold "
+                        f"{min_write_confidence:.3f}"
+                    ],
+                    metadata={"review_reasons": review.reasons},
                 )
             )
             continue
@@ -123,7 +140,16 @@ def _relation_from_review(candidate: CandidateRelation, review: ReviewDecision) 
             else candidate.confidence,
         }
     )
-    return reviewed.to_relation_input()
+    relation = reviewed.to_relation_input()
+    provenance = dict(relation.provenance or {})
+    provenance["review"] = {
+        "decision": review.decision,
+        "reasons": review.reasons,
+        "risk_flags": review.risk_flags,
+        "reviewer_model": review.reviewer_model,
+        "metadata": review.metadata,
+    }
+    return relation.model_copy(update={"provenance": provenance})
 
 
 async def _check_approved_relations(

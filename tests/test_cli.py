@@ -63,6 +63,20 @@ def test_ingest_help_lists_agent_dry_run_subcommand() -> None:
     assert completed.stderr == ""
 
 
+def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "nesy_reasoning_mcp", "ingest", "agent-dry-run", "--help"],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    assert "--auto-write" in completed.stdout
+    assert "--min-write-confidence" in completed.stdout
+    assert completed.stderr == ""
+
+
 def test_audit_list_json_filters_without_raw_arguments(tmp_path: Path) -> None:
     config_path = tmp_path / "nesy.json"
     sqlite_path = tmp_path / "nesy.db"

@@ -193,13 +193,20 @@ See [Agent usage policy](docs/agent-usage.md) for the do/don't table, prompts,
 autonomous extraction workflow, and overclaiming examples.
 
 For automated candidate extraction and review, see
-[Agent SDK ingestion design](docs/agent-sdk-ingestion.md). The dry-run prototype
-runs extractor/reviewer agents and emits an `IngestionReport` without writing
-durable graph memory:
+[Agent SDK ingestion design](docs/agent-sdk-ingestion.md). By default it runs
+extractor/reviewer agents and emits an `IngestionReport` without writing durable
+graph memory:
 
 ```bash
 OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
   --input evidence.json --format json
+```
+
+Durable writes require the explicit safe-write boundary:
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
 ## Tools
@@ -240,7 +247,8 @@ persistent memory.
 
 Automated external evidence ingestion is tracked separately in the
 [Agent SDK ingestion design](docs/agent-sdk-ingestion.md). Its default mode is
-dry-run; durable writes require explicit write mode and gate approval.
+dry-run; durable writes require explicit `--auto-write`, gate approval,
+contradiction rejection, and `nesy.assert_relations`.
 
 ## Proposition Identity
 

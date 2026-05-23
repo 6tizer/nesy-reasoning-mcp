@@ -1,8 +1,9 @@
 # Agent SDK Ingestion Design
 
 This document defines automated candidate relation ingestion. The current
-implementation includes a live-capable OpenAI Agents SDK dry-run prototype. It
-does not add a crawler, write mode, queue persistence, or a new MCP tool.
+implementation includes a live-capable OpenAI Agents SDK dry-run prototype and
+an explicit safe write mode. It does not add a crawler, persistent review queue,
+or a new MCP tool.
 
 ## Boundary
 
@@ -74,14 +75,14 @@ nesy.summarize_graph
 nesy.list_relations
 ```
 
-Write mode may additionally use:
+Safe write mode may additionally use:
 
 ```text
 nesy.assert_relations
-nesy.load_relations
 ```
 
-Write tools must stay disabled unless a caller explicitly chooses write mode.
+Write tools stay disabled unless a caller explicitly passes `--auto-write`.
+The ingestion runtime does not call `nesy.load_relations`.
 
 ## Dry-Run CLI Prototype
 
@@ -135,6 +136,36 @@ dry-run gate through NeSy read-only tools. The output is always an
 `IngestionReport`. Approved relations appear in the report only; they are not
 stored. CI tests mock the Agent SDK runner and do not call external APIs.
 
+## Safe Write Mode
+
+Safe write mode uses the same command with an explicit flag:
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --auto-write \
+  --min-write-confidence 0.85 \
+  --format json
+```
+
+The script wrapper accepts the same flags:
+
+```bash
+OPENAI_API_KEY=... uv run python scripts/agent_ingest_openai.py \
+  --input examples/research-evidence.json \
+  --auto-write
+```
+
+When `--auto-write` is present, the report mode is `write`. Gate-approved
+relations still appear in `approved_relations`, and successful persisted
+relation IDs appear in `written_relation_ids`. The review queue is not
+persisted; queued items remain visible through `gate_results`.
+
+Writes use only `nesy.assert_relations` with contradiction rejection enabled.
+The relation provenance includes candidate ID, evidence, reviewer reasons, risk
+flags, and reviewer model. If assertion fails, the report keeps diagnostics and
+does not pretend a relation was written.
+
 ## Gate Rules
 
 Auto-write requires all of the following:
@@ -144,6 +175,7 @@ Auto-write requires all of the following:
 - reviewer decision is `approve`
 - confidence meets the configured threshold
 - NeSy finds no hard contradiction
+- NeSy dry-run reasoning succeeds
 - write mode is explicitly enabled
 
 Queue for review when the reviewer downgrades the relation type, confidence is
@@ -156,5 +188,6 @@ correlation, or weak wording such as "may", "can", or "helps" was upgraded into
 
 ## Next PRs
 
-The next implementation slices can add review queue persistence and explicit
-write mode after model, tracing, retry, and gating behavior are validated.
+The next implementation slices can add persistent review queue storage,
+multi-reviewer voting, Claude-specific adapters, or richer backend validation
+after model, tracing, retry, and gating behavior are validated.

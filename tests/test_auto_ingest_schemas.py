@@ -55,6 +55,7 @@ def test_candidate_review_gate_and_report_serialize() -> None:
         reviews=[review],
         gate_results=[gate],
         approved_relations=[relation],
+        written_relation_ids=["rel-1"],
     )
 
     dumped = report.model_dump(mode="json")
@@ -65,6 +66,7 @@ def test_candidate_review_gate_and_report_serialize() -> None:
     assert dumped["approved_relations"][0]["provenance"]["evidence"][0]["url"].startswith(
         "https://"
     )
+    assert dumped["written_relation_ids"] == ["rel-1"]
 
 
 @pytest.mark.parametrize(
@@ -136,7 +138,7 @@ def test_tool_allowlists_keep_write_tools_out_of_dry_run() -> None:
     assert ASSERT_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST
     assert LOAD_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST
     assert ASSERT_RELATIONS in WRITE_MODE_TOOL_ALLOWLIST
-    assert LOAD_RELATIONS in WRITE_MODE_TOOL_ALLOWLIST
+    assert LOAD_RELATIONS not in WRITE_MODE_TOOL_ALLOWLIST
 
 
 def test_ingestion_input_and_agent_batches_are_strict() -> None:

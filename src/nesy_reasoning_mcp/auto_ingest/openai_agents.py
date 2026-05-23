@@ -15,6 +15,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     IngestionReport,
     ReviewDecisionBatch,
 )
+from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
 AgentRunner = Callable[[Any, str], Awaitable[Any]]
@@ -33,10 +34,33 @@ async def run_openai_agents_dry_run(
     run_agent: AgentRunner | None = None,
 ) -> IngestionReport:
     """Extract, review, and gate candidate relations without persistent writes."""
+    return await run_openai_agents_ingestion(
+        ingestion_input,
+        store=store,
+        model=model,
+        env=env,
+        run_agent=run_agent,
+        auto_write=False,
+    )
+
+
+async def run_openai_agents_ingestion(
+    ingestion_input: IngestionInput,
+    *,
+    store: RelationStoreProtocol,
+    model: str | None = None,
+    env: Mapping[str, str] | None = None,
+    run_agent: AgentRunner | None = None,
+    auto_write: bool = False,
+    min_write_confidence: float = 0.85,
+) -> IngestionReport:
+    """Extract, review, gate, and optionally write approved candidate relations."""
+    if not 0 <= min_write_confidence <= 1:
+        raise OpenAIAgentsDryRunError("min_write_confidence must be between 0 and 1")
     runtime_env = env if env is not None else os.environ
     if run_agent is None and not runtime_env.get("OPENAI_API_KEY"):
         raise OpenAIAgentsDryRunError(
-            "OPENAI_API_KEY is required for live OpenAI Agents SDK dry-run ingestion"
+            "OPENAI_API_KEY is required for live OpenAI Agents SDK ingestion"
         )
 
     extractor = _build_agent(
@@ -67,13 +91,24 @@ async def run_openai_agents_dry_run(
         candidates=candidate_batch.candidates,
         reviews=review_batch.reviews,
         store=store,
+        min_write_confidence=min_write_confidence if auto_write else 0.0,
     )
+    written_relation_ids: list[str] = []
+    write_result: dict[str, Any] = {}
+    if auto_write and approved_relations:
+        written_relation_ids, write_diagnostics, write_result = await write_approved_relations(
+            relations=approved_relations,
+            store=store,
+        )
+        diagnostics = [*diagnostics, *write_diagnostics]
+
     return IngestionReport(
-        mode=IngestionMode.DRY_RUN,
+        mode=IngestionMode.WRITE if auto_write else IngestionMode.DRY_RUN,
         candidates=candidate_batch.candidates,
         reviews=review_batch.reviews,
         gate_results=gate_results,
         approved_relations=approved_relations,
+        written_relation_ids=written_relation_ids,
         diagnostics=diagnostics,
         metadata={
             "task": ingestion_input.task,
@@ -82,6 +117,7 @@ async def run_openai_agents_dry_run(
             "evidence_count": len(ingestion_input.evidence),
             "url_count": len(ingestion_input.urls),
             "reasoning": reasoning,
+            "write_result": write_result,
         },
     )
 
