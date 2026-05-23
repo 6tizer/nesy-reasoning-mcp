@@ -32,16 +32,27 @@ class PropositionRecord(BaseModel):
     id: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
     label: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
     aliases: list[str] = Field(default_factory=list)
+    negates: str | None = Field(default=None, min_length=1, max_length=MAX_PROPOSITION_LENGTH)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("id", "label")
+    @field_validator("id", "label", "negates")
     @classmethod
-    def strip_required_text(cls, value: str) -> str:
-        """Strip surrounding whitespace and reject empty strings."""
+    def strip_text(cls, value: str | None) -> str | None:
+        """Strip surrounding whitespace and reject empty provided strings."""
+        if value is None:
+            return None
         stripped = value.strip()
         if not stripped:
             raise ValueError("must not be empty")
         return stripped
+
+    @field_validator("negates")
+    @classmethod
+    def reject_self_negation(cls, value: str | None, info: Any) -> str | None:
+        """Reject propositions that declare themselves as their own negation."""
+        if value is not None and value == info.data.get("id"):
+            raise ValueError("negates must not equal id")
+        return value
 
     @field_validator("aliases")
     @classmethod
@@ -560,6 +571,7 @@ class CheckContradictionsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     facts: list[RelationInput] = Field(default_factory=list)
+    propositions: list[PropositionRecord] = Field(default_factory=list)
     mode: ContradictionMode = ContradictionMode.GRAPH
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
     include_soft: bool = True

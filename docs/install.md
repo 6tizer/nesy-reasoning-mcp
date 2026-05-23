@@ -132,8 +132,10 @@ only when hidden `.json` or `.jsonl` paths are intentional.
 canonical fields: `source`, `target`, `relation_type`, and `temporal.delay`.
 Relation records may also include optional `source_id` and `target_id` stable
 proposition IDs. When present, reasoning uses those IDs as canonical graph nodes;
-`source` and `target` remain display labels. Alias lookup and explicit `negates`
-metadata are not implemented in this additive identity layer.
+`source` and `target` remain display labels. `nesy.check_contradictions` can
+accept temporary `propositions` entries with `negates` for canonical ID-based
+opposition checks. Alias lookup and persistence/export of proposition metadata
+remain future work.
 
 ## Streamable HTTP Mode
 
@@ -229,6 +231,8 @@ does not print raw tool arguments.
 - Contradiction detection is deterministic over structured propositions and
   explicit constraints; it does not extract arbitrary natural-language
   contradictions.
+- Canonical `propositions[].negates` declarations are accepted only by
+  `nesy.check_contradictions`; they are not stored, loaded, or exported yet.
 - Formal independence is stored through relation-set import/export, not a
   dedicated public tool.
 - Counterfactual reasoning is conservative: open-world mode does not infer

@@ -168,8 +168,10 @@ proposition IDs. When IDs are present, graph reasoning uses the IDs as nodes;
 when they are absent, the labels remain the canonical nodes for compatibility.
 
 This release does not add an alias registry, label/ID lookup, or explicit
-`negates` model. Queries against ID-backed relations should use the canonical
-IDs.
+`negates` persistence model. `nesy.check_contradictions` can accept temporary
+`propositions` entries with `negates` to detect canonical opposition by ID, but
+those proposition declarations are not stored or exported yet. Queries against
+ID-backed relations should use the canonical IDs.
 
 ## Storage And Transports
 
