@@ -184,6 +184,9 @@ OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
   --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
+外部 orchestrator 可以在任何写入路径前调用
+`nesy.validate_candidate_relations`，复用 NeSy 的确定性 gate 和矛盾检查，但不改图。
+
 ## 工具列表
 
 | Tool | 用途 | 修改状态 |
@@ -200,6 +203,7 @@ OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
 | `nesy.summarize_graph` | 返回紧凑、确定性的图摘要。 | 否 |
 | `nesy.counterfactual` | 分析某命题被假设为 false 后的影响。 | 否 |
 | `nesy.reason_over_relations` | 基于调用方提供的临时关系运行推理。 | 否 |
+| `nesy.validate_candidate_relations` | 写入前验证已审核候选关系。 | 否 |
 
 ## 临时推理
 
@@ -222,6 +226,10 @@ external memory retrieval -> candidate relations -> NeSy ephemeral reasoning -> 
 [Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。默认模式为 dry-run；只有显式开启
 `--auto-write`、通过 gate、通过矛盾拒绝检查，并走 `nesy.assert_relations`
 后才允许持久写图。
+
+对 Agent SDK 或其他外部 orchestrator，`nesy.validate_candidate_relations`
+提供同一套写入前 MCP 验证。它返回 gate 结果、可写关系、diagnostics 和 reasoning
+细节，并固定 `persisted=false`；它不抓取证据、不调用 Agent SDK、不保存队列、不写记忆。
 
 ## 存储和传输
 

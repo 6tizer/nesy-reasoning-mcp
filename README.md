@@ -209,6 +209,10 @@ OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
   --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
+External orchestrators can call `nesy.validate_candidate_relations` before any
+write path to reuse NeSy's deterministic gate and contradiction checks without
+mutating the graph.
+
 ## Tools
 
 | Tool | Purpose | Mutates State |
@@ -225,6 +229,7 @@ OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
 | `nesy.summarize_graph` | Return a compact deterministic graph summary. | No |
 | `nesy.counterfactual` | Analyze what changes if a proposition is assumed false. | No |
 | `nesy.reason_over_relations` | Run reasoning over caller-supplied temporary relations. | No |
+| `nesy.validate_candidate_relations` | Validate reviewed candidates before durable writes. | No |
 
 ## Ephemeral Reasoning
 
@@ -249,6 +254,12 @@ Automated external evidence ingestion is tracked separately in the
 [Agent SDK ingestion design](docs/agent-sdk-ingestion.md). Its default mode is
 dry-run; durable writes require explicit `--auto-write`, gate approval,
 contradiction rejection, and `nesy.assert_relations`.
+
+For Agent SDK or other external orchestrators, `nesy.validate_candidate_relations`
+provides the same pre-write validation as an MCP helper. It returns gate results,
+approved relation inputs, diagnostics, and reasoning details with
+`persisted=false`; it does not fetch evidence, call an Agent SDK, store a queue,
+or write memory.
 
 ## Proposition Identity
 

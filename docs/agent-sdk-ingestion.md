@@ -2,8 +2,8 @@
 
 This document defines automated candidate relation ingestion. The current
 implementation includes a live-capable OpenAI Agents SDK dry-run prototype and
-an explicit safe write mode. It does not add a crawler, persistent review queue,
-or a new MCP tool.
+an explicit safe write mode, plus a pre-write MCP validation helper. It does not
+add a crawler, persistent review queue, or queue commit tools.
 
 ## Boundary
 
@@ -75,6 +75,18 @@ nesy.summarize_graph
 nesy.list_relations
 ```
 
+External orchestrators can also call:
+
+```text
+nesy.validate_candidate_relations
+```
+
+This helper accepts reviewed `CandidateRelation` records, optional
+`ReviewDecision` records, and optional one-call proposition overlays. It runs
+the deterministic gate, checks the candidate set for contradictions, then checks
+the approved candidates against the current graph in combined mode. It always
+returns `persisted=false`.
+
 Safe write mode may additionally use:
 
 ```text
@@ -83,6 +95,12 @@ nesy.assert_relations
 
 Write tools stay disabled unless a caller explicitly passes `--auto-write`.
 The ingestion runtime does not call `nesy.load_relations`.
+
+`nesy.validate_candidate_relations` is not an ingestion runtime. It does not call
+the Agent SDK, fetch URLs, store a review queue, or write graph memory. Its
+output is a validation report with candidate counts, `gate_results`,
+`approved_relations`, diagnostics, reasoning details, graph stats, and trace
+metadata.
 
 ## Dry-Run CLI Prototype
 

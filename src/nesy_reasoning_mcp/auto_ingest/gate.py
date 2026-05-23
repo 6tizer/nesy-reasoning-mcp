@@ -12,7 +12,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewDecision,
     ReviewDecisionValue,
 )
-from nesy_reasoning_mcp.schemas import Diagnostic, RelationInput
+from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord, RelationInput
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_names import REASON_OVER_RELATIONS
 from nesy_reasoning_mcp.tool_registry import call_tool
@@ -25,6 +25,10 @@ async def run_dry_run_gate(
     store: RelationStoreProtocol,
     min_write_confidence: float = 0.0,
     write_enabled: bool = False,
+    propositions: list[PropositionRecord] | None = None,
+    include_soft: bool = False,
+    max_depth: int = 8,
+    min_confidence: float = 0.0,
 ) -> tuple[list[GateResult], list[RelationInput], list[Diagnostic], dict[str, Any]]:
     """Gate reviewed candidates without calling any persistent write tool."""
     if REASON_OVER_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST:
@@ -91,7 +95,14 @@ async def run_dry_run_gate(
     reasoning: dict[str, Any] = {}
     hard_contradiction = False
     if approved_relations:
-        reasoning = await _check_approved_relations(approved_relations, store)
+        reasoning = await _check_approved_relations(
+            approved_relations,
+            store,
+            propositions=propositions or [],
+            include_soft=include_soft,
+            max_depth=max_depth,
+            min_confidence=min_confidence,
+        )
         reasoning_failed = reasoning.get("status") == "error"
         hard_contradiction = _has_hard_contradiction(reasoning)
         diagnostics = _diagnostics_from_reasoning(reasoning)
@@ -160,14 +171,24 @@ def _relation_from_review(candidate: CandidateRelation, review: ReviewDecision) 
 async def _check_approved_relations(
     relations: list[RelationInput],
     store: RelationStoreProtocol,
+    *,
+    propositions: list[PropositionRecord],
+    include_soft: bool,
+    max_depth: int,
+    min_confidence: float,
 ) -> dict[str, Any]:
     arguments = {
         "relations": [
             relation.model_dump(mode="json", exclude_none=True) for relation in relations
         ],
+        "propositions": [
+            proposition.model_dump(mode="json", exclude_none=True) for proposition in propositions
+        ],
+        "max_depth": max_depth,
+        "min_confidence": min_confidence,
         "query": {
             "mode": "check_contradictions",
-            "include_soft": False,
+            "include_soft": include_soft,
         },
     }
     result = await call_tool(REASON_OVER_RELATIONS, arguments, store)

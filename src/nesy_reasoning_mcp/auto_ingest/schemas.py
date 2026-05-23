@@ -277,3 +277,17 @@ class IngestionReport(BaseModel):
         if not stripped:
             raise ValueError("must not be empty")
         return stripped
+
+
+class ValidateCandidateRelationsInput(BaseModel):
+    """Input for `nesy.validate_candidate_relations` pre-write checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[CandidateRelation] = Field(min_length=1)
+    reviews: list[ReviewDecision] = Field(default_factory=list)
+    propositions: list[PropositionRecord] = Field(default_factory=list)
+    min_write_confidence: float = Field(default=0.85, ge=0, le=1)
+    max_depth: int = Field(default=8, ge=1, le=20)
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
+    include_soft: bool = False

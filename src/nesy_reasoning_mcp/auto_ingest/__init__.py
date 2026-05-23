@@ -16,6 +16,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewDecision,
     ReviewDecisionBatch,
     ReviewDecisionValue,
+    ValidateCandidateRelationsInput,
 )
 
 __all__ = [
@@ -31,5 +32,6 @@ __all__ = [
     "ReviewDecision",
     "ReviewDecisionBatch",
     "ReviewDecisionValue",
+    "ValidateCandidateRelationsInput",
     "WRITE_MODE_TOOL_ALLOWLIST",
 ]
