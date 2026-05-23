@@ -18,12 +18,14 @@ from nesy_reasoning_mcp.schemas import (
     ExportRelationsInput,
     ListRelationsInput,
     LoadRelationsInput,
+    ReasonOverRelationsInput,
     SummarizeGraphInput,
     VerifyChainInput,
 )
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_common import _record_audit_if_needed
 from nesy_reasoning_mcp.tool_counterfactual import counterfactual
+from nesy_reasoning_mcp.tool_ephemeral import reason_over_relations
 from nesy_reasoning_mcp.tool_io import export_relations, load_relations
 from nesy_reasoning_mcp.tool_names import (
     ASSERT_EXCLUSIVE,
@@ -35,6 +37,7 @@ from nesy_reasoning_mcp.tool_names import (
     EXPORT_RELATIONS,
     LIST_RELATIONS,
     LOAD_RELATIONS,
+    REASON_OVER_RELATIONS,
     SUMMARIZE_GRAPH,
     VERIFY_CHAIN,
 )
@@ -48,6 +51,7 @@ from nesy_reasoning_mcp.tool_output_schemas import (
     _export_relations_output_schema,
     _list_relations_output_schema,
     _load_relations_output_schema,
+    _reason_over_relations_output_schema,
     _summarize_graph_output_schema,
     _verify_chain_output_schema,
 )
@@ -174,6 +178,16 @@ def get_tools() -> list[Tool]:
             inputSchema=CounterfactualInput.model_json_schema(),
             outputSchema=_counterfactual_output_schema(),
         ),
+        Tool(
+            name=REASON_OVER_RELATIONS,
+            title="Reason Over External Relations",
+            description=(
+                "Run NeSy reasoning over caller-supplied temporary relations and "
+                "exclusive groups without writing to the persistent store."
+            ),
+            inputSchema=ReasonOverRelationsInput.model_json_schema(),
+            outputSchema=_reason_over_relations_output_schema(),
+        ),
     ]
 
 
@@ -198,6 +212,7 @@ async def call_tool(
         EXPORT_RELATIONS: export_relations,
         SUMMARIZE_GRAPH: summarize_graph,
         COUNTERFACTUAL: counterfactual,
+        REASON_OVER_RELATIONS: reason_over_relations,
     }
     handler = handlers.get(name)
     if handler is None:

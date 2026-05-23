@@ -251,3 +251,32 @@ def _counterfactual_output_schema() -> dict[str, Any]:
         "required": ["status", "if_not", "world_mode"],
         "additionalProperties": False,
     }
+
+
+def _reason_over_relations_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "mode": {
+                "type": "string",
+                "enum": [
+                    "classify",
+                    "verify_chain",
+                    "counterfactual",
+                    "check_contradictions",
+                    "summarize_graph",
+                ],
+            },
+            "persisted": {"type": "boolean"},
+            "result": {"type": "object"},
+            "relation_count": {"type": "integer"},
+            "exclusive_group_count": {"type": "integer"},
+            "proposition_count": {"type": "integer"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "mode", "persisted", "result"],
+        "additionalProperties": False,
+    }

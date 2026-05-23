@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from nesy_reasoning_mcp.tool_counterfactual import counterfactual
+from nesy_reasoning_mcp.tool_ephemeral import reason_over_relations
 from nesy_reasoning_mcp.tool_io import export_relations, load_relations
 from nesy_reasoning_mcp.tool_names import (
     ASSERT_EXCLUSIVE,
@@ -14,6 +15,7 @@ from nesy_reasoning_mcp.tool_names import (
     EXPORT_RELATIONS,
     LIST_RELATIONS,
     LOAD_RELATIONS,
+    REASON_OVER_RELATIONS,
     SUMMARIZE_GRAPH,
     VERIFY_CHAIN,
 )
@@ -39,6 +41,7 @@ __all__ = [
     "EXPORT_RELATIONS",
     "LIST_RELATIONS",
     "LOAD_RELATIONS",
+    "REASON_OVER_RELATIONS",
     "SUMMARIZE_GRAPH",
     "VERIFY_CHAIN",
     "assert_exclusive",
@@ -53,6 +56,7 @@ __all__ = [
     "list_relations",
     "load_relations",
     "make_result",
+    "reason_over_relations",
     "summarize_graph",
     "verify_chain",
 ]

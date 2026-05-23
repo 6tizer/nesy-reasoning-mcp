@@ -73,6 +73,11 @@ Then restart or reload the MCP client.
 - `nesy.export_relations`
 - `nesy.summarize_graph`
 - `nesy.counterfactual`
+- `nesy.reason_over_relations`
+
+Use `nesy.reason_over_relations` for external memory or GraphRAG candidates
+that should be checked without polluting persistent NeSy storage. See
+[Agent usage policy](agent-usage.md).
 
 ## Persistent Storage
 

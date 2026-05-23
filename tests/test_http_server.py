@@ -218,6 +218,60 @@ def test_http_load_and_check_supports_proposition_registry() -> None:
     ]
 
 
+def test_http_reason_over_relations_does_not_persist_candidates() -> None:
+    config = _config()
+    store = RelationStore(config)
+    app = create_http_app(config, store)
+    headers = {
+        "Authorization": "Bearer secret",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+    with TestClient(app) as client:
+        session_id = _initialize_http_session(client, headers)
+        reason_response = client.post(
+            "/mcp",
+            headers={**headers, "mcp-session-id": session_id},
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "nesy.reason_over_relations",
+                    "arguments": {
+                        "relations": [
+                            {
+                                "source": "A",
+                                "target": "B",
+                                "relation_type": "sufficient",
+                            }
+                        ],
+                        "query": {"mode": "classify", "source": "A", "target": "B"},
+                    },
+                },
+            },
+        )
+        list_response = client.post(
+            "/mcp",
+            headers={**headers, "mcp-session-id": session_id},
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "nesy.list_relations", "arguments": {}},
+            },
+        )
+
+    reasoned = _sse_payload(reason_response)
+    listed = _sse_payload(list_response)
+
+    structured = reasoned["result"]["structuredContent"]
+    assert structured["persisted"] is False
+    assert structured["result"]["classification"] == "sufficient"
+    assert listed["result"]["structuredContent"]["relations"] == []
+
+
 def _initialize_http_session(client: TestClient, headers: dict[str, str]) -> str:
     response = client.post(
         "/mcp",

@@ -182,6 +182,24 @@ internal-test smoke ok
 | `nesy.export_relations` | inline 或写入允许路径导出关系集。 | 可选 |
 | `nesy.summarize_graph` | 返回紧凑、确定性的图摘要。 | 否 |
 | `nesy.counterfactual` | 分析某命题被假设为 false 后的影响。 | 否 |
+| `nesy.reason_over_relations` | 基于调用方提供的临时关系运行推理。 | 否 |
+
+## 临时推理
+
+当外部 memory 或 retrieval 系统返回候选关系，但不应该写入 NeSy 长期图时，使用
+`nesy.reason_over_relations`：
+
+```text
+external memory retrieval -> candidate relations -> NeSy ephemeral reasoning -> answer/evidence
+```
+
+该工具接收临时 `relations`、`exclusive_groups`、`propositions`、
+`independence_records`，以及 `query` mode：`classify`、`verify_chain`、
+`counterfactual`、`check_contradictions` 或 `summarize_graph`。结果放在
+`result` 下，并返回 `persisted=false`。
+
+这只是下游逻辑检查层。它不抓取文档，不构建 embedding index，不做自然语言事实抽取，
+也不会把临时候选关系自动写入持久记忆。
 
 ## 存储和传输
 

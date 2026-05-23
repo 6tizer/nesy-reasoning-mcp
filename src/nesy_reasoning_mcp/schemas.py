@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
@@ -680,3 +680,119 @@ class VerifyChainInput(_PropositionPairInput):
         if any(not item for item in stripped):
             raise ValueError("chain nodes must not be empty")
         return stripped
+
+
+class ReasonOverRelationsClassifyQuery(_PropositionPairInput):
+    """Query shape for ephemeral classification."""
+
+    mode: Literal["classify"]
+    include_paths: bool = True
+    require_direct: bool = False
+
+
+class ReasonOverRelationsVerifyChainQuery(_PropositionPairInput):
+    """Query shape for ephemeral chain verification."""
+
+    mode: Literal["verify_chain"]
+    chain: list[str] | None = Field(default=None, min_length=2)
+    expected_relation: ExpectedRelation = ExpectedRelation.ANY
+    path_strategy: PathStrategy = PathStrategy.BEST_CONFIDENCE
+    max_paths: int = Field(default=5, ge=1, le=50)
+
+    @field_validator("chain")
+    @classmethod
+    def strip_chain_nodes(cls, value: list[str] | None) -> list[str] | None:
+        """Strip chain nodes and reject empty values."""
+        if value is None:
+            return None
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("chain nodes must not be empty")
+        return stripped
+
+
+class ReasonOverRelationsCounterfactualQuery(BaseModel):
+    """Query shape for ephemeral counterfactual reasoning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["counterfactual"]
+    if_not: str = Field(min_length=1, max_length=MAX_PROPOSITION_LENGTH)
+    targets: list[str] = Field(default_factory=list)
+    world_mode: WorldMode = WorldMode.OPEN
+    include_alternative_paths: bool = True
+
+    @field_validator("if_not")
+    @classmethod
+    def strip_if_not(cls, value: str) -> str:
+        """Strip the intervention proposition and reject empty values."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @field_validator("targets")
+    @classmethod
+    def strip_targets(cls, value: list[str]) -> list[str]:
+        """Strip target propositions and de-duplicate them in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("targets must not contain empty values")
+        return list(dict.fromkeys(stripped))
+
+
+class ReasonOverRelationsCheckContradictionsQuery(BaseModel):
+    """Query shape for ephemeral contradiction checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["check_contradictions"]
+    facts: list[RelationInput] = Field(default_factory=list)
+    contradiction_mode: ContradictionMode = ContradictionMode.GRAPH
+    include_soft: bool = True
+
+
+class ReasonOverRelationsSummarizeGraphQuery(BaseModel):
+    """Query shape for ephemeral graph summaries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["summarize_graph"]
+    focus_terms: list[str] = Field(default_factory=list)
+    max_relations: int = Field(default=50, ge=1, le=200)
+    max_chars: int = Field(default=5000, ge=500, le=20000)
+    include_exclusives: bool = True
+
+    @field_validator("focus_terms")
+    @classmethod
+    def strip_focus_terms(cls, value: list[str]) -> list[str]:
+        """Strip focus terms and discard empty entries."""
+        return [item for item in (term.strip() for term in value) if item]
+
+
+ReasonOverRelationsQuery = Annotated[
+    ReasonOverRelationsClassifyQuery
+    | ReasonOverRelationsVerifyChainQuery
+    | ReasonOverRelationsCounterfactualQuery
+    | ReasonOverRelationsCheckContradictionsQuery
+    | ReasonOverRelationsSummarizeGraphQuery,
+    Field(discriminator="mode"),
+]
+
+
+class ReasonOverRelationsInput(BaseModel):
+    """Input for `nesy.reason_over_relations` ephemeral reasoning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relations: list[RelationInput] = Field(default_factory=list, max_length=MAX_LOAD_RELATIONS)
+    exclusive_groups: list[ExclusiveGroupInput] = Field(default_factory=list)
+    propositions: list[PropositionRecord] = Field(default_factory=list)
+    independence_records: list[IndependenceInput] = Field(default_factory=list)
+    context_metadata: dict[str, Any] = Field(default_factory=dict)
+    query: ReasonOverRelationsQuery
+    context_filter: ContextFilter = Field(default_factory=ContextFilter)
+    confidence_policy: ConfidencePolicy = ConfidencePolicy.PRODUCT_INDEPENDENT
+    max_depth: int = Field(default=8, ge=1, le=20)
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
+    persist: Literal[False] = False
