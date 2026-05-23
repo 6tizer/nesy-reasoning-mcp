@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
@@ -39,6 +41,22 @@ from nesy_reasoning_mcp.storage.common import (
     graph_stats_for,
 )
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _locked(
+    method: Callable[Concatenate[SqliteRelationStore, P], R],
+) -> Callable[Concatenate[SqliteRelationStore, P], R]:
+    """Serialize access to the shared SQLite connection."""
+
+    @wraps(method)
+    def wrapper(self: SqliteRelationStore, *args: P.args, **kwargs: P.kwargs) -> R:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast(Any, wrapper)
+
 
 class SqliteRelationStore:
     """SQLite source of truth for long-lived relation records."""
@@ -48,10 +66,18 @@ class SqliteRelationStore:
         sqlite_path = config.storage.sqlite_path or "~/.nesy-reasoning/nesy.db"
         self.path = Path(sqlite_path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, timeout=30)
+        self._lock = RLock()
+        self._conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._configure_connection()
         self._initialize_schema()
 
+    @_locked
+    def _configure_connection(self) -> None:
+        self._conn.execute("PRAGMA busy_timeout = 30000")
+        self._conn.execute("PRAGMA journal_mode = WAL")
+
+    @_locked
     def assert_relations(
         self,
         inputs: Iterable[RelationInput],
@@ -111,6 +137,7 @@ class SqliteRelationStore:
 
         return records, updated
 
+    @_locked
     def assert_exclusive(
         self,
         inputs: Iterable[ExclusiveGroupInput],
@@ -140,11 +167,13 @@ class SqliteRelationStore:
             raise
         return records, updated
 
+    @_locked
     def list_relations(
         self,
         relation_filter: RelationFilter | None = None,
         *,
         limit: int | None = None,
+        offset: int = 0,
     ) -> list[RelationRecord]:
         """List relation records matching an optional filter."""
         rows = self._conn.execute(
@@ -162,10 +191,10 @@ class SqliteRelationStore:
             for relation in records
             if relation_filter is None or _matches_filter(relation, relation_filter)
         ]
-        if limit is not None:
-            return matched[:limit]
-        return matched
+        matched = matched[offset:]
+        return matched[:limit] if limit is not None else matched
 
+    @_locked
     def list_exclusive_groups(self) -> list[ExclusiveGroupRecord]:
         """List all stored exclusive groups."""
         rows = self._conn.execute(
@@ -195,6 +224,7 @@ class SqliteRelationStore:
             item["members"].append(row["member"])
         return [ExclusiveGroupRecord(**item) for item in grouped.values()]
 
+    @_locked
     def list_independence_records(self) -> list[IndependenceRecord]:
         """List all stored independence records."""
         rows = self._conn.execute(
@@ -207,6 +237,7 @@ class SqliteRelationStore:
         ).fetchall()
         return [_independence_from_row(row) for row in rows]
 
+    @_locked
     def clear_relations(
         self,
         *,
@@ -272,6 +303,7 @@ class SqliteRelationStore:
 
         return len(remove_ids), len(remove_group_keys) if include_exclusive_groups else 0
 
+    @_locked
     def implication_edges(
         self,
         relations: Iterable[RelationRecord] | None = None,
@@ -289,6 +321,7 @@ class SqliteRelationStore:
                 edges.append(_edge(relation, relation.target, relation.source, "b"))
         return edges
 
+    @_locked
     def graph_stats(self) -> GraphStats:
         """Return statistics for the current graph."""
         relations = self.list_relations()
@@ -298,6 +331,7 @@ class SqliteRelationStore:
             exclusive_group_count=len(self.list_exclusive_groups()),
         )
 
+    @_locked
     def record_audit(
         self,
         *,
@@ -336,6 +370,7 @@ class SqliteRelationStore:
         )
         self._conn.commit()
 
+    @_locked
     def list_audit_entries(self) -> list[dict[str, Any]]:
         """List SQLite audit entries."""
         rows = self._conn.execute(
@@ -358,6 +393,7 @@ class SqliteRelationStore:
             for row in rows
         ]
 
+    @_locked
     def context_metadata(self) -> dict[str, Any]:
         """Return SQLite graph context metadata."""
         rows = self._conn.execute(
@@ -369,6 +405,7 @@ class SqliteRelationStore:
         ).fetchall()
         return {row["context_id"]: _loads(row["metadata_json"], {}) for row in rows}
 
+    @_locked
     def import_records(
         self,
         relations: Iterable[RelationRecord],
@@ -420,6 +457,7 @@ class SqliteRelationStore:
                 raise
         return len(incoming_relations), len(incoming_groups), updated_relations, updated_groups
 
+    @_locked
     def _initialize_schema(self) -> None:
         self._conn.executescript(
             """

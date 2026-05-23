@@ -1,9 +1,12 @@
+import json
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from starlette.testclient import TestClient
 
-from nesy_reasoning_mcp.config import HttpConfig, NesyConfig
+from nesy_reasoning_mcp.config import HttpConfig, NesyConfig, StorageConfig
 from nesy_reasoning_mcp.http_server import create_http_app
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.store import RelationStore, SqliteRelationStore
 
 
 def _config(**overrides) -> NesyConfig:
@@ -81,3 +84,84 @@ def test_http_rate_limit() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 429
+
+
+def test_http_with_sqlite_store_allows_concurrent_tool_calls(tmp_path) -> None:
+    config = NesyConfig(
+        http=_config().http,
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db")),
+    )
+    store = SqliteRelationStore(config)
+    app = create_http_app(config, store)
+    headers = {
+        "Authorization": "Bearer secret",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+    with TestClient(app) as client:
+        session_id = _initialize_http_session(client, headers)
+
+        def call_assert(index: int) -> dict:
+            response = client.post(
+                "/mcp",
+                headers={**headers, "mcp-session-id": session_id},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": index + 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "nesy.assert_relations",
+                        "arguments": {
+                            "relations": [
+                                {
+                                    "id": f"rel_{index}",
+                                    "source": f"A{index}",
+                                    "target": f"B{index}",
+                                    "relation_type": "sufficient",
+                                }
+                            ],
+                            "check_contradictions": False,
+                        },
+                    },
+                },
+            )
+            return _sse_payload(response)
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            payloads = list(pool.map(call_assert, range(12)))
+
+    assert all(item["result"]["structuredContent"]["status"] == "ok" for item in payloads)
+    assert len(store.list_relations()) == 12
+
+
+def _initialize_http_session(client: TestClient, headers: dict[str, str]) -> str:
+    response = client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        },
+    )
+    session_id = response.headers["mcp-session-id"]
+    client.post(
+        "/mcp",
+        headers={**headers, "mcp-session-id": session_id},
+        json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    )
+    return session_id
+
+
+def _sse_payload(response) -> dict:
+    assert response.status_code == 200
+    for line in response.text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line.removeprefix("data: "))
+    raise AssertionError("missing SSE data line")

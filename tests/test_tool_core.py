@@ -61,6 +61,46 @@ async def test_assert_and_list_relations_mcp_shape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_relations_cursor_paginates_results() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {"source": "A", "target": "B", "relation_type": "sufficient"},
+                {"source": "C", "target": "D", "relation_type": "sufficient"},
+                {"source": "E", "target": "F", "relation_type": "sufficient"},
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    first = await call_tool(LIST_RELATIONS, {"limit": 2}, store)
+    second = await call_tool(
+        LIST_RELATIONS,
+        {"limit": 2, "cursor": first.structuredContent["next_cursor"]},
+        store,
+    )
+
+    assert first.structuredContent["total"] == 2
+    assert first.structuredContent["next_cursor"] == "2"
+    assert [item["source"] for item in first.structuredContent["relations"]] == ["A", "C"]
+    assert second.structuredContent["total"] == 1
+    assert second.structuredContent["next_cursor"] is None
+    assert second.structuredContent["relations"][0]["source"] == "E"
+
+
+@pytest.mark.asyncio
+async def test_list_relations_invalid_cursor_returns_validation_error() -> None:
+    result = await call_tool(LIST_RELATIONS, {"cursor": "not-an-offset"}, RelationStore())
+
+    assert result.isError is True
+    assert result.structuredContent["status"] == "error"
+    assert result.structuredContent["diagnostics"][0]["code"] == "INPUT_VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
 async def test_invalid_input_returns_error_result() -> None:
     store = RelationStore()
     await call_tool(

@@ -40,6 +40,7 @@ async def classify(arguments: dict[str, Any], store: RelationStoreProtocol) -> d
         max_paths=5,
         confidence_policy=payload.confidence_policy,
         direct_only=payload.require_direct,
+        min_confidence=payload.min_confidence,
     )
     rev_paths = index.find_paths(
         payload.target,
@@ -48,6 +49,7 @@ async def classify(arguments: dict[str, Any], store: RelationStoreProtocol) -> d
         max_paths=5,
         confidence_policy=payload.confidence_policy,
         direct_only=payload.require_direct,
+        min_confidence=payload.min_confidence,
     )
     classification = classify_reachability(fwd_paths, rev_paths)
     contradiction = find_classification_contradiction(
@@ -59,6 +61,7 @@ async def classify(arguments: dict[str, Any], store: RelationStoreProtocol) -> d
         max_depth=payload.max_depth,
         confidence_policy=payload.confidence_policy,
         direct_only=payload.require_direct,
+        min_confidence=payload.min_confidence,
     )
     diagnostics = []
     contradiction_trace = []
@@ -89,6 +92,7 @@ async def classify(arguments: dict[str, Any], store: RelationStoreProtocol) -> d
             relation_map={relation.id: relation for relation in index.relations},
             independence_records=independence_records,
             exclusive_groups=exclusive_groups,
+            min_confidence=payload.min_confidence,
         ),
         "direct_relations": index.direct_relations_between(payload.source, payload.target),
         "paths": _classify_paths(fwd_paths, rev_paths, payload.include_paths),
@@ -140,6 +144,7 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStoreProtocol) 
         strategy=payload.path_strategy,
         max_paths=payload.max_paths,
         confidence_policy=payload.confidence_policy,
+        min_confidence=payload.min_confidence,
     )
     rev_paths = index.find_paths(
         payload.target,
@@ -148,6 +153,7 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStoreProtocol) 
         strategy=payload.path_strategy,
         max_paths=payload.max_paths,
         confidence_policy=payload.confidence_policy,
+        min_confidence=payload.min_confidence,
     )
     classification = classify_reachability(fwd_paths, rev_paths)
 
@@ -155,6 +161,7 @@ async def verify_chain(arguments: dict[str, Any], store: RelationStoreProtocol) 
         path, broken = index.verify_explicit_chain(
             payload.chain,
             confidence_policy=payload.confidence_policy,
+            min_confidence=payload.min_confidence,
         )
         return _explicit_chain_result(
             payload,
@@ -198,6 +205,7 @@ def _necessity_status(
     relation_map: dict[str, RelationRecord],
     independence_records: list[IndependenceRecord],
     exclusive_groups: list[ExclusiveGroupRecord],
+    min_confidence: float,
 ) -> dict[str, Any]:
     if reverse_paths:
         return {
@@ -215,6 +223,7 @@ def _necessity_status(
         relation_map=relation_map,
         independence_records=independence_records,
         exclusive_groups=exclusive_groups,
+        min_confidence=min_confidence,
     )
     if counterexample is not None:
         return counterexample
@@ -239,6 +248,7 @@ def _non_necessity_counterexample(
     relation_map: dict[str, RelationRecord],
     independence_records: list[IndependenceRecord],
     exclusive_groups: list[ExclusiveGroupRecord],
+    min_confidence: float,
 ) -> dict[str, Any] | None:
     if source == target:
         return None
@@ -253,6 +263,7 @@ def _non_necessity_counterexample(
             max_paths=1,
             confidence_policy=confidence_policy,
             direct_only=direct_only,
+            min_confidence=min_confidence,
         )
         for path in paths:
             if not path.edges or source in path.nodes:

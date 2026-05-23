@@ -17,6 +17,7 @@ from nesy_reasoning_mcp.schemas import (
     ContradictionMode,
     Diagnostic,
     ListRelationsInput,
+    OnContradiction,
     RelationRecord,
     RelationType,
 )
@@ -36,6 +37,44 @@ async def assert_relations(
 ) -> dict[str, Any]:
     """Handle `nesy.assert_relations`."""
     payload = AssertRelationsInput.model_validate(arguments)
+    if payload.on_contradiction == OnContradiction.REJECT:
+        records, _updated = store.assert_relations(
+            payload.relations,
+            mode=payload.mode,
+            dry_run=True,
+        )
+        current_relations = store.list_relations()
+        effective_relations = _relations_after_assert(current_relations, records, payload.mode)
+        rejection_contradictions, _context_separated = find_exclusive_contradictions(
+            effective_relations,
+            store.list_exclusive_groups(),
+            context_filter=ContextFilter(),
+            max_depth=8,
+        )
+        if rejection_contradictions:
+            diagnostic = Diagnostic(
+                level="error",
+                code="CONTRADICTION_REJECTED",
+                message="Relation assertion rejected because it would create a hard contradiction.",
+                related_ids=[
+                    fact_id
+                    for contradiction in rejection_contradictions
+                    for fact_id in contradiction.get("fact_ids", [])
+                    if isinstance(fact_id, str)
+                ],
+            )
+            return {
+                "status": "error",
+                "added": 0,
+                "updated": 0,
+                "rejected": len(payload.relations),
+                "relation_ids": [],
+                "contradictions": rejection_contradictions,
+                "diagnostics": [diagnostic.model_dump(mode="json")],
+                "trace": ["Rejected relation assertion before writing."],
+                "graph_stats": store.graph_stats().model_dump(mode="json"),
+            }
+
     records, updated = store.assert_relations(
         payload.relations,
         mode=payload.mode,
@@ -136,15 +175,16 @@ def _equivalent_normalization(
                 level="info",
                 code="MERGE_EQUIVALENT_NORMALIZED",
                 message=(
-                    "sufficient and necessary evidence for the same pair is normalized as "
-                    "equivalent in the canonical graph."
+                    "sufficient and necessary evidence for the same pair is reported as "
+                    "equivalent in the canonical graph; original evidence records are preserved."
                 ),
                 related_ids=related_ids,
             )
         )
         trace.append(
-            "normalized sufficient+necessary evidence for "
-            f"({source}, {target}) in context={context_id}, store={store_id} as equivalent."
+            "reported sufficient+necessary evidence as canonical equivalent for "
+            f"({source}, {target}) in context={context_id}, store={store_id}; "
+            "preserved stored records."
         )
     return diagnostics, trace
 
@@ -152,7 +192,10 @@ def _equivalent_normalization(
 async def list_relations(arguments: dict[str, Any], store: RelationStoreProtocol) -> dict[str, Any]:
     """Handle `nesy.list_relations`."""
     payload = ListRelationsInput.model_validate(arguments)
-    relations = store.list_relations(payload.filter, limit=payload.limit)
+    offset = int(payload.cursor or 0)
+    listed = store.list_relations(payload.filter, limit=payload.limit + 1, offset=offset)
+    relations = listed[: payload.limit]
+    next_cursor = str(offset + len(relations)) if len(listed) > payload.limit else None
     stats_edges = store.implication_edges(relations)
     edges = stats_edges if payload.include_implication_edges else []
     exclusive_groups = store.list_exclusive_groups() if payload.include_exclusive_groups else []
@@ -162,7 +205,7 @@ async def list_relations(arguments: dict[str, Any], store: RelationStoreProtocol
         "implication_edges": [edge.model_dump(mode="json") for edge in edges],
         "exclusive_groups": [_exclusive_group_dump(group) for group in exclusive_groups],
         "total": len(relations),
-        "next_cursor": None,
+        "next_cursor": next_cursor,
         "diagnostics": [],
         "trace": [f"Listed {len(relations)} relation(s)."],
         "graph_stats": graph_stats_for(
@@ -260,6 +303,7 @@ async def check_contradictions(
         payload.context_filter,
         max_depth=payload.max_depth,
         include_soft=payload.include_soft,
+        min_confidence=payload.min_confidence,
     )
     compatible_relations = relations_compatible_with_filter(relations, payload.context_filter)
     graph_stats = graph_stats_for(
