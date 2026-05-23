@@ -102,6 +102,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval run \
 - [examples/claude-hooks.json](examples/claude-hooks.json)
 - [examples/internal-test](examples/internal-test/README.md)
 - [Agent 使用策略](docs/agent-usage.md)
+- [Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)
 
 ## Claude Code 安装
 
@@ -167,6 +168,10 @@ internal-test smoke ok
 
 详见 [Agent 使用策略](docs/agent-usage.md)，其中包含 Do/Don't 表、可复制 prompt、自动抽取流程和过度断言反例。
 
+自动候选关系抽取与审核见
+[Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。该 ingestion app 规划为外部
+Agent SDK 工作流；NeSy MCP 仍只负责推理与存储。
+
 ## 工具列表
 
 | Tool | 用途 | 修改状态 |
@@ -200,6 +205,10 @@ external memory retrieval -> candidate relations -> NeSy ephemeral reasoning -> 
 
 这只是下游逻辑检查层。它不抓取文档，不构建 embedding index，不做自然语言事实抽取，
 也不会把临时候选关系自动写入持久记忆。
+
+自动外部证据摄取见
+[Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。默认模式为 dry-run；只有显式开启
+write mode 且通过 gate 后才允许持久写图。
 
 ## 存储和传输
 

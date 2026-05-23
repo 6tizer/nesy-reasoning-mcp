@@ -115,6 +115,7 @@ More examples:
 - [examples/claude-hooks.json](examples/claude-hooks.json)
 - [examples/internal-test](examples/internal-test/README.md)
 - [Agent usage policy](docs/agent-usage.md)
+- [Agent SDK ingestion design](docs/agent-sdk-ingestion.md)
 
 ## Claude Code Setup
 
@@ -191,6 +192,11 @@ Remember all related facts.
 See [Agent usage policy](docs/agent-usage.md) for the do/don't table, prompts,
 autonomous extraction workflow, and overclaiming examples.
 
+For automated candidate extraction and review, see
+[Agent SDK ingestion design](docs/agent-sdk-ingestion.md). The ingestion app is
+planned as an external Agent SDK workflow; NeSy MCP remains the reasoning and
+storage layer.
+
 ## Tools
 
 | Tool | Purpose | Mutates State |
@@ -226,6 +232,10 @@ selected reasoning result under `result` with `persisted=false`.
 This is for downstream logic checks only. It does not crawl documents, build an
 embedding index, extract natural-language facts, or auto-write candidates into
 persistent memory.
+
+Automated external evidence ingestion is tracked separately in the
+[Agent SDK ingestion design](docs/agent-sdk-ingestion.md). Its default mode is
+dry-run; durable writes require explicit write mode and gate approval.
 
 ## Proposition Identity
 

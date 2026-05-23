@@ -112,6 +112,10 @@ This mode is best for noisy retrieval candidates. Promote a relation to
 `nesy.assert_relations` only after the user or policy decides it is stable enough
 for long-lived memory.
 
+For a planned Agent SDK workflow that extracts candidate relations, reviews
+evidence, gates writes, and uses NeSy as the reasoning/storage layer, see
+[Agent SDK ingestion design](agent-sdk-ingestion.md).
+
 ## Copyable Prompts
 
 Research:

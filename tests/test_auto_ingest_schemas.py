@@ -1,0 +1,136 @@
+import pytest
+from pydantic import ValidationError
+
+from nesy_reasoning_mcp.auto_ingest import (
+    DRY_RUN_TOOL_ALLOWLIST,
+    WRITE_MODE_TOOL_ALLOWLIST,
+    CandidateRelation,
+    EvidenceRecord,
+    GateAction,
+    GateResult,
+    IngestionReport,
+    ReviewDecision,
+    ReviewDecisionValue,
+)
+from nesy_reasoning_mcp.tool_names import ASSERT_RELATIONS, LOAD_RELATIONS, REASON_OVER_RELATIONS
+
+
+def _evidence() -> EvidenceRecord:
+    return EvidenceRecord(
+        url="https://example.com/docs",
+        span="A explicitly enables B under condition C.",
+        source_type="official_docs",
+    )
+
+
+def test_candidate_review_gate_and_report_serialize() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        confidence=0.86,
+        evidence=[_evidence()],
+        metadata={"claim_strength": "explicit"},
+    )
+    review = ReviewDecision(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type="sufficient",
+        final_confidence=0.86,
+        reasons=["Evidence explicitly supports the implication."],
+    )
+    gate = GateResult(
+        candidate_id=candidate.id,
+        action=GateAction.AUTO_WRITE,
+        reasons=["Reviewer approved and confidence meets threshold."],
+    )
+    relation = candidate.to_relation_input()
+    report = IngestionReport(
+        run_id="run-1",
+        candidates=[candidate],
+        reviews=[review],
+        gate_results=[gate],
+        approved_relations=[relation],
+    )
+
+    dumped = report.model_dump(mode="json")
+
+    assert dumped["mode"] == "dry_run"
+    assert dumped["candidates"][0]["source"] == "A"
+    assert dumped["approved_relations"][0]["provenance"]["candidate_id"] == "candidate-1"
+    assert dumped["approved_relations"][0]["provenance"]["evidence"][0]["url"].startswith(
+        "https://"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("url", " "),
+        ("span", ""),
+    ],
+)
+def test_evidence_requires_non_empty_url_and_span(field: str, value: str) -> None:
+    data = {
+        "url": "https://example.com/docs",
+        "span": "A enables B.",
+    }
+    data[field] = value
+
+    with pytest.raises(ValidationError):
+        EvidenceRecord.model_validate(data)
+
+
+def test_candidate_rejects_confidence_out_of_range() -> None:
+    with pytest.raises(ValidationError):
+        CandidateRelation(
+            source="A",
+            target="B",
+            relation_type="sufficient",
+            confidence=1.1,
+            evidence=[_evidence()],
+        )
+
+
+def test_candidate_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        CandidateRelation.model_validate(
+            {
+                "source": "A",
+                "target": "B",
+                "relation_type": "sufficient",
+                "evidence": [{"url": "https://example.com/docs", "span": "A enables B."}],
+                "unexpected": True,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [ReviewDecisionValue.APPROVE, ReviewDecisionValue.DOWNGRADE],
+)
+def test_positive_review_decisions_require_final_relation_info(
+    decision: ReviewDecisionValue,
+) -> None:
+    with pytest.raises(ValidationError):
+        ReviewDecision(candidate_id="candidate-1", decision=decision)
+
+
+def test_reject_review_does_not_require_final_relation_info() -> None:
+    review = ReviewDecision(
+        candidate_id="candidate-1",
+        decision=ReviewDecisionValue.REJECT,
+        reasons=["Evidence only supports correlation."],
+    )
+
+    assert review.final_relation_type is None
+    assert review.final_confidence is None
+
+
+def test_tool_allowlists_keep_write_tools_out_of_dry_run() -> None:
+    assert REASON_OVER_RELATIONS in DRY_RUN_TOOL_ALLOWLIST
+    assert ASSERT_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST
+    assert LOAD_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST
+    assert ASSERT_RELATIONS in WRITE_MODE_TOOL_ALLOWLIST
+    assert LOAD_RELATIONS in WRITE_MODE_TOOL_ALLOWLIST
