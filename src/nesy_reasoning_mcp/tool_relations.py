@@ -37,7 +37,7 @@ async def assert_relations(
 ) -> dict[str, Any]:
     """Handle `nesy.assert_relations`."""
     payload = AssertRelationsInput.model_validate(arguments)
-    if payload.on_contradiction == OnContradiction.REJECT and payload.check_contradictions:
+    if payload.on_contradiction == OnContradiction.REJECT:
         records, _updated = store.assert_relations(
             payload.relations,
             mode=payload.mode,

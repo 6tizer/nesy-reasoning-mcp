@@ -473,3 +473,37 @@ async def test_assert_relations_rejects_contradiction_without_writing() -> None:
     assert result.structuredContent["relation_ids"] == []
     assert result.structuredContent["diagnostics"][0]["code"] == "CONTRADICTION_REJECTED"
     assert [relation.target for relation in store.list_relations()] == ["B"]
+
+
+@pytest.mark.asyncio
+async def test_assert_relations_reject_overrides_disabled_warning_check() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_EXCLUSIVE,
+        {"groups": [{"group_id": "state", "members": ["B", "C"]}]},
+        store,
+    )
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "C", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+            "on_contradiction": "reject",
+        },
+        store,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent["status"] == "error"
+    assert result.structuredContent["rejected"] == 1
+    assert result.structuredContent["relation_ids"] == []
+    assert [relation.target for relation in store.list_relations()] == ["B"]
