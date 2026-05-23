@@ -93,6 +93,25 @@ sufficient or necessary relations. Use the graph to verify the final answer, and
 report unknowns explicitly.
 ```
 
+### External Memory Or GraphRAG Integration
+
+Use this when another system retrieves candidate relations and NeSy should only
+check the logic:
+
+```text
+external memory retrieval -> candidate relations -> NeSy ephemeral reasoning -> answer/evidence
+```
+
+Call `nesy.reason_over_relations` with the retrieved `relations`,
+`exclusive_groups`, optional `propositions`, and a `query` mode. The tool builds
+a temporary graph, returns the selected reasoning result, and leaves
+`nesy.list_relations` unchanged. Set `persist=false` or omit it; `persist=true`
+is rejected.
+
+This mode is best for noisy retrieval candidates. Promote a relation to
+`nesy.assert_relations` only after the user or policy decides it is stable enough
+for long-lived memory.
+
 ## Copyable Prompts
 
 Research:

@@ -144,9 +144,10 @@ jobs:
                       await session.initialize()
                       tools = await session.list_tools()
                       tool_names = [tool.name for tool in tools.tools]
-                      assert len(tool_names) == 11
+                      assert len(tool_names) == 12
                       assert "nesy.summarize_graph" in tool_names
                       assert "nesy.counterfactual" in tool_names
+                      assert "nesy.reason_over_relations" in tool_names
                       await session.call_tool(
                           "nesy.assert_exclusive",
                           {
@@ -334,7 +335,9 @@ jobs:
                       async with ClientSession(read, write) as session:
                           await session.initialize()
                           tools = await session.list_tools()
-                          assert len(tools.tools) == 11
+                          tool_names = [tool.name for tool in tools.tools]
+                          assert len(tool_names) == 12
+                          assert "nesy.reason_over_relations" in tool_names
                           await session.call_tool(
                               "nesy.assert_relations",
                               {

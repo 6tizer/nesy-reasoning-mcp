@@ -206,6 +206,26 @@ autonomous extraction workflow, and overclaiming examples.
 | `nesy.export_relations` | Export relation sets inline or to allowed files. | Optional |
 | `nesy.summarize_graph` | Return a compact deterministic graph summary. | No |
 | `nesy.counterfactual` | Analyze what changes if a proposition is assumed false. | No |
+| `nesy.reason_over_relations` | Run reasoning over caller-supplied temporary relations. | No |
+
+## Ephemeral Reasoning
+
+Use `nesy.reason_over_relations` when another memory or retrieval system has
+candidate relations that should be checked without writing them into NeSy's
+long-lived graph:
+
+```text
+external memory retrieval -> candidate relations -> NeSy ephemeral reasoning -> answer/evidence
+```
+
+The tool accepts temporary `relations`, `exclusive_groups`, `propositions`,
+`independence_records`, and a `query` mode such as `classify`, `verify_chain`,
+`counterfactual`, `check_contradictions`, or `summarize_graph`. It returns the
+selected reasoning result under `result` with `persisted=false`.
+
+This is for downstream logic checks only. It does not crawl documents, build an
+embedding index, extract natural-language facts, or auto-write candidates into
+persistent memory.
 
 ## Proposition Identity
 
