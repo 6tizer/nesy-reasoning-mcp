@@ -6,24 +6,30 @@ from nesy_reasoning_mcp.auto_ingest.policy import (
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelation,
+    CandidateRelationBatch,
     EvidenceRecord,
     GateAction,
     GateResult,
+    IngestionInput,
     IngestionMode,
     IngestionReport,
     ReviewDecision,
+    ReviewDecisionBatch,
     ReviewDecisionValue,
 )
 
 __all__ = [
     "CandidateRelation",
+    "CandidateRelationBatch",
     "DRY_RUN_TOOL_ALLOWLIST",
     "EvidenceRecord",
     "GateAction",
     "GateResult",
+    "IngestionInput",
     "IngestionMode",
     "IngestionReport",
     "ReviewDecision",
+    "ReviewDecisionBatch",
     "ReviewDecisionValue",
     "WRITE_MODE_TOOL_ALLOWLIST",
 ]

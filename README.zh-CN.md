@@ -169,8 +169,13 @@ internal-test smoke ok
 详见 [Agent 使用策略](docs/agent-usage.md)，其中包含 Do/Don't 表、可复制 prompt、自动抽取流程和过度断言反例。
 
 自动候选关系抽取与审核见
-[Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。该 ingestion app 规划为外部
-Agent SDK 工作流；NeSy MCP 仍只负责推理与存储。
+[Agent SDK ingestion 设计](docs/agent-sdk-ingestion.md)。当前 dry-run prototype 会运行
+extractor/reviewer agent，并输出 `IngestionReport`，但不会写长期图：
+
+```bash
+OPENAI_API_KEY=... uv run nesy-reasoning-mcp ingest agent-dry-run \
+  --input evidence.json --format json
+```
 
 ## 工具列表
 

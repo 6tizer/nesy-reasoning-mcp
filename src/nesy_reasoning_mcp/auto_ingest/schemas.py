@@ -14,6 +14,9 @@ from nesy_reasoning_mcp.schemas import (
     DEFAULT_STORE_ID,
     MAX_PROPOSITION_LENGTH,
     Diagnostic,
+    ExclusiveGroupInput,
+    IndependenceInput,
+    PropositionRecord,
     RelationInput,
     RelationType,
 )
@@ -59,6 +62,42 @@ class EvidenceRecord(BaseModel):
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         """Strip text fields and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+
+class IngestionInput(BaseModel):
+    """External evidence input for an Agent SDK dry-run ingestion pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    urls: list[str] = Field(default_factory=list)
+    propositions: list[PropositionRecord] = Field(default_factory=list)
+    exclusive_groups: list[ExclusiveGroupInput] = Field(default_factory=list)
+    independence_records: list[IndependenceInput] = Field(default_factory=list)
+    context_metadata: dict[str, Any] = Field(default_factory=dict)
+    task: str | None = None
+    question: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("urls")
+    @classmethod
+    def strip_urls(cls, value: list[str]) -> list[str]:
+        """Strip URL inputs and reject empty values."""
+        urls = [item.strip() for item in value]
+        if any(not item for item in urls):
+            raise ValueError("urls must not contain empty values")
+        return urls
+
+    @field_validator("task", "question")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        """Strip optional prompt text and reject empty provided values."""
         if value is None:
             return None
         stripped = value.strip()
@@ -196,6 +235,22 @@ class GateResult(BaseModel):
         if any(not item for item in stripped):
             raise ValueError("must not contain empty values")
         return stripped
+
+
+class CandidateRelationBatch(BaseModel):
+    """Structured extractor output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[CandidateRelation] = Field(default_factory=list)
+
+
+class ReviewDecisionBatch(BaseModel):
+    """Structured reviewer output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviews: list[ReviewDecision] = Field(default_factory=list)
 
 
 class IngestionReport(BaseModel):

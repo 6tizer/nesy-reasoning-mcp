@@ -8,6 +8,7 @@ import sys
 import anyio
 
 from nesy_reasoning_mcp.audit_cli import run_audit_cli
+from nesy_reasoning_mcp.auto_ingest.cli import add_ingest_subparser, run_ingest_cli
 from nesy_reasoning_mcp.evaluation import run_agent_eval_cli, run_eval_cli, run_llm_eval_cli
 from nesy_reasoning_mcp.hooks import run_pretooluse_hook, run_stop_hook
 from nesy_reasoning_mcp.http_server import run_http_server
@@ -18,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(prog="nesy-reasoning-mcp")
     subparsers = parser.add_subparsers(dest="command")
+    add_ingest_subparser(subparsers)
     hook_parser = subparsers.add_parser("hook", help="Run a Claude Code hook helper.")
     hook_parser.add_argument("hook_name", choices=["pretooluse", "stop"])
     audit_parser = subparsers.add_parser("audit", help="Inspect local audit logs.")
@@ -154,6 +156,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "audit":
         try:
             sys.exit(run_audit_cli(args))
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.command == "ingest":
+        try:
+            sys.exit(run_ingest_cli(args))
         except ValueError as exc:
             parser.error(str(exc))
     if args.command == "eval":
