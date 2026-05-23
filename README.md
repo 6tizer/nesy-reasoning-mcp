@@ -7,12 +7,28 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A local MCP server that gives AI agents deterministic reasoning memory:
-structured relation storage, causal classification, chain verification,
-contradiction checks, graph summaries, and counterfactual analysis.
+NeSy Reasoning MCP gives agents a symbolic reasoning graph for checking
+implications, necessity, contradictions, and counterfactuals.
 
-It does not try to replace the LLM. The LLM can propose structured facts; this
-server checks them with a small, testable symbolic engine.
+It is an agent-side logic audit layer. It helps agents make key reasoning
+relations explicit and checkable instead of relying only on hidden
+natural-language reasoning. It improves reasoning auditability, not search
+quality, source truth, or recall.
+
+## What It Is And Is Not
+
+| It is | It is not |
+|---|---|
+| Symbolic reasoning graph | Search engine |
+| Consistency checker | Generic memory store |
+| External reasoning scratchpad | Vector database |
+| Implication, necessity, contradiction, and counterfactual verifier | Document summarizer |
+| Persistent graph of key reasoning relations | Place to store every related fact |
+
+Use it when hidden reasoning can go wrong: long research, codebase dependency
+analysis, and product or engineering decision analysis. Skip it for simple
+search, short summarization, casual Q&A, or "remember everything related to X"
+workflows.
 
 ## What It Gives An Agent
 
@@ -98,6 +114,7 @@ More examples:
 - [examples/nesy-config.json](examples/nesy-config.json)
 - [examples/claude-hooks.json](examples/claude-hooks.json)
 - [examples/internal-test](examples/internal-test/README.md)
+- [Agent usage policy](docs/agent-usage.md)
 
 ## Claude Code Setup
 
@@ -143,6 +160,36 @@ If `B` and `C` are declared exclusive and the graph proves both from the same
 source, `nesy.check_contradictions` reports a hard contradiction. The Stop hook
 can block a final answer when the answer includes conflicting structured
 `NESY_FACTS`.
+
+## Recommended Agent Usage
+
+Do not store every related fact an agent finds. Assert a relation only when the
+source material supports a logical implication, necessity, equivalence, or
+explicit exclusivity under a stated context.
+
+Good fit prompts:
+
+```text
+Research whether A really solves B. Build a small NeSy graph of the key causal
+chain, include provenance, and verify the final conclusion.
+
+Read this codebase and model feature flags, config dependencies, and mutually
+exclusive paths. Then answer what necessarily breaks if config X is removed.
+
+Compare proposals A/B/C. Encode goals, constraints, risks, and exclusions, then
+verify which proposal is sufficient for the target outcome.
+```
+
+Bad fit prompts:
+
+```text
+Search AI news.
+Summarize this article.
+Remember all related facts.
+```
+
+See [Agent usage policy](docs/agent-usage.md) for the do/don't table, prompts,
+autonomous extraction workflow, and overclaiming examples.
 
 ## Tools
 
@@ -283,6 +330,7 @@ env PYTHONPATH=src uv run nesy-reasoning-mcp eval agent --fixture benchmarks/fix
 - [Full specification](docs/spec-v2.md)
 - [SPEC compliance](SPEC_COMPLIANCE.md)
 - [Agent instructions](AGENTS.md)
+- [Agent usage policy](docs/agent-usage.md)
 - [Claude Code instructions](CLAUDE.md)
 - [Install as MCP server](docs/install.md)
 - [Internal testing profile](docs/internal-testing.md)

@@ -3,6 +3,9 @@
 Use this protocol when the agent is connected to the internal-test NeSy MCP
 profile.
 
+For the broader product policy and autonomous extraction guidance, see
+[Agent usage policy](../../docs/agent-usage.md).
+
 ## Core Rule
 
 Only structured facts are durable and reviewable. Plain prose is not imported
