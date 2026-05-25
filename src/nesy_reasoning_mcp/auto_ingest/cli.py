@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -900,22 +901,46 @@ async def _run_schedule_worker(args: argparse.Namespace, store: Any) -> dict[str
 
     runs: list[ScheduledIngestionRun] = []
     iterations = 0
-    while max_runs is None or len(runs) < max_runs:
-        remaining = None if max_runs is None else max_runs - len(runs)
-        due_runs = await _run_due_scheduled_jobs(
-            store,
-            trigger=ScheduledIngestionRunTrigger.WORKER,
-            limit=remaining or 50,
+    stop_signals: list[str] = []
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(
+            _watch_schedule_worker_shutdown, task_group.cancel_scope, stop_signals
         )
-        runs.extend(due_runs)
-        iterations += 1
-        if max_runs is not None and len(runs) >= max_runs:
-            break
-        await anyio.sleep(poll_seconds)
+        while max_runs is None or len(runs) < max_runs:
+            remaining = None if max_runs is None else max_runs - len(runs)
+            due_runs = await _run_due_scheduled_jobs(
+                store,
+                trigger=ScheduledIngestionRunTrigger.WORKER,
+                limit=remaining or 50,
+            )
+            runs.extend(due_runs)
+            iterations += 1
+            if max_runs is not None and len(runs) >= max_runs:
+                break
+            await anyio.sleep(poll_seconds)
+        task_group.cancel_scope.cancel()
 
     result = _scheduled_run_command_result(runs)
     result["iterations"] = iterations
+    if stop_signals:
+        result["status"] = "interrupted"
+        result["stop_signal"] = stop_signals[0]
     return result
+
+
+async def _watch_schedule_worker_shutdown(
+    cancel_scope: anyio.CancelScope,
+    stop_signals: list[str],
+) -> None:
+    """Cancel the foreground worker when the process receives a shutdown signal."""
+    try:
+        with anyio.open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
+            async for signum in signals:
+                stop_signals.append(signal.Signals(signum).name)
+                cancel_scope.cancel()
+                return
+    except NotImplementedError:
+        return
 
 
 async def _run_due_scheduled_jobs(
@@ -974,7 +999,10 @@ async def _run_scheduled_ingestion_job(
         return finished
 
     safety_diagnostics = scheduled_write_diagnostics(job)
-    if safety_diagnostics:
+    blocking_diagnostics = [
+        diagnostic for diagnostic in safety_diagnostics if diagnostic.level == "error"
+    ]
+    if blocking_diagnostics:
         finished = run.model_copy(
             update={
                 "status": ScheduledIngestionRunStatus.SKIPPED,
@@ -1000,16 +1028,47 @@ async def _run_scheduled_ingestion_job(
         return finished
 
     running_state = job.state.model_copy(update={"current_run_id": run.id})
-    store.append_scheduled_ingestion_run(run)
-    store.update_scheduled_ingestion_job_state(
+    claimed_job = store.update_scheduled_ingestion_job_state(
         job.id,
         state=running_state,
         status=ScheduledIngestionJobStatus.RUNNING,
+        expected_status=previous_status,
     )
+    if claimed_job is None:
+        diagnostics = [
+            Diagnostic(
+                level="warning",
+                code="SCHEDULED_JOB_CLAIM_CONFLICT",
+                message="scheduled ingestion job was already claimed by another worker",
+                related_ids=[job.id],
+            )
+        ]
+        finished = run.model_copy(
+            update={
+                "status": ScheduledIngestionRunStatus.SKIPPED,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "diagnostics": diagnostics,
+                "metadata": _scheduled_run_metadata(job, None, diagnostics),
+            }
+        )
+        store.append_scheduled_ingestion_run(finished)
+        _record_schedule_audit(
+            store,
+            tool_name="auto_ingest.schedule.run",
+            arguments={"job_id": job.id, "run_id": finished.id, "trigger": trigger.value},
+            result_status="skipped",
+            metadata=_scheduled_run_audit_metadata(job, finished),
+        )
+        return finished
 
+    store.append_scheduled_ingestion_run(run)
+
+    cancelled = False
+    cancellation_error: BaseException | None = None
+    cancelled_exc_class = anyio.get_cancelled_exc_class()
     try:
         report = await _run_agent_dry_run(_scheduled_job_args(job))
-        diagnostics = report.diagnostics
+        diagnostics = [*safety_diagnostics, *report.diagnostics]
         report_payload = report.model_dump(mode="json", exclude_none=True)
         report_path = write_scheduled_report(job, run, report_payload)
         final_status = (
@@ -1027,14 +1086,35 @@ async def _run_scheduled_ingestion_job(
                 "metadata": _scheduled_run_metadata(job, report_payload, diagnostics),
             }
         )
+    except cancelled_exc_class as exc:
+        cancelled = True
+        cancellation_error = exc
+        diagnostics = [
+            *safety_diagnostics,
+            Diagnostic(
+                level="error",
+                code="SCHEDULED_INGESTION_RUN_CANCELLED",
+                message="scheduled ingestion run was cancelled during shutdown",
+                related_ids=[job.id],
+            ),
+        ]
+        finished = run.model_copy(
+            update={
+                "status": ScheduledIngestionRunStatus.FAILED,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "diagnostics": diagnostics,
+                "metadata": _scheduled_run_metadata(job, None, diagnostics),
+            }
+        )
     except Exception as exc:  # noqa: BLE001 - failures are persisted as run diagnostics.
         diagnostics = [
+            *safety_diagnostics,
             Diagnostic(
                 level="error",
                 code="SCHEDULED_INGESTION_RUN_FAILED",
                 message=f"scheduled ingestion run failed: {exc.__class__.__name__}",
                 related_ids=[job.id],
-            )
+            ),
         ]
         finished = run.model_copy(
             update={
@@ -1062,9 +1142,13 @@ async def _run_scheduled_ingestion_job(
         store,
         tool_name="auto_ingest.schedule.run",
         arguments={"job_id": job.id, "run_id": finished.id, "trigger": trigger.value},
-        result_status=finished.status.value,
+        result_status="cancelled" if cancelled else finished.status.value,
         metadata=_scheduled_run_audit_metadata(job, finished),
     )
+    if cancelled:
+        if cancellation_error is not None:
+            raise cancellation_error
+        raise RuntimeError("scheduled ingestion run was cancelled")
     return finished
 
 
@@ -1127,8 +1211,9 @@ def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
         ),
     )
     diagnostics = scheduled_write_diagnostics(job)
-    if diagnostics:
-        raise ValueError(diagnostics[0].message)
+    for diagnostic in diagnostics:
+        if diagnostic.level == "error":
+            raise ValueError(diagnostic.message)
     return job
 
 

@@ -1082,6 +1082,29 @@ def test_memory_scheduled_ingestion_job_and_run_lifecycle() -> None:
     assert updated_job.state.last_run_id == run.id
 
 
+def test_memory_scheduled_ingestion_job_state_expected_status() -> None:
+    store = RelationStore()
+    job = _scheduled_job()
+    store.upsert_scheduled_ingestion_job(job)
+
+    rejected = store.update_scheduled_ingestion_job_state(
+        job.id,
+        state=job.state,
+        status=ScheduledIngestionJobStatus.RUNNING,
+        expected_status=ScheduledIngestionJobStatus.DISABLED,
+    )
+    accepted = store.update_scheduled_ingestion_job_state(
+        job.id,
+        state=job.state,
+        status=ScheduledIngestionJobStatus.RUNNING,
+        expected_status=ScheduledIngestionJobStatus.ACTIVE,
+    )
+
+    assert rejected is None
+    assert accepted is not None
+    assert accepted.status == ScheduledIngestionJobStatus.RUNNING
+
+
 def test_json_store_persists_scheduled_ingestion_jobs_and_runs(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))

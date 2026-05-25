@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from nesy_reasoning_mcp.auto_ingest import cli as ingest_cli
@@ -25,6 +26,7 @@ from nesy_reasoning_mcp.store import RelationStore
 
 def _job(tmp_path: Path, **kwargs: Any) -> ScheduledIngestionJob:
     name = kwargs.pop("name", "docs ingestion")
+    cron = kwargs.pop("cron", "*/15 * * * *")
     state = kwargs.pop(
         "state",
         ScheduledIngestionState(next_run_at=(datetime.now(UTC) - timedelta(minutes=1)).isoformat()),
@@ -36,7 +38,7 @@ def _job(tmp_path: Path, **kwargs: Any) -> ScheduledIngestionJob:
     )
     return ScheduledIngestionJob(
         name=name,
-        cron="*/15 * * * *",
+        cron=cron,
         source_config=ScheduledIngestionSourceConfig(urls=["https://example.com/source"]),
         provider_config=provider_config,
         write_config=write_config,
@@ -49,6 +51,20 @@ def test_next_cron_run_supports_steps_and_timezone() -> None:
     after = datetime(2026, 1, 1, 0, 7, tzinfo=UTC)
 
     assert next_cron_run("*/15 * * * *", "UTC", after=after) == ("2026-01-01T00:15:00+00:00")
+
+
+def test_next_cron_run_supports_aliases_and_sparse_schedule() -> None:
+    after = datetime(2026, 1, 1, 0, 7, tzinfo=UTC)
+
+    assert next_cron_run("@hourly", "UTC", after=after) == "2026-01-01T01:00:00+00:00"
+    assert next_cron_run("@yearly", "UTC", after=after) == "2027-01-01T00:00:00+00:00"
+
+
+def test_scheduled_job_strips_cron_and_timezone(tmp_path: Path) -> None:
+    job = _job(tmp_path, cron="  @daily  ", timezone="  UTC  ")
+
+    assert job.cron == "@daily"
+    assert job.timezone == "UTC"
 
 
 def test_scheduled_job_rejects_unknown_fields() -> None:
@@ -164,6 +180,35 @@ async def test_scheduled_runtime_skips_unsafe_auto_write(tmp_path: Path) -> None
     assert updated.status == ScheduledIngestionJobStatus.FAILED
 
 
+async def test_scheduled_write_warning_does_not_block_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+        return IngestionReport()
+
+    monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
+    store = RelationStore()
+    job = _job(
+        tmp_path,
+        write_config=ScheduledIngestionWriteConfig(
+            auto_write=False,
+            allow_scheduled_writes=True,
+            report_dir=str(tmp_path / "reports"),
+        ),
+    )
+    store.upsert_scheduled_ingestion_job(job)
+
+    run = await ingest_cli._run_scheduled_ingestion_job(
+        job,
+        store,
+        trigger=ScheduledIngestionRunTrigger.MANUAL,
+    )
+
+    assert run.status == ScheduledIngestionRunStatus.SUCCEEDED
+    assert run.diagnostics[0].code == "SCHEDULED_WRITE_CONFIG"
+
+
 async def test_run_due_runs_only_due_active_jobs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -219,3 +264,61 @@ async def test_failed_scheduled_run_records_retry_state(
     assert updated is not None
     assert updated.state.retry_count == 1
     assert updated.status == ScheduledIngestionJobStatus.ACTIVE
+
+
+async def test_scheduled_run_skips_when_job_claim_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+        pytest.fail("stale scheduled job should not run")
+
+    monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
+    store = RelationStore()
+    job = _job(tmp_path)
+    store.upsert_scheduled_ingestion_job(job)
+    store.update_scheduled_ingestion_job_state(
+        job.id,
+        state=job.state.model_copy(update={"current_run_id": "other-run"}),
+        status=ScheduledIngestionJobStatus.RUNNING,
+    )
+
+    run = await ingest_cli._run_scheduled_ingestion_job(
+        job,
+        store,
+        trigger=ScheduledIngestionRunTrigger.WORKER,
+    )
+
+    assert run.status == ScheduledIngestionRunStatus.SKIPPED
+    assert run.diagnostics[0].code == "SCHEDULED_JOB_CLAIM_CONFLICT"
+
+
+async def test_cancelled_scheduled_run_persists_failure_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cancelled_exc_class = anyio.get_cancelled_exc_class()
+
+    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+        raise cancelled_exc_class()
+
+    monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
+    store = RelationStore()
+    job = _job(tmp_path)
+    store.upsert_scheduled_ingestion_job(job)
+
+    with pytest.raises(cancelled_exc_class):
+        await ingest_cli._run_scheduled_ingestion_job(
+            job,
+            store,
+            trigger=ScheduledIngestionRunTrigger.WORKER,
+        )
+
+    runs = store.list_scheduled_ingestion_runs()
+    updated = store.get_scheduled_ingestion_job(job.id)
+    assert len(runs) == 1
+    assert runs[0].status == ScheduledIngestionRunStatus.FAILED
+    assert runs[0].diagnostics[0].code == "SCHEDULED_INGESTION_RUN_CANCELLED"
+    assert updated is not None
+    assert updated.status == ScheduledIngestionJobStatus.ACTIVE
+    assert updated.state.current_run_id is None

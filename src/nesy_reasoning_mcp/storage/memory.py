@@ -272,6 +272,7 @@ class MemoryRelationStore:
         *,
         state: ScheduledIngestionState,
         status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
     ) -> ScheduledIngestionJob | None:
         """Update mutable scheduled ingestion job state."""
         updated_at = _utc_now_iso()
@@ -279,6 +280,9 @@ class MemoryRelationStore:
         jobs: list[ScheduledIngestionJob] = []
         for job in self._scheduled_ingestion_jobs:
             if job.id != job_id:
+                jobs.append(job)
+                continue
+            if expected_status is not None and job.status != expected_status:
                 jobs.append(job)
                 continue
             updated_job = job.model_copy(

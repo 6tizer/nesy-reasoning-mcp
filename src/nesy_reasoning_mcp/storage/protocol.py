@@ -121,6 +121,7 @@ class RelationStoreProtocol(Protocol):
         *,
         state: ScheduledIngestionState,
         status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
     ) -> ScheduledIngestionJob | None:
         """Update mutable scheduled ingestion job state."""
 

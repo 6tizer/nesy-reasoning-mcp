@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -39,6 +40,16 @@ DEFAULT_SCHEDULE_RETRY_BACKOFF_SECONDS = 300
 DEFAULT_SCHEDULE_POLL_SECONDS = 60.0
 MAX_SCHEDULE_POLL_SECONDS = 3600.0
 MAX_CRON_LOOKAHEAD_MINUTES = 366 * 24 * 60
+
+CRON_ALIASES = {
+    "@annually": "0 0 1 1 *",
+    "@yearly": "0 0 1 1 *",
+    "@monthly": "0 0 1 * *",
+    "@weekly": "0 0 * * 0",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly": "0 * * * *",
+}
 
 
 class ScheduledIngestionJobStatus(StrEnum):
@@ -279,7 +290,7 @@ class ScheduledIngestionJob(BaseModel):
             data["updated_at"] = data["created_at"]
         return data
 
-    @field_validator("id", "name", "cron", "timezone", "created_at", "updated_at")
+    @field_validator("id", "name", "created_at", "updated_at")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         """Strip required text and reject empty values."""
@@ -288,12 +299,25 @@ class ScheduledIngestionJob(BaseModel):
             raise ValueError("must not be empty")
         return stripped
 
-    @model_validator(mode="after")
-    def validate_cron_and_timezone(self) -> ScheduledIngestionJob:
-        """Validate cron syntax and timezone."""
-        validate_cron(self.cron)
-        _zoneinfo(self.timezone)
-        return self
+    @field_validator("cron")
+    @classmethod
+    def validate_cron_expression(cls, value: str) -> str:
+        """Validate cron syntax."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        validate_cron(stripped)
+        return stripped
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        """Validate schedule timezone."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        _zoneinfo(stripped)
+        return stripped
 
 
 class ScheduledIngestionRun(BaseModel):
@@ -368,18 +392,45 @@ def next_cron_run(
     base = after or datetime.now(UTC)
     if base.tzinfo is None:
         base = base.replace(tzinfo=UTC)
-    local = base.astimezone(zone).replace(second=0, microsecond=0) + timedelta(minutes=1)
-    for _ in range(MAX_CRON_LOOKAHEAD_MINUTES):
-        cron_weekday = (local.weekday() + 1) % 7
-        if (
-            local.minute in fields["minute"]
-            and local.hour in fields["hour"]
-            and local.day in fields["day"]
-            and local.month in fields["month"]
-            and cron_weekday in fields["weekday"]
-        ):
-            return local.astimezone(UTC).isoformat()
-        local += timedelta(minutes=1)
+    current = base.astimezone(zone).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    deadline = current + timedelta(minutes=MAX_CRON_LOOKAHEAD_MINUTES)
+    minute_values = sorted(fields["minute"])
+    hour_values = sorted(fields["hour"])
+    month_values = sorted(fields["month"])
+    while current <= deadline:
+        if current.month not in fields["month"]:
+            current = _next_allowed_month(
+                current,
+                month_values,
+                hour=hour_values[0],
+                minute=minute_values[0],
+            )
+            continue
+        if not _cron_day_matches(current, fields):
+            current = _next_day_start(current, hour=hour_values[0], minute=minute_values[0])
+            continue
+        if current.hour not in fields["hour"]:
+            next_hour = _next_value_at_or_after(current.hour, hour_values)
+            current = (
+                current.replace(hour=next_hour, minute=minute_values[0])
+                if next_hour is not None
+                else _next_day_start(current, hour=hour_values[0], minute=minute_values[0])
+            )
+            continue
+        if current.minute not in fields["minute"]:
+            next_minute = _next_value_at_or_after(current.minute, minute_values)
+            if next_minute is not None:
+                current = current.replace(minute=next_minute)
+                continue
+            next_hour = _next_value_after(current.hour, hour_values)
+            current = (
+                current.replace(hour=next_hour, minute=minute_values[0])
+                if next_hour is not None
+                else _next_day_start(current, hour=hour_values[0], minute=minute_values[0])
+            )
+            continue
+        if _cron_fields_match(current, fields):
+            return current.astimezone(UTC).isoformat()
     raise ValueError("cron expression has no matching run time in the next year")
 
 
@@ -413,9 +464,17 @@ def write_scheduled_report(
 
 def scheduled_write_diagnostics(job: ScheduledIngestionJob) -> list[Diagnostic]:
     """Return runtime safety diagnostics for unsafe scheduled write settings."""
-    if not job.write_config.auto_write:
-        return []
     diagnostics: list[Diagnostic] = []
+    if not job.write_config.auto_write and job.write_config.allow_scheduled_writes:
+        diagnostics.append(
+            Diagnostic(
+                level="warning",
+                code="SCHEDULED_WRITE_CONFIG",
+                message="scheduled writes are configured but auto-write is disabled",
+            )
+        )
+    if not job.write_config.auto_write:
+        return diagnostics
     if not job.write_config.allow_scheduled_writes:
         diagnostics.append(
             Diagnostic(
@@ -543,6 +602,9 @@ def next_state_for_skip(
 
 
 def _parse_cron(cron: str) -> dict[str, set[int]]:
+    normalized = cron.strip().lower()
+    if normalized in CRON_ALIASES:
+        cron = CRON_ALIASES[normalized]
     parts = cron.split()
     if len(parts) != 5:
         raise ValueError("cron must have exactly five fields")
@@ -554,6 +616,65 @@ def _parse_cron(cron: str) -> dict[str, set[int]]:
         "month": _parse_cron_field(month, 1, 12, "month"),
         "weekday": _parse_cron_field(weekday, 0, 7, "weekday", normalize_weekday=True),
     }
+
+
+def _cron_fields_match(
+    value: datetime,
+    fields: dict[str, set[int]],
+) -> bool:
+    """Return whether a timestamp matches cron fields."""
+    return (
+        value.minute in fields["minute"]
+        and value.hour in fields["hour"]
+        and value.month in fields["month"]
+        and _cron_day_matches(value, fields)
+    )
+
+
+def _cron_day_matches(
+    value: datetime,
+    fields: dict[str, set[int]],
+) -> bool:
+    """Return whether a timestamp matches day-of-month and weekday constraints."""
+    cron_weekday = (value.weekday() + 1) % 7
+    return value.day in fields["day"] and cron_weekday in fields["weekday"]
+
+
+def _next_day_start(value: datetime, *, hour: int, minute: int) -> datetime:
+    """Return the next day at the earliest allowed hour/minute."""
+    return (value + timedelta(days=1)).replace(hour=hour, minute=minute)
+
+
+def _next_allowed_month(
+    value: datetime,
+    month_values: list[int],
+    *,
+    hour: int,
+    minute: int,
+) -> datetime:
+    """Return day one of the next allowed month at the earliest allowed time."""
+    next_month = _next_value_at_or_after(value.month, month_values)
+    if next_month is None:
+        return value.replace(
+            year=value.year + 1, month=month_values[0], day=1, hour=hour, minute=minute
+        )
+    return value.replace(month=next_month, day=1, hour=hour, minute=minute)
+
+
+def _next_value_after(current: int, values: list[int]) -> int | None:
+    """Return the next value in sorted `values` after `current`."""
+    index = bisect_left(values, current + 1)
+    if index < len(values):
+        return values[index]
+    return None
+
+
+def _next_value_at_or_after(current: int, values: list[int]) -> int | None:
+    """Return the next value in sorted `values` at or after `current`."""
+    index = bisect_left(values, current)
+    if index < len(values):
+        return values[index]
+    return None
 
 
 def _parse_cron_field(

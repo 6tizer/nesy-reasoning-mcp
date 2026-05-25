@@ -131,12 +131,14 @@ class JsonRelationStore(MemoryRelationStore):
         *,
         state: ScheduledIngestionState,
         status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
     ) -> ScheduledIngestionJob | None:
         """Update scheduled ingestion job state and persist the JSON relation set."""
         updated = super().update_scheduled_ingestion_job_state(
             job_id,
             state=state,
             status=status,
+            expected_status=expected_status,
         )
         self._persist()
         return updated

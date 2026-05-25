@@ -626,6 +626,7 @@ class SqliteRelationStore:
         *,
         state: ScheduledIngestionState,
         status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
     ) -> ScheduledIngestionJob | None:
         """Update mutable scheduled ingestion job state."""
         job = self.get_scheduled_ingestion_job(job_id)
@@ -640,7 +641,34 @@ class SqliteRelationStore:
             },
         )
         try:
-            self._upsert_scheduled_ingestion_jobs([updated])
+            if expected_status is None:
+                self._upsert_scheduled_ingestion_jobs([updated])
+            else:
+                cursor = self._conn.execute(
+                    """
+                    UPDATE scheduled_ingestion_jobs
+                    SET
+                        name = ?,
+                        status = ?,
+                        next_run_at = ?,
+                        payload_json = ?,
+                        created_at = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        updated.name,
+                        updated.status.value,
+                        updated.state.next_run_at,
+                        _dumps(updated.model_dump(mode="json", exclude_none=True)),
+                        updated.created_at,
+                        updated.updated_at,
+                        job_id,
+                        expected_status.value,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    return None
             self._conn.commit()
         except Exception:
             self._conn.rollback()
