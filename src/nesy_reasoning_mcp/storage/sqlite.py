@@ -11,6 +11,14 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
+from nesy_reasoning_mcp.auto_ingest.scheduler import (
+    ScheduledIngestionJob,
+    ScheduledIngestionJobFilter,
+    ScheduledIngestionJobStatus,
+    ScheduledIngestionRun,
+    ScheduledIngestionRunFilter,
+    ScheduledIngestionState,
+)
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewQueueFilter,
     ReviewQueueRecord,
@@ -141,6 +149,41 @@ def _review_queue_filter_sql(queue_filter: ReviewQueueFilter | None) -> tuple[st
     return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
 
 
+def _scheduled_job_filter_sql(
+    job_filter: ScheduledIngestionJobFilter | None,
+) -> tuple[str, list[Any]]:
+    if job_filter is None:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if job_filter.ids:
+        clauses.append(f"id IN ({','.join('?' for _ in job_filter.ids)})")
+        params.extend(job_filter.ids)
+    if job_filter.status is not None:
+        clauses.append("status = ?")
+        params.append(job_filter.status.value)
+    if job_filter.due_before is not None:
+        clauses.append("next_run_at IS NOT NULL AND next_run_at <= ?")
+        params.append(job_filter.due_before)
+    return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
+
+
+def _scheduled_run_filter_sql(
+    run_filter: ScheduledIngestionRunFilter | None,
+) -> tuple[str, list[Any]]:
+    if run_filter is None:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if run_filter.job_id is not None:
+        clauses.append("job_id = ?")
+        params.append(run_filter.job_id)
+    if run_filter.status is not None:
+        clauses.append("status = ?")
+        params.append(run_filter.status.value)
+    return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
+
+
 def _require_unique(values: Iterable[str], label: str) -> None:
     seen: set[str] = set()
     for value in values:
@@ -175,6 +218,48 @@ def _review_queue_from_row(row: sqlite3.Row) -> ReviewQueueRecord:
             "review_queue indexed columns do not match payload: " + ", ".join(mismatched)
         )
     return record
+
+
+def _scheduled_job_from_row(row: sqlite3.Row) -> ScheduledIngestionJob:
+    job = ScheduledIngestionJob.model_validate(_loads(row["payload_json"], {}))
+    expected_columns = {
+        "id": job.id,
+        "name": job.name,
+        "status": job.status.value,
+        "next_run_at": job.state.next_run_at,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+    mismatched = [
+        column for column, expected in expected_columns.items() if row[column] != expected
+    ]
+    if mismatched:
+        raise ValueError(
+            "scheduled_ingestion_jobs indexed columns do not match payload: "
+            + ", ".join(mismatched)
+        )
+    return job
+
+
+def _scheduled_run_from_row(row: sqlite3.Row) -> ScheduledIngestionRun:
+    run = ScheduledIngestionRun.model_validate(_loads(row["payload_json"], {}))
+    expected_columns = {
+        "id": run.id,
+        "job_id": run.job_id,
+        "trigger": run.trigger.value,
+        "status": run.status.value,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+    }
+    mismatched = [
+        column for column, expected in expected_columns.items() if row[column] != expected
+    ]
+    if mismatched:
+        raise ValueError(
+            "scheduled_ingestion_runs indexed columns do not match payload: "
+            + ", ".join(mismatched)
+        )
+    return run
 
 
 class SqliteRelationStore:
@@ -477,6 +562,158 @@ class SqliteRelationStore:
             self._conn.rollback()
             raise
         return len(updated_records)
+
+    @_locked
+    def upsert_scheduled_ingestion_job(
+        self,
+        job: ScheduledIngestionJob,
+    ) -> tuple[ScheduledIngestionJob, int]:
+        """Add or update one scheduled ingestion job."""
+        stored = job.model_copy(deep=True, update={"updated_at": _utc_now_iso()})
+        existing = self.get_scheduled_ingestion_job(stored.id)
+        try:
+            self._upsert_scheduled_ingestion_jobs([stored])
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return stored, 1 if existing is not None else 0
+
+    @_locked
+    def list_scheduled_ingestion_jobs(
+        self,
+        job_filter: ScheduledIngestionJobFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ScheduledIngestionJob]:
+        """List scheduled ingestion jobs matching an optional filter."""
+        where_sql, params = _scheduled_job_filter_sql(job_filter)
+        sql = f"""
+            SELECT *
+            FROM scheduled_ingestion_jobs
+            {where_sql}
+            ORDER BY next_run_at, created_at, id
+            """
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_scheduled_job_from_row(row) for row in rows]
+
+    @_locked
+    def get_scheduled_ingestion_job(self, job_id: str) -> ScheduledIngestionJob | None:
+        """Return one scheduled ingestion job by id."""
+        rows = self._conn.execute(
+            """
+            SELECT *
+            FROM scheduled_ingestion_jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        return _scheduled_job_from_row(rows[0])
+
+    @_locked
+    def update_scheduled_ingestion_job_state(
+        self,
+        job_id: str,
+        *,
+        state: ScheduledIngestionState,
+        status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
+    ) -> ScheduledIngestionJob | None:
+        """Update mutable scheduled ingestion job state."""
+        job = self.get_scheduled_ingestion_job(job_id)
+        if job is None:
+            return None
+        updated = job.model_copy(
+            deep=True,
+            update={
+                "status": status or job.status,
+                "state": state,
+                "updated_at": _utc_now_iso(),
+            },
+        )
+        try:
+            if expected_status is None:
+                self._upsert_scheduled_ingestion_jobs([updated])
+            else:
+                cursor = self._conn.execute(
+                    """
+                    UPDATE scheduled_ingestion_jobs
+                    SET
+                        name = ?,
+                        status = ?,
+                        next_run_at = ?,
+                        payload_json = ?,
+                        created_at = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        updated.name,
+                        updated.status.value,
+                        updated.state.next_run_at,
+                        _dumps(updated.model_dump(mode="json", exclude_none=True)),
+                        updated.created_at,
+                        updated.updated_at,
+                        job_id,
+                        expected_status.value,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    return None
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return updated
+
+    @_locked
+    def append_scheduled_ingestion_run(
+        self,
+        run: ScheduledIngestionRun,
+    ) -> ScheduledIngestionRun:
+        """Append or replace one scheduled ingestion run record."""
+        stored = run.model_copy(deep=True)
+        try:
+            self._upsert_scheduled_ingestion_runs([stored])
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return stored
+
+    @_locked
+    def list_scheduled_ingestion_runs(
+        self,
+        run_filter: ScheduledIngestionRunFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ScheduledIngestionRun]:
+        """List scheduled ingestion runs matching an optional filter."""
+        where_sql, params = _scheduled_run_filter_sql(run_filter)
+        sql = f"""
+            SELECT *
+            FROM scheduled_ingestion_runs
+            {where_sql}
+            ORDER BY started_at, id
+            """
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_scheduled_run_from_row(row) for row in rows]
 
     @_locked
     def clear_relations(
@@ -795,6 +1032,26 @@ class SqliteRelationStore:
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS scheduled_ingestion_jobs (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('active','disabled','running','failed')),
+              next_run_at TEXT,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scheduled_ingestion_runs (
+              id TEXT PRIMARY KEY,
+              job_id TEXT NOT NULL,
+              trigger TEXT NOT NULL CHECK (trigger IN ('manual','due','worker')),
+              status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed','skipped')),
+              started_at TEXT NOT NULL,
+              finished_at TEXT,
+              payload_json TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_relations_context_store_type
               ON relations (context_id, store_id, relation_type);
             CREATE INDEX IF NOT EXISTS idx_relations_source_target
@@ -811,6 +1068,14 @@ class SqliteRelationStore:
               ON review_queue (candidate_id);
             CREATE INDEX IF NOT EXISTS idx_review_queue_context_store
               ON review_queue (context_id, store_id);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_ingestion_jobs_status
+              ON scheduled_ingestion_jobs (status);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_ingestion_jobs_next_run
+              ON scheduled_ingestion_jobs (next_run_at);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_ingestion_runs_job_id
+              ON scheduled_ingestion_runs (job_id);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_ingestion_runs_started
+              ON scheduled_ingestion_runs (started_at);
             """
         )
         self._ensure_relation_identity_columns()
@@ -978,6 +1243,74 @@ class SqliteRelationStore:
                 payload_json = excluded.payload_json,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+
+    def _upsert_scheduled_ingestion_jobs(
+        self,
+        jobs: Iterable[ScheduledIngestionJob],
+    ) -> None:
+        rows = []
+        for job in jobs:
+            rows.append(
+                (
+                    job.id,
+                    job.name,
+                    job.status.value,
+                    job.state.next_run_at,
+                    _dumps(job.model_dump(mode="json", exclude_none=True)),
+                    job.created_at,
+                    job.updated_at,
+                )
+            )
+        self._conn.executemany(
+            """
+            INSERT INTO scheduled_ingestion_jobs (
+                id, name, status, next_run_at, payload_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                status = excluded.status,
+                next_run_at = excluded.next_run_at,
+                payload_json = excluded.payload_json,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+
+    def _upsert_scheduled_ingestion_runs(
+        self,
+        runs: Iterable[ScheduledIngestionRun],
+    ) -> None:
+        rows = []
+        for run in runs:
+            rows.append(
+                (
+                    run.id,
+                    run.job_id,
+                    run.trigger.value,
+                    run.status.value,
+                    run.started_at,
+                    run.finished_at,
+                    _dumps(run.model_dump(mode="json", exclude_none=True)),
+                )
+            )
+        self._conn.executemany(
+            """
+            INSERT INTO scheduled_ingestion_runs (
+                id, job_id, trigger, status, started_at, finished_at, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                job_id = excluded.job_id,
+                trigger = excluded.trigger,
+                status = excluded.status,
+                started_at = excluded.started_at,
+                finished_at = excluded.finished_at,
+                payload_json = excluded.payload_json
             """,
             rows,
         )

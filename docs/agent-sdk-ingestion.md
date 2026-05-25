@@ -375,6 +375,64 @@ Commit re-runs validation and safe-write checks before writing relations. If
 any selected pending record queues or rejects during validation, no selected
 record is written.
 
+## Scheduled Ingestion
+
+Scheduled ingestion is explicit CLI work. The MCP stdio and HTTP servers do not
+start a hidden scheduler or background daemon.
+
+Create a dry-run schedule:
+
+```bash
+uv run --no-editable nesy-reasoning-mcp ingest schedule add \
+  --name "docs dependency extraction" \
+  --cron "*/30 * * * *" \
+  --url https://example.com/report \
+  --task "Extract only evidence-backed sufficient or necessary relations" \
+  --format json
+```
+
+The v1 cron parser accepts five fields: minute, hour, day, month, weekday. It
+supports `*`, numbers, comma lists, ranges, and steps such as `*/30`. It does
+not support macros, seconds fields, or OS service installation. The default
+timezone is `UTC`; use `--timezone` with an IANA zone name when needed.
+
+Run jobs manually, run due jobs once, or start an explicit foreground worker:
+
+```bash
+uv run --no-editable nesy-reasoning-mcp ingest schedule list --format json
+uv run --no-editable nesy-reasoning-mcp ingest schedule run --id sched_... --format json
+uv run --no-editable nesy-reasoning-mcp ingest schedule run-due --format json
+uv run --no-editable nesy-reasoning-mcp ingest schedule worker --poll-seconds 60
+uv run --no-editable nesy-reasoning-mcp ingest schedule disable --id sched_...
+```
+
+Durable schedule state requires the JSON or SQLite storage backend. Job state
+tracks last run, next run, run status, retry count, diagnostics, and report
+location. Reports are written by default under
+`~/.nesy-reasoning/ingestion-reports/{job_id}/{scheduled_run_id}.json`; use
+`--report-dir` to choose a different report root.
+
+Scheduled write mode has two extra safeguards beyond normal `--auto-write`.
+Creation and runtime both require `--allow-scheduled-writes`, and scheduled
+auto-write requires at least two `--reviewer-model` values by default:
+
+```bash
+uv run --no-editable nesy-reasoning-mcp ingest schedule add \
+  --name "safe write extraction" \
+  --cron "0 * * * *" \
+  --url https://example.com/report \
+  --auto-write \
+  --allow-scheduled-writes \
+  --reviewer-model gpt-4.1 \
+  --reviewer-model gpt-4.1-mini \
+  --voting-policy risk_tiered
+```
+
+Single-reviewer scheduled writes must opt in with
+`--allow-single-reviewer-write`. Dry-run schedules have no multi-reviewer
+requirement. Scheduled writes still use the same deterministic gate, safe write
+path, and review queue behavior as manual `agent-dry-run --auto-write`.
+
 ## Gate Rules
 
 Auto-write requires all of the following:

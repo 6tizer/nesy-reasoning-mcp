@@ -5,6 +5,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+from nesy_reasoning_mcp.auto_ingest.scheduler import (
+    ScheduledIngestionJob,
+    ScheduledIngestionJobFilter,
+    ScheduledIngestionJobStatus,
+    ScheduledIngestionRun,
+    ScheduledIngestionRunFilter,
+    ScheduledIngestionState,
+)
 from nesy_reasoning_mcp.auto_ingest.schemas import ReviewQueueFilter, ReviewQueueRecord
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
@@ -88,6 +96,49 @@ class RelationStoreProtocol(Protocol):
         metadata: dict[str, Any] | None = None,
     ) -> int:
         """Resolve review queue records without writing graph relations."""
+
+    def upsert_scheduled_ingestion_job(
+        self,
+        job: ScheduledIngestionJob,
+    ) -> tuple[ScheduledIngestionJob, int]:
+        """Add or update one scheduled ingestion job."""
+
+    def list_scheduled_ingestion_jobs(
+        self,
+        job_filter: ScheduledIngestionJobFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ScheduledIngestionJob]:
+        """List scheduled ingestion jobs matching an optional filter."""
+
+    def get_scheduled_ingestion_job(self, job_id: str) -> ScheduledIngestionJob | None:
+        """Return one scheduled ingestion job by id."""
+
+    def update_scheduled_ingestion_job_state(
+        self,
+        job_id: str,
+        *,
+        state: ScheduledIngestionState,
+        status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
+    ) -> ScheduledIngestionJob | None:
+        """Update mutable scheduled ingestion job state."""
+
+    def append_scheduled_ingestion_run(
+        self,
+        run: ScheduledIngestionRun,
+    ) -> ScheduledIngestionRun:
+        """Append or replace one scheduled ingestion run record."""
+
+    def list_scheduled_ingestion_runs(
+        self,
+        run_filter: ScheduledIngestionRunFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ScheduledIngestionRun]:
+        """List scheduled ingestion runs matching an optional filter."""
 
     def clear_relations(
         self,

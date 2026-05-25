@@ -6,6 +6,14 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from typing import Any
 
+from nesy_reasoning_mcp.auto_ingest.scheduler import (
+    ScheduledIngestionJob,
+    ScheduledIngestionJobFilter,
+    ScheduledIngestionJobStatus,
+    ScheduledIngestionRun,
+    ScheduledIngestionRunFilter,
+    ScheduledIngestionState,
+)
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewQueueFilter,
     ReviewQueueRecord,
@@ -52,6 +60,8 @@ class MemoryRelationStore:
         self._independence_records: list[IndependenceRecord] = []
         self._propositions: list[PropositionRecord] = []
         self._review_queue: list[ReviewQueueRecord] = []
+        self._scheduled_ingestion_jobs: list[ScheduledIngestionJob] = []
+        self._scheduled_ingestion_runs: list[ScheduledIngestionRun] = []
         self._audit_log: list[AuditEntry] = []
         self._context_metadata: dict[str, Any] = {}
 
@@ -216,6 +226,107 @@ class MemoryRelationStore:
             )
         self._review_queue = records
         return updated
+
+    def upsert_scheduled_ingestion_job(
+        self,
+        job: ScheduledIngestionJob,
+    ) -> tuple[ScheduledIngestionJob, int]:
+        """Add or update one scheduled ingestion job."""
+        incoming = job.model_copy(deep=True, update={"updated_at": _utc_now_iso()})
+        updated = sum(1 for record in self._scheduled_ingestion_jobs if record.id == incoming.id)
+        self._scheduled_ingestion_jobs = [
+            record for record in self._scheduled_ingestion_jobs if record.id != incoming.id
+        ]
+        self._scheduled_ingestion_jobs.append(incoming)
+        return incoming.model_copy(deep=True), updated
+
+    def list_scheduled_ingestion_jobs(
+        self,
+        job_filter: ScheduledIngestionJobFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ScheduledIngestionJob]:
+        """List scheduled ingestion jobs matching an optional filter."""
+        matched = [
+            job.model_copy(deep=True)
+            for job in self._scheduled_ingestion_jobs
+            if job_filter is None or _scheduled_job_matches_filter(job, job_filter)
+        ]
+        matched.sort(key=lambda job: (job.state.next_run_at or "", job.created_at, job.id))
+        matched = matched[offset:]
+        if limit is not None:
+            return matched[:limit]
+        return matched
+
+    def get_scheduled_ingestion_job(self, job_id: str) -> ScheduledIngestionJob | None:
+        """Return one scheduled ingestion job by id."""
+        for job in self._scheduled_ingestion_jobs:
+            if job.id == job_id:
+                return job.model_copy(deep=True)
+        return None
+
+    def update_scheduled_ingestion_job_state(
+        self,
+        job_id: str,
+        *,
+        state: ScheduledIngestionState,
+        status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
+    ) -> ScheduledIngestionJob | None:
+        """Update mutable scheduled ingestion job state."""
+        updated_at = _utc_now_iso()
+        updated_job: ScheduledIngestionJob | None = None
+        jobs: list[ScheduledIngestionJob] = []
+        for job in self._scheduled_ingestion_jobs:
+            if job.id != job_id:
+                jobs.append(job)
+                continue
+            if expected_status is not None and job.status != expected_status:
+                jobs.append(job)
+                continue
+            updated_job = job.model_copy(
+                deep=True,
+                update={
+                    "status": status or job.status,
+                    "state": state,
+                    "updated_at": updated_at,
+                },
+            )
+            jobs.append(updated_job)
+        self._scheduled_ingestion_jobs = jobs
+        return updated_job.model_copy(deep=True) if updated_job is not None else None
+
+    def append_scheduled_ingestion_run(
+        self,
+        run: ScheduledIngestionRun,
+    ) -> ScheduledIngestionRun:
+        """Append or replace one scheduled ingestion run record."""
+        incoming = run.model_copy(deep=True)
+        self._scheduled_ingestion_runs = [
+            record for record in self._scheduled_ingestion_runs if record.id != incoming.id
+        ]
+        self._scheduled_ingestion_runs.append(incoming)
+        return incoming.model_copy(deep=True)
+
+    def list_scheduled_ingestion_runs(
+        self,
+        run_filter: ScheduledIngestionRunFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ScheduledIngestionRun]:
+        """List scheduled ingestion runs matching an optional filter."""
+        matched = [
+            run.model_copy(deep=True)
+            for run in self._scheduled_ingestion_runs
+            if run_filter is None or _scheduled_run_matches_filter(run, run_filter)
+        ]
+        matched.sort(key=lambda run: (run.started_at, run.id))
+        matched = matched[offset:]
+        if limit is not None:
+            return matched[:limit]
+        return matched
 
     def clear_relations(
         self,
@@ -407,3 +518,28 @@ def _review_queue_matches_filter(
             queue_filter.after_id,
         )
     return True
+
+
+def _scheduled_job_matches_filter(
+    job: ScheduledIngestionJob,
+    job_filter: ScheduledIngestionJobFilter,
+) -> bool:
+    if job_filter.ids and job.id not in job_filter.ids:
+        return False
+    if job_filter.status is not None and job.status != job_filter.status:
+        return False
+    if job_filter.due_before is not None:
+        if job.state.next_run_at is None:
+            return False
+        if job.state.next_run_at > job_filter.due_before:
+            return False
+    return True
+
+
+def _scheduled_run_matches_filter(
+    run: ScheduledIngestionRun,
+    run_filter: ScheduledIngestionRunFilter,
+) -> bool:
+    if run_filter.job_id is not None and run.job_id != run_filter.job_id:
+        return False
+    return not (run_filter.status is not None and run.status != run_filter.status)

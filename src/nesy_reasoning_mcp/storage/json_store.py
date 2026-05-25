@@ -8,6 +8,12 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from nesy_reasoning_mcp.auto_ingest.scheduler import (
+    ScheduledIngestionJob,
+    ScheduledIngestionJobStatus,
+    ScheduledIngestionRun,
+    ScheduledIngestionState,
+)
 from nesy_reasoning_mcp.auto_ingest.schemas import ReviewQueueRecord
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
@@ -110,6 +116,42 @@ class JsonRelationStore(MemoryRelationStore):
         self._persist()
         return updated
 
+    def upsert_scheduled_ingestion_job(
+        self,
+        job: ScheduledIngestionJob,
+    ) -> tuple[ScheduledIngestionJob, int]:
+        """Add or update one scheduled ingestion job and persist the JSON relation set."""
+        stored, updated = super().upsert_scheduled_ingestion_job(job)
+        self._persist()
+        return stored, updated
+
+    def update_scheduled_ingestion_job_state(
+        self,
+        job_id: str,
+        *,
+        state: ScheduledIngestionState,
+        status: ScheduledIngestionJobStatus | None = None,
+        expected_status: ScheduledIngestionJobStatus | None = None,
+    ) -> ScheduledIngestionJob | None:
+        """Update scheduled ingestion job state and persist the JSON relation set."""
+        updated = super().update_scheduled_ingestion_job_state(
+            job_id,
+            state=state,
+            status=status,
+            expected_status=expected_status,
+        )
+        self._persist()
+        return updated
+
+    def append_scheduled_ingestion_run(
+        self,
+        run: ScheduledIngestionRun,
+    ) -> ScheduledIngestionRun:
+        """Append one scheduled ingestion run and persist the JSON relation set."""
+        stored = super().append_scheduled_ingestion_run(run)
+        self._persist()
+        return stored
+
     def record_audit(
         self,
         *,
@@ -177,6 +219,14 @@ class JsonRelationStore(MemoryRelationStore):
         self._review_queue = [
             ReviewQueueRecord.model_validate(item) for item in data.get("review_queue", [])
         ]
+        self._scheduled_ingestion_jobs = [
+            ScheduledIngestionJob.model_validate(item)
+            for item in data.get("scheduled_ingestion_jobs", [])
+        ]
+        self._scheduled_ingestion_runs = [
+            ScheduledIngestionRun.model_validate(item)
+            for item in data.get("scheduled_ingestion_runs", [])
+        ]
         self._audit_log = [_audit_from_dict(item) for item in data.get("audit_log", [])]
         self._context_metadata = data.get("context_metadata", {})
 
@@ -196,6 +246,14 @@ class JsonRelationStore(MemoryRelationStore):
             ],
             "review_queue": [
                 record.model_dump(mode="json", exclude_none=True) for record in self._review_queue
+            ],
+            "scheduled_ingestion_jobs": [
+                job.model_dump(mode="json", exclude_none=True)
+                for job in self._scheduled_ingestion_jobs
+            ],
+            "scheduled_ingestion_runs": [
+                run.model_dump(mode="json", exclude_none=True)
+                for run in self._scheduled_ingestion_runs
             ],
             "audit_log": [entry.to_dict() for entry in self._audit_log],
             "context_metadata": self._context_metadata,
