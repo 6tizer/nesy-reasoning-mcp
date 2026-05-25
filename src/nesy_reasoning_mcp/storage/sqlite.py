@@ -26,6 +26,7 @@ from nesy_reasoning_mcp.schemas import (
 )
 from nesy_reasoning_mcp.storage.audit import AuditEntry, _input_hash
 from nesy_reasoning_mcp.storage.common import (
+    _apply_assert_relations_mode,
     _dumps,
     _group_for_store,
     _group_matches_scope,
@@ -40,7 +41,6 @@ from nesy_reasoning_mcp.storage.common import (
     _normalize_relation_identities,
     _relation_for_store,
     _relation_from_row,
-    _upsert_relations,
     graph_stats_for,
 )
 
@@ -144,71 +144,29 @@ class SqliteRelationStore:
         """Add relation records and return added records plus update count."""
         normalized_inputs = _normalize_relation_identities(inputs, self.list_propositions())
         records = [RelationRecord.from_input(item) for item in normalized_inputs]
-        updated = 0
+        # Append uses incremental insert below, so avoid loading a merged full-store view.
+        current_relations = [] if mode == "append" else self.list_relations()
+        merged, updated = _apply_assert_relations_mode(current_relations, records, mode)
 
-        if mode == "upsert":
-            merged, updated = _upsert_relations(self.list_relations(), records)
-            if not dry_run:
-                try:
-                    self._replace_all_records(
-                        merged,
-                        self.list_exclusive_groups(),
-                        self.list_independence_records(),
-                        self.context_metadata(),
-                        self.list_propositions(),
-                    )
-                    self._conn.commit()
-                except Exception:
-                    self._conn.rollback()
-                    raise
-        elif mode == "replace_same_pair":
-            replace_keys = {
-                (
-                    record.canonical_source,
-                    record.canonical_target,
-                    record.context_id,
-                    record.store_id,
-                )
-                for record in records
-            }
-            existing_relations = self.list_relations()
-            updated = sum(
-                1
-                for relation in existing_relations
-                if (
-                    relation.canonical_source,
-                    relation.canonical_target,
-                    relation.context_id,
-                    relation.store_id,
-                )
-                in replace_keys
-            )
-            if not dry_run:
-                for relation_id in [
-                    relation.id
-                    for relation in existing_relations
-                    if (
-                        relation.canonical_source,
-                        relation.canonical_target,
-                        relation.context_id,
-                        relation.store_id,
-                    )
-                    in replace_keys
-                ]:
-                    self._conn.execute(
-                        """
-                        DELETE FROM relations
-                        WHERE id = ?
-                        """,
-                        (relation_id,),
-                    )
+        if dry_run:
+            return records, updated
 
-        elif mode != "append":
-            raise ValueError(f"unsupported assert mode: {mode}")
-
-        if not dry_run and mode != "upsert":
+        if mode == "append":
             try:
                 self._insert_relations(records)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        else:
+            try:
+                self._replace_all_records(
+                    merged,
+                    self.list_exclusive_groups(),
+                    self.list_independence_records(),
+                    self.context_metadata(),
+                    self.list_propositions(),
+                )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()

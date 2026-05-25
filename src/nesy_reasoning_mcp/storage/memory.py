@@ -21,6 +21,7 @@ from nesy_reasoning_mcp.schemas import (
 )
 from nesy_reasoning_mcp.storage.audit import AuditEntry, _input_hash
 from nesy_reasoning_mcp.storage.common import (
+    _apply_assert_relations_mode,
     _group_for_store,
     _group_matches_scope,
     _independence_for_store,
@@ -31,7 +32,6 @@ from nesy_reasoning_mcp.storage.common import (
     _merge_propositions,
     _normalize_relation_identities,
     _relation_for_store,
-    _upsert_relations,
     graph_stats_for,
 )
 
@@ -58,51 +58,9 @@ class MemoryRelationStore:
         """Add relation records and return added records plus update count."""
         normalized_inputs = _normalize_relation_identities(inputs, self._propositions)
         records = [RelationRecord.from_input(item) for item in normalized_inputs]
-        updated = 0
-
-        if mode == "upsert":
-            merged, updated = _upsert_relations(self._relations, records)
-            if not dry_run:
-                self._relations = merged
-        elif mode == "replace_same_pair":
-            replace_keys = {
-                (
-                    record.canonical_source,
-                    record.canonical_target,
-                    record.context_id,
-                    record.store_id,
-                )
-                for record in records
-            }
-            updated = sum(
-                1
-                for relation in self._relations
-                if (
-                    relation.canonical_source,
-                    relation.canonical_target,
-                    relation.context_id,
-                    relation.store_id,
-                )
-                in replace_keys
-            )
-            if not dry_run:
-                self._relations = [
-                    relation
-                    for relation in self._relations
-                    if (
-                        relation.canonical_source,
-                        relation.canonical_target,
-                        relation.context_id,
-                        relation.store_id,
-                    )
-                    not in replace_keys
-                ]
-
-        elif mode != "append":
-            raise ValueError(f"unsupported assert mode: {mode}")
-
-        if not dry_run and mode != "upsert":
-            self._relations.extend(records)
+        merged, updated = _apply_assert_relations_mode(self._relations, records, mode)
+        if not dry_run:
+            self._relations = merged
 
         return records, updated
 

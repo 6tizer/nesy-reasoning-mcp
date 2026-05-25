@@ -21,7 +21,11 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     RelationType,
 )
-from nesy_reasoning_mcp.storage.common import _merge_propositions, _normalize_relation_identities
+from nesy_reasoning_mcp.storage.common import (
+    _apply_assert_relations_mode,
+    _merge_propositions,
+    _normalize_relation_identities,
+)
 from nesy_reasoning_mcp.store import RelationStoreProtocol, graph_stats_for
 from nesy_reasoning_mcp.tool_common import (
     _contradiction_trace,
@@ -128,35 +132,9 @@ def _relations_after_assert(
     records: list[RelationRecord],
     mode: str,
 ) -> list[RelationRecord]:
-    if mode == "append":
-        return [*current, *records]
-    if mode == "replace_same_pair":
-        replace_keys = {
-            (record.canonical_source, record.canonical_target, record.context_id, record.store_id)
-            for record in records
-        }
-        return [
-            relation
-            for relation in current
-            if (
-                relation.canonical_source,
-                relation.canonical_target,
-                relation.context_id,
-                relation.store_id,
-            )
-            not in replace_keys
-        ] + records
-    if mode == "upsert":
-        relations = list(current)
-        positions = {relation.id: index for index, relation in enumerate(relations)}
-        for record in records:
-            if record.id in positions:
-                relations[positions[record.id]] = record
-            else:
-                positions[record.id] = len(relations)
-                relations.append(record)
-        return relations
-    raise ValueError(f"unsupported assert mode: {mode}")
+    """Build the effective relation view; update counts are owned by the store."""
+    relations, _updated = _apply_assert_relations_mode(current, records, mode)
+    return relations
 
 
 def _equivalent_normalization(
