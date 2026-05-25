@@ -2,8 +2,9 @@
 
 This document defines automated candidate relation ingestion. The current
 implementation includes a live-capable OpenAI Agents SDK dry-run prototype and
-an explicit safe write mode, plus a pre-write MCP validation helper. It does not
-add a crawler or search layer.
+an explicit safe write mode, plus a pre-write MCP validation helper. It also
+supports explicit bounded Exa search retrieval for evidence. It does not add a
+crawler or embedding/vector retrieval layer.
 
 ## Boundary
 
@@ -128,6 +129,36 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
   --task "Extract only evidence-backed sufficient or necessary relations"
 ```
 
+You may explicitly retrieve bounded search evidence through Exa. Search never
+runs unless `--search-query` is provided:
+
+```bash
+EXA_API_KEY=... OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp \
+  ingest agent-dry-run \
+  --search-query "A requires B evidence" \
+  --search-limit 5 \
+  --search-include-domain example.com \
+  --search-exclude-domain docs.example.com \
+  --task "Extract only evidence-backed sufficient or necessary relations" \
+  --format json
+```
+
+The search provider is `exa` in this slice and is called with
+`POST https://api.exa.ai/search` using the `x-api-key` header. The key is read
+from `EXA_API_KEY` by default, or from the env var named by
+`--search-api-key-env`. Key values are not written to reports or logs.
+
+Search results are converted into `EvidenceRecord` items with source URL, title,
+bounded excerpt span, provider metadata, and retrieval timestamp. Include and
+exclude domain filters are sent to Exa and enforced locally before any result
+enters ingestion; exclude rules win over include rules. Local, private,
+loopback, and reserved result URLs are rejected with diagnostics.
+
+Search failures return an `IngestionReport` with diagnostics and
+`metadata.search_retrieval`; the Agent SDK runtime is not called and graph
+memory is not written. If all search results are filtered and no other evidence
+exists, the command returns a diagnostic report instead of running extraction.
+
 The script wrapper calls the same implementation:
 
 ```bash
@@ -222,7 +253,8 @@ JSON input accepts:
 URL support is intentionally narrow: only explicit public `http` and `https`
 URLs are fetched, each with timeout and max-byte limits. Local URLs such as
 `file://`, `localhost`, and loopback/private IPs are rejected. The command does
-not search, crawl links, build embeddings, or write durable graph memory.
+not search unless `--search-query` is explicit. It does not crawl links, build
+embeddings, or write durable graph memory by default.
 
 The prototype runs extractor and reviewer agents, aggregates reviewer votes
 when needed, then runs the deterministic dry-run gate through NeSy read-only
@@ -296,6 +328,6 @@ correlation, or weak wording such as "may", "can", or "helps" was upgraded into
 
 ## Next PRs
 
-The next implementation slices can add multi-reviewer voting, Claude-specific
-adapters, retrieval/crawler sources, or richer backend validation after model,
-tracing, retry, and gating behavior are validated.
+The next implementation slices can add Claude-specific adapters, crawler
+sources, GraphRAG/vector retrieval, scheduling, or richer backend validation
+after model, tracing, retry, and gating behavior are validated.

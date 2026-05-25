@@ -128,6 +128,12 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     assert "--reviewer-model" in completed.stdout
     assert "--voting-policy" in completed.stdout
     assert "--high-priority-reviewer-model" in completed.stdout
+    assert "--search-query" in completed.stdout
+    assert "--search-provider" in completed.stdout
+    assert "--search-limit" in completed.stdout
+    assert "--search-include-domain" in completed.stdout
+    assert "--search-exclude-domain" in completed.stdout
+    assert "--search-api-key-env" in completed.stdout
     assert completed.stderr == ""
 
 
