@@ -262,6 +262,35 @@ DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-ru
   --format json
 ```
 
+Use Flash by selecting the model under the same provider:
+
+```bash
+DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --provider deepseek \
+  --model deepseek-v4-flash \
+  --format json
+```
+
+The `deepseek` shortcut defaults to `deepseek-v4-pro` and uses DeepSeek JSON
+Output rather than OpenAI JSON Schema structured output. The runtime sends
+`response_format={"type":"json_object"}`, includes JSON schema guidance in the
+prompt, and enables DeepSeek thinking with `reasoning_effort="high"` and
+`extra_body={"thinking":{"type":"enabled"}}`. API failures, empty JSON content,
+or schema validation errors stop before deterministic gate/write, so graph
+memory is not mutated.
+
+DeepSeek thinking defaults can be overridden explicitly when needed:
+
+```bash
+DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --provider deepseek \
+  --provider-thinking disabled \
+  --provider-reasoning-effort max \
+  --format json
+```
+
 ```bash
 MOONSHOT_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --input examples/research-evidence.json \
@@ -296,10 +325,12 @@ DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-ru
 
 When `--provider` or `--base-url` is set, tracing is disabled by default for
 that run because third-party provider calls should not be sent to OpenAI
-tracing. The runtime uses `OpenAIChatCompletionsModel` with an `AsyncOpenAI`
-client. Provider metadata in the report intentionally omits API-key environment
-names and base URLs. LiteLLM, Ollama, and Claude Agent SDK adapters are separate
-future work.
+tracing. Most provider shortcuts use `OpenAIChatCompletionsModel` with an
+`AsyncOpenAI` client; DeepSeek uses a direct Chat Completions JSON Object path
+because its API currently supports `text` and `json_object` response formats,
+not OpenAI JSON Schema response formats. Provider metadata in the report
+intentionally omits API-key environment names and base URLs. LiteLLM, Ollama,
+and Claude Agent SDK adapters are separate future work.
 
 JSON input accepts:
 

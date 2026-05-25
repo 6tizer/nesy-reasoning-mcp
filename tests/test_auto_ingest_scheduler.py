@@ -123,6 +123,61 @@ def test_scheduled_write_requires_multi_reviewer_by_default(tmp_path: Path) -> N
         ingest_cli._scheduled_job_from_args(args)
 
 
+def test_scheduled_provider_thinking_overrides_round_trip(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        name="deepseek job",
+        cron="*/30 * * * *",
+        timezone="UTC",
+        input=None,
+        url=["https://example.com/source"],
+        retrieval_input=None,
+        task=None,
+        question=None,
+        timeout_seconds=3.0,
+        max_url_bytes=1000,
+        search_queries=[],
+        search_provider="exa",
+        search_limit=5,
+        search_timeout_seconds=3.0,
+        search_include_domains=[],
+        search_exclude_domains=[],
+        search_api_key_env="EXA_API_KEY",
+        crawl=False,
+        crawl_max_depth=1,
+        crawl_max_pages=10,
+        crawl_max_page_bytes=1000,
+        crawl_max_total_bytes=5000,
+        crawl_timeout_seconds=3.0,
+        crawl_allow_domains=[],
+        model=None,
+        provider="deepseek",
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking="disabled",
+        provider_reasoning_effort="max",
+        disable_tracing=False,
+        reviewer_models=[],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=[],
+        auto_write=False,
+        allow_scheduled_writes=False,
+        allow_single_reviewer_write=False,
+        min_write_confidence=0.85,
+        report_dir=str(tmp_path / "reports"),
+        max_retries=0,
+        retry_backoff_seconds=60,
+    )
+
+    job = ingest_cli._scheduled_job_from_args(args)
+    round_tripped = ingest_cli._scheduled_job_args(job)
+
+    assert job.provider_config.provider_thinking == "disabled"
+    assert job.provider_config.provider_reasoning_effort == "max"
+    assert round_tripped.provider_thinking == "disabled"
+    assert round_tripped.provider_reasoning_effort == "max"
+
+
 async def test_scheduled_dry_run_writes_report_without_graph_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

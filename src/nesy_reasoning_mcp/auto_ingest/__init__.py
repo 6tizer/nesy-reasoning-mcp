@@ -19,6 +19,7 @@ from nesy_reasoning_mcp.auto_ingest.policy import (
 from nesy_reasoning_mcp.auto_ingest.providers import (
     PROVIDER_REGISTRY,
     ProviderRegistryEntry,
+    ProviderStructuredOutputMode,
     get_provider_entry,
     list_provider_entries,
 )
@@ -79,6 +80,7 @@ __all__ = [
     "ListReviewQueueInput",
     "PROVIDER_REGISTRY",
     "ProviderRegistryEntry",
+    "ProviderStructuredOutputMode",
     "ReviewDecision",
     "ReviewDecisionBatch",
     "ReviewDecisionValue",
