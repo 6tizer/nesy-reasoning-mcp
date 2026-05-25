@@ -150,11 +150,14 @@ jobs:
                       await session.initialize()
                       tools = await session.list_tools()
                       tool_names = [tool.name for tool in tools.tools]
-                      assert len(tool_names) == 13
+                      assert len(tool_names) == 16
                       assert "nesy.summarize_graph" in tool_names
                       assert "nesy.counterfactual" in tool_names
                       assert "nesy.reason_over_relations" in tool_names
                       assert "nesy.validate_candidate_relations" in tool_names
+                      assert "nesy.list_review_queue" in tool_names
+                      assert "nesy.commit_reviewed_relations" in tool_names
+                      assert "nesy.resolve_review_queue" in tool_names
                       await session.call_tool(
                           "nesy.assert_exclusive",
                           {
@@ -343,9 +346,12 @@ jobs:
                           await session.initialize()
                           tools = await session.list_tools()
                           tool_names = [tool.name for tool in tools.tools]
-                          assert len(tool_names) == 13
+                          assert len(tool_names) == 16
                           assert "nesy.reason_over_relations" in tool_names
                           assert "nesy.validate_candidate_relations" in tool_names
+                          assert "nesy.list_review_queue" in tool_names
+                          assert "nesy.commit_reviewed_relations" in tool_names
+                          assert "nesy.resolve_review_queue" in tool_names
                           await session.call_tool(
                               "nesy.assert_relations",
                               {
