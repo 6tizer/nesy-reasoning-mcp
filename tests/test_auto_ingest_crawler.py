@@ -122,6 +122,39 @@ def test_crawler_deduplicates_urls_without_fragments(
     assert [diagnostic.code for diagnostic in result.diagnostics].count("CRAWL_URL_DUPLICATE") == 2
 
 
+def test_crawler_deduplicates_trailing_slash_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(crawler, "validate_public_http_url", _fake_validate)
+    fetched: list[str] = []
+    pages = {
+        "https://example.com/index": _page(
+            "https://example.com/index",
+            "<a href='/child'>plain</a><a href='/child/'>slash</a>",
+        ),
+        "https://example.com/child": _page(
+            "https://example.com/child",
+            "<p>Child text.</p>",
+        ),
+    }
+
+    def fetch(url: str, timeout_seconds: float, max_bytes: int) -> FetchedUrlPage:
+        fetched.append(url)
+        return pages[url]
+
+    result = crawl_url_evidence(
+        CrawlOptions(seed_urls=["https://example.com/index"], max_depth=1),
+        fetch_page=fetch,
+    )
+
+    assert fetched == ["https://example.com/index", "https://example.com/child"]
+    assert [record.url for record in result.evidence] == [
+        "https://example.com/index",
+        "https://example.com/child",
+    ]
+    assert any(diagnostic.code == "CRAWL_URL_DUPLICATE" for diagnostic in result.diagnostics)
+
+
 def test_crawler_deduplicates_redirect_final_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,6 +213,39 @@ def test_crawler_enforces_same_host_and_allow_domains(
         "https://sub.allowed.com/page",
     ]
     assert any(diagnostic.code == "CRAWL_URL_FILTERED" for diagnostic in result.diagnostics)
+
+
+def test_crawler_resolves_links_against_first_base_href(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(crawler, "validate_public_http_url", _fake_validate)
+    pages = {
+        "https://example.com/index": _page(
+            "https://example.com/index",
+            "<html><head><base href='https://docs.example.com/root/'>"
+            "<base href='https://ignored.example.com/'></head>"
+            "<body><a href='guide'>guide</a><p>Seed text.</p></body></html>",
+        ),
+        "https://docs.example.com/root/guide": _page(
+            "https://docs.example.com/root/guide",
+            "<p>Guide text.</p>",
+        ),
+    }
+
+    result = crawl_url_evidence(
+        CrawlOptions(
+            seed_urls=["https://example.com/index"],
+            max_depth=1,
+            allow_domains=["docs.example.com"],
+        ),
+        fetch_page=_mapping_fetcher(pages),
+    )
+
+    assert [record.url for record in result.evidence] == [
+        "https://example.com/index",
+        "https://docs.example.com/root/guide",
+    ]
+    assert result.evidence[1].metadata["parent_url"] == "https://example.com/index"
 
 
 def test_crawler_depth_page_and_total_byte_limits(

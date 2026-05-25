@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from ipaddress import ip_address
 from socket import getaddrinfo
 from typing import Any
@@ -11,6 +10,7 @@ from urllib import request
 from urllib.parse import urlparse
 
 from nesy_reasoning_mcp.auto_ingest.schemas import EvidenceRecord
+from nesy_reasoning_mcp.time_utils import utc_now_iso
 
 DEFAULT_FETCH_TIMEOUT_SECONDS = 10.0
 DEFAULT_MAX_FETCH_BYTES = 200_000
@@ -50,7 +50,7 @@ def fetch_url_evidence(
         url=page.requested_url,
         span=page.text,
         source_type="url",
-        retrieved_at=datetime.now(UTC).isoformat(),
+        retrieved_at=utc_now_iso(),
         metadata={
             "content_type": page.content_type,
             "bytes_read": len(page.body),

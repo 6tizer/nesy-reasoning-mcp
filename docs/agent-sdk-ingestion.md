@@ -144,8 +144,11 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
 ```
 
 Crawler limits are bounded by depth, page count, bytes per page, total bytes,
-and per-page timeout. Seed pages are included at depth 0. Discovered links are
-deduplicated, fragments are ignored for duplicate detection, and traversal is
+and per-page timeout. Seed pages are included at depth 0, and
+`--crawl-max-depth 0` fetches only seed pages. When `--crawl` is set, crawled
+URL evidence replaces separate one-shot URL fetches for the same seeds to avoid
+duplicate requests. Discovered links are deduplicated, fragments and non-root
+trailing slashes are ignored for duplicate detection, and traversal is
 restricted to seed hosts unless `--crawl-allow-domain` is provided. Redirects
 and discovered links use the same public HTTP(S), DNS, localhost, and
 private-address protections as explicit URL fetching.

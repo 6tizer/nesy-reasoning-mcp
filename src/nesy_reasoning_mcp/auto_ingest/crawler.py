@@ -6,7 +6,6 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -19,6 +18,10 @@ from nesy_reasoning_mcp.auto_ingest.fetcher import (
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import EvidenceRecord
 from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
+from nesy_reasoning_mcp.auto_ingest.url_safety import (
+    host_matches_domain,
+    normalize_domain_filters,
+)
 from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.time_utils import utc_now_iso
 
@@ -48,7 +51,7 @@ class CrawlOptions:
     def __post_init__(self) -> None:
         normalized = {
             "seed_urls": dedupe_non_empty_text(self.seed_urls),
-            "allow_domains": _normalize_domain_filters(self.allow_domains or []),
+            "allow_domains": normalize_domain_filters(self.allow_domains or []),
         }
         if not normalized["seed_urls"]:
             raise ValueError("crawl seed URLs must not be empty")
@@ -341,16 +344,24 @@ class _EvidenceHTMLParser(HTMLParser):
     def __init__(self, base_url: str) -> None:
         super().__init__(convert_charrefs=True)
         self.base_url = base_url
+        self.link_base_url = base_url
         self.title_parts: list[str] = []
         self.text_parts: list[str] = []
         self.links: list[str] = []
         self._in_title = False
         self._skip_depth = 0
+        self._base_seen = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized = tag.lower()
         if normalized in {"script", "style", "noscript"}:
             self._skip_depth += 1
+            return
+        if normalized == "base" and not self._base_seen:
+            href = dict(attrs).get("href")
+            if href:
+                self.link_base_url = urljoin(self.base_url, href)
+            self._base_seen = True
             return
         if normalized == "title":
             self._in_title = True
@@ -358,7 +369,7 @@ class _EvidenceHTMLParser(HTMLParser):
         if normalized == "a":
             href = dict(attrs).get("href")
             if href:
-                self.links.append(urljoin(self.base_url, href))
+                self.links.append(urljoin(self.link_base_url, href))
         if normalized in {"br", "p", "div", "section", "article", "li", "tr", "h1", "h2", "h3"}:
             self.text_parts.append("\n")
 
@@ -411,29 +422,7 @@ def _url_allowed(url: str, *, seed_hosts: set[str], allow_domains: list[str]) ->
     host = (urlparse(url).hostname or "").lower().rstrip(".")
     if host in seed_hosts:
         return True
-    return any(_host_matches_domain(host, domain) for domain in allow_domains)
-
-
-def _host_matches_domain(host: str, domain: str) -> bool:
-    return host == domain or host.endswith(f".{domain}")
-
-
-def _normalize_domain_filters(values: list[str]) -> list[str]:
-    domains: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        stripped = value.strip().lower().rstrip(".")
-        parsed = urlparse(stripped if "://" in stripped else f"//{stripped}")
-        host = (parsed.hostname or "").lower().rstrip(".")
-        if not host:
-            raise ValueError("crawl allow domains must not contain empty values")
-        if _is_local_literal(host):
-            raise ValueError("local crawl allow domains are not supported")
-        if host in seen:
-            continue
-        domains.append(host)
-        seen.add(host)
-    return domains
+    return any(host_matches_domain(host, domain) for domain in allow_domains)
 
 
 def _canonical_url(url: str) -> str:
@@ -441,20 +430,6 @@ def _canonical_url(url: str) -> str:
     scheme = parsed.scheme.lower()
     netloc = parsed.netloc.lower()
     path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
     return urlunparse((scheme, netloc, path, "", parsed.query, ""))
-
-
-def _is_local_literal(value: str) -> bool:
-    if value == "localhost" or value.endswith(".localhost") or value.endswith(".local"):
-        return True
-    try:
-        address = ip_address(value)
-    except ValueError:
-        return False
-    return (
-        address.is_loopback
-        or address.is_private
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-    )

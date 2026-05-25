@@ -7,7 +7,6 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from ipaddress import ip_address
 from typing import Any
 from urllib import error, request
 from urllib.parse import urlparse
@@ -15,6 +14,10 @@ from urllib.parse import urlparse
 from nesy_reasoning_mcp.auto_ingest.fetcher import validate_public_http_url
 from nesy_reasoning_mcp.auto_ingest.schemas import EvidenceRecord
 from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
+from nesy_reasoning_mcp.auto_ingest.url_safety import (
+    host_matches_domain,
+    normalize_domain_filters,
+)
 from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.time_utils import utc_now_iso
 
@@ -54,8 +57,8 @@ class SearchRetrievalOptions:
         normalized = {
             "queries": dedupe_non_empty_text(self.queries),
             "provider": SearchProviderName(self.provider),
-            "include_domains": _normalize_domain_filters(self.include_domains or []),
-            "exclude_domains": _normalize_domain_filters(self.exclude_domains or []),
+            "include_domains": normalize_domain_filters(self.include_domains or []),
+            "exclude_domains": normalize_domain_filters(self.exclude_domains or []),
             "api_key_env": self.api_key_env.strip(),
         }
         if not normalized["queries"]:
@@ -365,58 +368,11 @@ def _domain_allowed(
     exclude_domains: list[str],
 ) -> tuple[bool, str]:
     host = (urlparse(url).hostname or "").lower().rstrip(".")
-    if any(_host_matches_domain(host, domain) for domain in exclude_domains):
+    if any(host_matches_domain(host, domain) for domain in exclude_domains):
         return False, "search result blocked by excluded domain"
-    if include_domains and not any(
-        _host_matches_domain(host, domain) for domain in include_domains
-    ):
+    if include_domains and not any(host_matches_domain(host, domain) for domain in include_domains):
         return False, "search result not in included domains"
     return True, ""
-
-
-def _host_matches_domain(host: str, domain: str) -> bool:
-    return host == domain or host.endswith(f".{domain}")
-
-
-def _normalize_domain_filters(values: list[str]) -> list[str]:
-    domains: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        domain = _normalize_domain(value)
-        if domain in seen:
-            continue
-        domains.append(domain)
-        seen.add(domain)
-    return domains
-
-
-def _normalize_domain(value: str) -> str:
-    stripped = value.strip().lower().rstrip(".")
-    if not stripped:
-        raise ValueError("search domain filters must not contain empty values")
-    parsed = urlparse(stripped if "://" in stripped else f"//{stripped}")
-    domain = (parsed.hostname or "").strip().lower().rstrip(".")
-    if not domain:
-        raise ValueError(f"invalid search domain filter: {value}")
-    if _is_local_literal(domain):
-        raise ValueError("local search domain filters are not supported")
-    return domain
-
-
-def _is_local_literal(value: str) -> bool:
-    if value == "localhost" or value.endswith(".localhost") or value.endswith(".local"):
-        return True
-    try:
-        address = ip_address(value)
-    except ValueError:
-        return False
-    return (
-        address.is_loopback
-        or address.is_private
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-    )
 
 
 def _base_metadata(options: SearchRetrievalOptions) -> dict[str, Any]:
