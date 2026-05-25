@@ -6,6 +6,7 @@ from nesy_reasoning_mcp.auto_ingest import (
     ReviewVotingPolicy,
 )
 from nesy_reasoning_mcp.auto_ingest.review_voting import aggregate_review_decisions
+from nesy_reasoning_mcp.schemas import RelationType
 
 
 def _candidate(candidate_id: str = "candidate-1") -> CandidateRelation:
@@ -152,3 +153,53 @@ def test_risk_tiered_honors_high_priority_veto_and_missing_vote() -> None:
     assert rejected.gate_reviews[0].decision == ReviewDecisionValue.REJECT
     assert missing.gate_reviews[0].decision == ReviewDecisionValue.NEEDS_HUMAN
     assert any(review.reviewer_model == "senior" for review in missing.audit_reviews)
+
+
+def test_risk_tiered_queues_high_priority_downgrade() -> None:
+    candidate = _candidate()
+
+    result = aggregate_review_decisions(
+        candidates=[candidate],
+        reviews=[
+            _review(reviewer_model="senior", decision=ReviewDecisionValue.DOWNGRADE),
+            _review(reviewer_model="reviewer-a"),
+            _review(reviewer_model="reviewer-b"),
+        ],
+        high_priority_reviewer_models=["senior"],
+    )
+
+    assert result.gate_reviews[0].decision == ReviewDecisionValue.NEEDS_HUMAN
+    assert "high-priority reviewer concern" in result.gate_reviews[0].reasons[0]
+
+
+def test_positive_aggregate_without_confidence_queues_instead_of_crashing() -> None:
+    candidate = _candidate()
+    first = ReviewDecision.model_construct(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type=RelationType.SUFFICIENT,
+        final_confidence=None,
+        reasons=["corrupt reviewer output"],
+        risk_flags=[],
+        reviewer_model="reviewer-a",
+        metadata={},
+    )
+    second = ReviewDecision.model_construct(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type=RelationType.SUFFICIENT,
+        final_confidence=None,
+        reasons=["corrupt reviewer output"],
+        risk_flags=[],
+        reviewer_model="reviewer-b",
+        metadata={},
+    )
+
+    result = aggregate_review_decisions(
+        candidates=[candidate],
+        reviews=[first, second],
+        policy=ReviewVotingPolicy.MAJORITY,
+    )
+
+    assert result.gate_reviews[0].decision == ReviewDecisionValue.NEEDS_HUMAN
+    assert "missing final relation info" in result.gate_reviews[0].reasons[0]

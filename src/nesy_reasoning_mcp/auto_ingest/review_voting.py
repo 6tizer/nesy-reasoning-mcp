@@ -12,6 +12,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewDecisionValue,
     ReviewVotingPolicy,
 )
+from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.schemas import Diagnostic, RelationType
 
 
@@ -34,8 +35,8 @@ def aggregate_review_decisions(
     expected_reviewer_models: list[str] | None = None,
 ) -> ReviewAggregationResult:
     """Aggregate reviewer decisions while preserving individual audit votes."""
-    high_priority_models = _dedupe_text(high_priority_reviewer_models or [])
-    expected_models = _dedupe_text(expected_reviewer_models or [])
+    high_priority_models = dedupe_non_empty_text(high_priority_reviewer_models or [])
+    expected_models = dedupe_non_empty_text(expected_reviewer_models or [])
     candidate_ids = {candidate.id for candidate in candidates}
     reviews_by_candidate: dict[str, list[ReviewDecision]] = defaultdict(list)
     diagnostics: list[Diagnostic] = []
@@ -242,6 +243,9 @@ def _aggregate_risk_tiered(
     relation_type, selected = _single_majority_relation_type(
         approvals, required=(len(reviews) // 2) + 1
     )
+    # At this point None means there were no high-priority approvals, because
+    # high-priority disagreement and concerns returned above. That safely falls
+    # back to strict majority behavior for normal reviewers.
     if relation_type is not None and (
         high_priority_type is None or relation_type == high_priority_type
     ):
@@ -292,10 +296,17 @@ def _aggregate_review(
         },
     }
     if decision in {ReviewDecisionValue.APPROVE, ReviewDecisionValue.DOWNGRADE}:
-        kwargs["final_relation_type"] = relation_type
-        kwargs["final_confidence"] = min(
+        confidences = [
             review.final_confidence for review in selected if review.final_confidence is not None
-        )
+        ]
+        if relation_type is None or not confidences:
+            kwargs["decision"] = ReviewDecisionValue.NEEDS_HUMAN
+            kwargs["reasons"] = [
+                f"{reason}; aggregate positive decision missing final relation info"
+            ]
+        else:
+            kwargs["final_relation_type"] = relation_type
+            kwargs["final_confidence"] = min(confidences)
     return ReviewDecision(**kwargs)
 
 
@@ -371,7 +382,9 @@ def _missing_reviewer_votes(
     }
     missing_models = [
         model
-        for model in _dedupe_text([*expected_reviewer_models, *high_priority_reviewer_models])
+        for model in dedupe_non_empty_text(
+            [*expected_reviewer_models, *high_priority_reviewer_models]
+        )
         if model not in present_models
     ]
     return [
@@ -396,10 +409,5 @@ def _has_missing_high_priority_vote(
     return any(model not in present_models for model in high_priority_reviewer_models)
 
 
-def _dedupe_text(values: list[str]) -> list[str]:
-    stripped = [value.strip() for value in values]
-    return list(dict.fromkeys(value for value in stripped if value))
-
-
 def _unique_text(values: Any) -> list[str]:
-    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value))
+    return dedupe_non_empty_text(value for value in values if isinstance(value, str))

@@ -22,6 +22,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewDecisionBatch,
     ReviewVotingPolicy,
 )
+from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
@@ -336,8 +337,7 @@ def _reviewer_model_names(
 
 
 def _dedupe_model_names(values: list[str]) -> list[str]:
-    stripped = [value.strip() for value in values]
-    return list(dict.fromkeys(value for value in stripped if value))
+    return dedupe_non_empty_text(values)
 
 
 def _reviewer_agent_name(reviewer_model_name: str | None) -> str:

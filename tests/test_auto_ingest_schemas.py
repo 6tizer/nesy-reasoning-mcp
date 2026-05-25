@@ -180,6 +180,44 @@ def test_queued_records_keep_candidate_diagnostics_without_repeating_all_run_dia
     ]
 
 
+def test_queued_records_keep_first_duplicate_aggregate_review() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+    first_review = ReviewDecision(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.NEEDS_HUMAN,
+        reasons=["first aggregate review"],
+    )
+    second_review = ReviewDecision(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.NEEDS_HUMAN,
+        reasons=["second aggregate review"],
+    )
+    report = IngestionReport(
+        run_id="run-1",
+        candidates=[candidate],
+        gate_results=[GateResult(candidate_id=candidate.id, action=GateAction.QUEUE)],
+        metadata={
+            "review_aggregation": {
+                "aggregate_reviews": [
+                    first_review.model_dump(mode="json"),
+                    second_review.model_dump(mode="json"),
+                ]
+            }
+        },
+    )
+
+    records = queued_records_from_report(report, propositions=[], context_metadata={})
+
+    assert records[0].review is not None
+    assert records[0].review.reasons == ["first aggregate review"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -239,6 +239,7 @@ async def test_openai_agents_dry_run_runs_multiple_reviewers_and_reports_voting(
     assert report.metadata["review_aggregation"]["candidates"][0]["review_count"] == 3
     assert report.gate_results[0].action == "auto_write"
     assert report.approved_relations[0].confidence == 0.88
+    assert report.reviews[0].metadata["reported_reviewer_model"] == "model-reported-by-agent"
 
 
 async def test_openai_compatible_provider_uses_env_key_headers_and_disables_tracing(

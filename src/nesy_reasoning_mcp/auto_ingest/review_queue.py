@@ -73,5 +73,8 @@ def _queue_reviews_by_candidate(report: IngestionReport) -> dict[str, ReviewDeci
             except ValidationError:
                 continue
         if reviews:
-            return {review.candidate_id: review for review in reviews}
+            reviews_by_id: dict[str, ReviewDecision] = {}
+            for review in reviews:
+                reviews_by_id.setdefault(review.candidate_id, review)
+            return reviews_by_id
     return {review.candidate_id: review for review in report.reviews}
