@@ -211,6 +211,20 @@ def test_run_pretooluse_hook_timeout_fails_open(monkeypatch: pytest.MonkeyPatch)
     assert "timed out" in stderr.getvalue()
 
 
+def test_signal_timeout_fallback_runs_without_sigalrm(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = False
+
+    def action() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(hooks, "_supports_signal_timeout", lambda: False)
+
+    hooks._run_with_signal_timeout(action, 0.01)
+
+    assert called is True
+
+
 def test_run_pretooluse_hook_failure_can_fail_closed() -> None:
     stdout = StringIO()
     stderr = StringIO()

@@ -9,7 +9,12 @@ import anyio
 
 from nesy_reasoning_mcp.audit_cli import run_audit_cli
 from nesy_reasoning_mcp.auto_ingest.cli import add_ingest_subparser, run_ingest_cli
-from nesy_reasoning_mcp.evaluation import run_agent_eval_cli, run_eval_cli, run_llm_eval_cli
+from nesy_reasoning_mcp.evaluation import (
+    DEFAULT_EVAL_MODEL,
+    run_agent_eval_cli,
+    run_eval_cli,
+    run_llm_eval_cli,
+)
 from nesy_reasoning_mcp.hooks import run_pretooluse_hook, run_stop_hook
 from nesy_reasoning_mcp.http_server import run_http_server
 from nesy_reasoning_mcp.server import run_stdio_server
@@ -68,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_llm_parser.add_argument(
         "--model",
-        default="gpt-5.2",
+        default=DEFAULT_EVAL_MODEL,
         help="Provider model name.",
     )
     eval_llm_parser.add_argument(
@@ -102,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_agent_parser.add_argument(
         "--model",
-        default="gpt-5.2",
+        default=DEFAULT_EVAL_MODEL,
         help="Provider model name for runner=openai.",
     )
     eval_agent_parser.add_argument(

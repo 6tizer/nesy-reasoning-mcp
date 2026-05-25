@@ -12,7 +12,7 @@ from typing import Any, TextIO
 
 import anyio
 
-from nesy_reasoning_mcp.config import NesyConfig, StorageBackend, load_config
+from nesy_reasoning_mcp.config import NesyConfig, StorageBackend, load_config, parse_env_bool
 from nesy_reasoning_mcp.schemas import ContextFilter
 from nesy_reasoning_mcp.store import RelationStoreProtocol, create_relation_store
 from nesy_reasoning_mcp.tools import CHECK_CONTRADICTIONS, SUMMARIZE_GRAPH, call_tool
@@ -243,6 +243,15 @@ def _run_hook_with_timeout(
 
 
 def _run_with_signal_timeout(action, timeout_seconds: float) -> None:
+    """Run a hook action with Unix SIGALRM timeout when available.
+
+    On platforms without SIGALRM/setitimer, run without a hard timeout rather than
+    using threads that cannot safely stop stdout writes from a stuck hook.
+    """
+    if not _supports_signal_timeout():
+        action()
+        return
+
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def raise_timeout(_signum, _frame) -> None:
@@ -255,6 +264,10 @@ def _run_with_signal_timeout(action, timeout_seconds: float) -> None:
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _supports_signal_timeout() -> bool:
+    return all(hasattr(signal, name) for name in ("SIGALRM", "ITIMER_REAL", "setitimer"))
 
 
 def _handle_hook_failure(
@@ -398,4 +411,4 @@ def _dedupe_terms(values: list[str]) -> list[str]:
 
 
 def _env_bool(value: str) -> bool:
-    return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return parse_env_bool(value)

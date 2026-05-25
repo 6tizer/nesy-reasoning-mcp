@@ -7,7 +7,16 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+
+from nesy_reasoning_mcp.time_utils import parse_datetime_value
 
 MAX_PROPOSITION_LENGTH = 512
 MAX_ASSERT_RELATIONS = 500
@@ -162,7 +171,10 @@ class ExportDestination(StrEnum):
 
 
 class Polarity(StrEnum):
-    """Supported relation polarity values."""
+    """Supported relation polarity values.
+
+    The model is positive-only today; this enum reserves the public field for future semantics.
+    """
 
     POSITIVE = "positive"
 
@@ -188,13 +200,13 @@ class TemporalWindow(BaseModel):
     valid_to: str | None = None
 
     def __eq__(self, other: object) -> bool:
-        """Compare with dicts using the public JSON shape for compatibility."""
+        """Legacy shim: compare with dicts using the public JSON shape."""
         if isinstance(other, dict):
             return self.model_dump(mode="json", exclude_none=True) == other
         return super().__eq__(other)
 
     def get(self, key: str, default: Any = None) -> str | None:
-        """Return a temporal value by key like the legacy dict shape."""
+        """Legacy shim: return a temporal value by key like the old dict shape."""
         value = getattr(self, key, default)
         return value if value is not None else default
 
@@ -283,6 +295,23 @@ class RelationRecord(RelationInput):
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_timestamps(cls, value: Any) -> Any:
+        """Use one timestamp for both generated creation/update defaults."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if data.get("created_at") is None and data.get("updated_at") is None:
+            timestamp = datetime.now(UTC).isoformat()
+            data["created_at"] = timestamp
+            data["updated_at"] = timestamp
+        elif data.get("created_at") is None:
+            data["created_at"] = data["updated_at"]
+        elif data.get("updated_at") is None:
+            data["updated_at"] = data["created_at"]
+        return data
+
     @classmethod
     def from_input(cls, relation: RelationInput) -> RelationRecord:
         """Create a persisted relation record from validated input."""
@@ -320,16 +349,7 @@ class CanonicalImplicationEdge(BaseModel):
 
 
 def _parse_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=UTC)
-        return parsed
-    return None
+    return parse_datetime_value(value)
 
 
 class GraphStats(BaseModel):

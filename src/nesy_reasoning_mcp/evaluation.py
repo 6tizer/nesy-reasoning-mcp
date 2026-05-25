@@ -35,6 +35,7 @@ AgentEvalMode = Literal[
     "full_mcp",
 ]
 OPENAI_LLM_ONLY = "openai_llm_only"
+DEFAULT_EVAL_MODEL = os.environ.get("OPENAI_DEFAULT_MODEL", "gpt-5.2")
 AGENT_EVAL_MODES: tuple[AgentEvalMode, ...] = (
     "no_mcp",
     "tool_descriptions_only",
@@ -176,7 +177,7 @@ async def run_eval_file(path: Path, min_score: float = 1.0) -> dict[str, Any]:
 async def run_llm_eval_file(
     path: Path,
     provider: EvalProvider = "openai",
-    model: str = "gpt-5.2",
+    model: str = DEFAULT_EVAL_MODEL,
     case_ids: list[str] | None = None,
     *,
     env: Mapping[str, str] | None = None,
@@ -198,7 +199,7 @@ async def run_llm_eval_file(
 async def run_agent_eval_file(
     path: Path,
     runner: AgentEvalRunner = "deterministic",
-    model: str = "gpt-5.2",
+    model: str = DEFAULT_EVAL_MODEL,
     modes: list[AgentEvalMode] | None = None,
     case_ids: list[str] | None = None,
     *,
@@ -256,7 +257,7 @@ async def run_llm_fixture(
     *,
     fixture_path: str | None = None,
     provider: EvalProvider = "openai",
-    model: str = "gpt-5.2",
+    model: str = DEFAULT_EVAL_MODEL,
     env: Mapping[str, str] | None = None,
     client_factory: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
@@ -299,7 +300,7 @@ async def run_agent_fixture(
     *,
     fixture_path: str | None = None,
     runner: AgentEvalRunner = "deterministic",
-    model: str = "gpt-5.2",
+    model: str = DEFAULT_EVAL_MODEL,
     modes: tuple[AgentEvalMode, ...] = AGENT_EVAL_MODES,
     env: Mapping[str, str] | None = None,
     client_factory: Callable[[str], Any] | None = None,

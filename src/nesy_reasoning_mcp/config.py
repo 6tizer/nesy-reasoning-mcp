@@ -220,9 +220,14 @@ def _expand_path(path: str) -> Path:
     return Path(path).expanduser()
 
 
-def _env_bool(value: str) -> bool:
+def parse_env_bool(value: str) -> bool:
+    """Parse common truthy environment flag values."""
     normalized = value.strip().casefold()
     return normalized in {"1", "true", "yes", "on"}
+
+
+def _env_bool(value: str) -> bool:
+    return parse_env_bool(value)
 
 
 def _env_csv(value: str) -> list[str]:

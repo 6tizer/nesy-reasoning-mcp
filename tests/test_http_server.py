@@ -5,7 +5,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from nesy_reasoning_mcp.config import HttpConfig, NesyConfig, StorageConfig
-from nesy_reasoning_mcp.http_server import create_http_app
+from nesy_reasoning_mcp.http_server import HttpGuardMiddleware, create_http_app
 from nesy_reasoning_mcp.store import RelationStore, SqliteRelationStore
 
 
@@ -84,6 +84,19 @@ def test_http_rate_limit() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 429
+
+
+def test_http_rate_limit_prunes_expired_clients() -> None:
+    config = _config(rate_limit_per_minute=2)
+    middleware = HttpGuardMiddleware(lambda _scope, _receive, _send: None, config)
+    middleware._hits = {
+        "old": (0.0, 1),
+        "current": (30.0, 1),
+    }
+
+    middleware._prune_rate_hits(61.0)
+
+    assert middleware._hits == {"current": (30.0, 1)}
 
 
 def test_http_with_sqlite_store_allows_concurrent_tool_calls(tmp_path) -> None:

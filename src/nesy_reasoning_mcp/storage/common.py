@@ -125,26 +125,6 @@ def _independence_matches_scope(
     return False
 
 
-def _edge(
-    relation: RelationRecord,
-    antecedent: str,
-    consequent: str,
-    suffix: str,
-) -> CanonicalImplicationEdge:
-    return CanonicalImplicationEdge(
-        edge_id=f"edge_{relation.id}_{suffix}",
-        relation_id=relation.id,
-        antecedent=antecedent,
-        consequent=consequent,
-        source_relation_type=relation.relation_type,
-        confidence=relation.confidence,
-        context_id=relation.context_id,
-        store_id=relation.store_id,
-        assumptions=list(relation.assumptions),
-        temporal=relation.temporal,
-    )
-
-
 def _relation_for_store(record: RelationRecord, store_id: str) -> RelationRecord:
     return record.model_copy(update={"store_id": store_id})
 

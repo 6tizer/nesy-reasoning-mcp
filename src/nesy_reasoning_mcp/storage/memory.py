@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from nesy_reasoning_mcp.config import NesyConfig, load_config
+from nesy_reasoning_mcp.normalization import normalize_relation_edges
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
     ExclusiveGroupInput,
@@ -17,11 +18,9 @@ from nesy_reasoning_mcp.schemas import (
     RelationFilter,
     RelationInput,
     RelationRecord,
-    RelationType,
 )
 from nesy_reasoning_mcp.storage.audit import AuditEntry, _input_hash
 from nesy_reasoning_mcp.storage.common import (
-    _edge,
     _group_for_store,
     _group_matches_scope,
     _independence_for_store,
@@ -228,21 +227,7 @@ class MemoryRelationStore:
         selected = list(self._relations if relations is None else relations)
         edges: list[CanonicalImplicationEdge] = []
         for relation in selected:
-            if relation.relation_type == RelationType.SUFFICIENT:
-                edges.append(
-                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
-                )
-            elif relation.relation_type == RelationType.NECESSARY:
-                edges.append(
-                    _edge(relation, relation.canonical_target, relation.canonical_source, "a")
-                )
-            elif relation.relation_type == RelationType.EQUIVALENT:
-                edges.append(
-                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
-                )
-                edges.append(
-                    _edge(relation, relation.canonical_target, relation.canonical_source, "b")
-                )
+            edges.extend(normalize_relation_edges(relation))
         return edges
 
     def graph_stats(self) -> GraphStats:

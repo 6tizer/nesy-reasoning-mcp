@@ -838,3 +838,47 @@ async def test_assert_relations_reject_overrides_disabled_warning_check() -> Non
     assert result.structuredContent["rejected"] == 1
     assert result.structuredContent["relation_ids"] == []
     assert [relation.target for relation in store.list_relations()] == ["B"]
+
+
+@pytest.mark.asyncio
+async def test_assert_relations_reject_mode_preserves_upsert_update_count() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_keep",
+                    "source": "A",
+                    "target": "B",
+                    "relation_type": "sufficient",
+                }
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+
+    result = await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "id": "rel_keep",
+                    "source": "A",
+                    "target": "C",
+                    "relation_type": "necessary",
+                }
+            ],
+            "mode": "upsert",
+            "on_contradiction": "reject",
+        },
+        store,
+    )
+
+    assert result.structuredContent["status"] == "ok"
+    assert result.structuredContent["added"] == 0
+    assert result.structuredContent["updated"] == 1
+    assert [(relation.id, relation.target) for relation in store.list_relations()] == [
+        ("rel_keep", "C")
+    ]

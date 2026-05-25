@@ -45,6 +45,25 @@ def test_defaults_and_sufficient_edge() -> None:
     assert edges[0].consequent == "B"
 
 
+def test_relation_record_generated_timestamps_match() -> None:
+    record = RelationRecord(source="A", target="B", relation_type=RelationType.SUFFICIENT)
+
+    assert record.created_at == record.updated_at
+
+
+def test_relation_record_explicit_timestamp_is_preserved() -> None:
+    record = RelationRecord(
+        source="A",
+        target="B",
+        relation_type=RelationType.SUFFICIENT,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-02T00:00:00+00:00",
+    )
+
+    assert record.created_at == "2026-01-01T00:00:00+00:00"
+    assert record.updated_at == "2026-01-02T00:00:00+00:00"
+
+
 def test_proposition_record_and_relation_ids_strip_values() -> None:
     proposition = PropositionRecord(
         id=" profit_up ",
@@ -383,6 +402,144 @@ def test_sqlite_list_relations_supports_offset(tmp_path) -> None:
     listed = store.list_relations(limit=2, offset=1)
 
     assert [record.id for record in listed] == ["rel_b", "rel_c"]
+
+
+def test_sqlite_list_relations_filters_in_sql(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_a",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+                context_id="ctx_a",
+                metadata={"domain": "finance"},
+            ),
+            RelationInput(
+                id="rel_b",
+                source="A",
+                target="C",
+                relation_type=RelationType.NECESSARY,
+                context_id="ctx_b",
+                metadata={"domain": "ops"},
+            ),
+        ]
+    )
+    traced: list[str] = []
+    store._conn.set_trace_callback(traced.append)
+
+    listed = store.list_relations(
+        RelationFilter(
+            source="A",
+            relation_type=RelationType.SUFFICIENT,
+            context_id="ctx_a",
+            domain="finance",
+        ),
+        limit=1,
+    )
+
+    select_sql = next(statement for statement in reversed(traced) if "FROM relations" in statement)
+    assert [record.id for record in listed] == ["rel_a"]
+    assert "WHERE source =" in select_sql
+    assert "relation_type =" in select_sql
+    assert "context_id =" in select_sql
+    assert "json_extract(metadata_json" in select_sql
+    assert "LIMIT 1 OFFSET 0" in select_sql
+
+
+def test_sqlite_domain_filter_uses_expression_index(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    plan = store._conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT id FROM relations
+        WHERE json_extract(metadata_json, '$.domain') = ?
+        """,
+        ("finance",),
+    ).fetchall()
+
+    assert any("idx_relations_domain" in row["detail"] for row in plan)
+
+
+def test_sqlite_sync_rejects_unapproved_identifiers(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    try:
+        store._sync_single_key_table(
+            "relations; DROP TABLE relations", "id", [], "desired_relation_ids"
+        )
+    except ValueError as exc:
+        assert "unsupported SQL table" in str(exc)
+    else:
+        raise AssertionError("expected unsafe identifier to be rejected")
+
+
+def test_sqlite_replace_store_differential_sync_deletes_missing_rows_and_cleans_temp(
+    tmp_path,
+) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            ),
+            RelationInput(
+                id="rel_remove",
+                source="C",
+                target="D",
+                relation_type=RelationType.SUFFICIENT,
+            ),
+            RelationInput(
+                id="rel_other_store",
+                source="E",
+                target="F",
+                relation_type=RelationType.SUFFICIENT,
+                store_id="other",
+            ),
+        ]
+    )
+
+    store.import_records(
+        [
+            RelationRecord(
+                id="rel_keep",
+                source="A",
+                target="Updated B",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        [],
+        mode="replace_store",
+        store_id="default",
+    )
+
+    listed = store.list_relations()
+    temp_tables = store._conn.execute(
+        "SELECT name FROM sqlite_temp_master WHERE type = 'table'"
+    ).fetchall()
+
+    assert sorted((relation.id, relation.target, relation.store_id) for relation in listed) == [
+        ("rel_keep", "Updated B", "default"),
+        ("rel_other_store", "F", "other"),
+    ]
+    assert temp_tables == []
 
 
 def test_sqlite_store_allows_concurrent_assert_and_list(tmp_path) -> None:
