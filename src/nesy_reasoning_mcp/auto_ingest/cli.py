@@ -31,10 +31,24 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     IngestionInput,
+    IngestionMode,
     IngestionReport,
     ReviewVotingPolicy,
 )
+from nesy_reasoning_mcp.auto_ingest.search import (
+    DEFAULT_SEARCH_API_KEY_ENV,
+    DEFAULT_SEARCH_LIMIT,
+    DEFAULT_SEARCH_PROVIDER,
+    DEFAULT_SEARCH_TIMEOUT_SECONDS,
+    MAX_SEARCH_LIMIT,
+    MAX_SEARCH_TIMEOUT_SECONDS,
+    SearchProviderName,
+    SearchRetrievalOptions,
+    SearchRetrievalResult,
+    retrieve_search_evidence,
+)
 from nesy_reasoning_mcp.config import load_config
+from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.store import create_relation_store
 from nesy_reasoning_mcp.tool_names import (
     COMMIT_REVIEWED_RELATIONS,
@@ -148,6 +162,50 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MAX_FETCH_BYTES,
         help="Maximum bytes to read from each URL.",
     )
+    parser.add_argument(
+        "--search-query",
+        action="append",
+        default=[],
+        dest="search_queries",
+        help="Explicit search query for retrieval evidence. May be repeated.",
+    )
+    parser.add_argument(
+        "--search-provider",
+        choices=[provider.value for provider in SearchProviderName],
+        default=DEFAULT_SEARCH_PROVIDER,
+        help="Search provider for explicit retrieval queries.",
+    )
+    parser.add_argument(
+        "--search-limit",
+        type=int,
+        default=DEFAULT_SEARCH_LIMIT,
+        help=f"Maximum search results per query, 1-{MAX_SEARCH_LIMIT}.",
+    )
+    parser.add_argument(
+        "--search-timeout-seconds",
+        type=float,
+        default=DEFAULT_SEARCH_TIMEOUT_SECONDS,
+        help=f"Per-search timeout, max {MAX_SEARCH_TIMEOUT_SECONDS} seconds.",
+    )
+    parser.add_argument(
+        "--search-include-domain",
+        action="append",
+        default=[],
+        dest="search_include_domains",
+        help="Search result domain allowlist entry. May be repeated.",
+    )
+    parser.add_argument(
+        "--search-exclude-domain",
+        action="append",
+        default=[],
+        dest="search_exclude_domains",
+        help="Search result domain blocklist entry. May be repeated.",
+    )
+    parser.add_argument(
+        "--search-api-key-env",
+        default=DEFAULT_SEARCH_API_KEY_ENV,
+        help="Environment variable containing the search provider API key.",
+    )
 
 
 def add_review_queue_arguments(parser: argparse.ArgumentParser) -> None:
@@ -251,21 +309,44 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
             f"provider '{provider_entry.name}' requires --model or OPENAI_DEFAULT_MODEL"
         )
     ingestion_input = _load_ingestion_input(args)
-    if not ingestion_input.evidence and not ingestion_input.urls:
-        raise ValueError("agent-dry-run requires --input evidence or at least one --url")
+    search_result = _search_result_from_args(args)
+    if not ingestion_input.evidence and not ingestion_input.urls and search_result is None:
+        raise ValueError(
+            "agent-dry-run requires --input evidence, at least one --url, or --search-query"
+        )
+    if search_result is not None and search_result.has_errors:
+        return _diagnostic_report_from_search(args, ingestion_input, search_result)
 
     fetched = fetch_url_evidence_many(
         ingestion_input.urls,
         timeout_seconds=args.timeout_seconds,
         max_bytes=args.max_url_bytes,
     )
+    search_evidence = search_result.evidence if search_result is not None else []
+    search_diagnostics = search_result.diagnostics if search_result is not None else []
+    evidence = [*ingestion_input.evidence, *fetched, *search_evidence]
+    if not evidence:
+        diagnostics = [
+            *search_diagnostics,
+            Diagnostic(
+                level="error",
+                code="INGESTION_EVIDENCE_MISSING",
+                message="agent-dry-run requires evidence after URL fetch and search retrieval",
+            ),
+        ]
+        return _diagnostic_report_from_search(
+            args,
+            ingestion_input,
+            search_result,
+            diagnostics=diagnostics,
+        )
     effective_input = ingestion_input.model_copy(
         update={
-            "evidence": [*ingestion_input.evidence, *fetched],
+            "evidence": evidence,
         }
     )
     store = create_relation_store(load_config())
-    return await run_openai_agents_ingestion(
+    report = await run_openai_agents_ingestion(
         effective_input,
         store=store,
         model=model,
@@ -278,6 +359,63 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         min_write_confidence=args.min_write_confidence,
         provider_config=provider_config,
         disable_tracing=bool(getattr(args, "disable_tracing", False)),
+    )
+    if search_result is None:
+        return report
+    return report.model_copy(
+        update={
+            "diagnostics": [*search_diagnostics, *report.diagnostics],
+            "metadata": {
+                **report.metadata,
+                "search_retrieval": search_result.metadata,
+            },
+        }
+    )
+
+
+def _search_result_from_args(args: argparse.Namespace) -> SearchRetrievalResult | None:
+    queries = getattr(args, "search_queries", []) or []
+    if not queries:
+        return None
+    options = SearchRetrievalOptions(
+        queries=queries,
+        provider=SearchProviderName(getattr(args, "search_provider", DEFAULT_SEARCH_PROVIDER)),
+        limit=getattr(args, "search_limit", DEFAULT_SEARCH_LIMIT),
+        timeout_seconds=getattr(
+            args,
+            "search_timeout_seconds",
+            DEFAULT_SEARCH_TIMEOUT_SECONDS,
+        ),
+        include_domains=getattr(args, "search_include_domains", []) or [],
+        exclude_domains=getattr(args, "search_exclude_domains", []) or [],
+        api_key_env=getattr(args, "search_api_key_env", DEFAULT_SEARCH_API_KEY_ENV),
+    )
+    return retrieve_search_evidence(options)
+
+
+def _diagnostic_report_from_search(
+    args: argparse.Namespace,
+    ingestion_input: IngestionInput,
+    search_result: SearchRetrievalResult | None,
+    *,
+    diagnostics: list[Diagnostic] | None = None,
+) -> IngestionReport:
+    return IngestionReport(
+        mode=IngestionMode.WRITE if getattr(args, "auto_write", False) else IngestionMode.DRY_RUN,
+        diagnostics=diagnostics
+        if diagnostics is not None
+        else search_result.diagnostics
+        if search_result is not None
+        else [],
+        metadata={
+            "task": ingestion_input.task,
+            "question": ingestion_input.question,
+            "input_metadata": ingestion_input.metadata,
+            "evidence_count": len(ingestion_input.evidence),
+            "url_count": len(ingestion_input.urls),
+            "auto_write_requested": bool(getattr(args, "auto_write", False)),
+            "search_retrieval": search_result.metadata if search_result is not None else None,
+        },
     )
 
 

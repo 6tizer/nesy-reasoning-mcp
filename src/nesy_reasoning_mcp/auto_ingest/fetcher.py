@@ -22,7 +22,7 @@ def fetch_url_evidence(
     max_bytes: int = DEFAULT_MAX_FETCH_BYTES,
 ) -> EvidenceRecord:
     """Fetch one explicit HTTP(S) URL and return a bounded evidence record."""
-    normalized_url = _validate_url(url)
+    normalized_url = validate_public_http_url(url)
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
     if timeout_seconds <= 0:
@@ -71,6 +71,11 @@ def fetch_url_evidence_many(
         )
         for url in urls
     ]
+
+
+def validate_public_http_url(url: str) -> str:
+    """Validate an explicit public HTTP(S) URL without fetching it."""
+    return _validate_url(url)
 
 
 def _validate_url(url: str) -> str:

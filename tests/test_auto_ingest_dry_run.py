@@ -31,6 +31,7 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
     get_provider_entry,
     list_provider_entries,
 )
+from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.store import RelationStore
 
 
@@ -568,6 +569,189 @@ def test_cli_agent_dry_run_passes_voting_options(
     exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
 
     assert exit_code == 0
+
+
+def test_cli_agent_dry_run_search_query_adds_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    search_record = EvidenceRecord(
+        url="https://search.example/source",
+        title="Search Source",
+        span="Search evidence.",
+        source_type="search",
+        metadata={"provider": "exa"},
+    )
+
+    def fake_search(options: ingest_cli.SearchRetrievalOptions) -> ingest_cli.SearchRetrievalResult:
+        assert options.queries == ["search query"]
+        assert options.limit == 2
+        assert options.include_domains == ["example.com"]
+        return ingest_cli.SearchRetrievalResult(
+            evidence=[search_record],
+            diagnostics=[],
+            metadata={"provider": "exa", "accepted_count": 1},
+        )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert [record.url for record in ingestion_input.evidence] == [
+            "https://example.com/source",
+            "https://search.example/source",
+        ]
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "retrieve_search_evidence", fake_search)
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    stdout = StringIO()
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=["search query"],
+        search_provider="exa",
+        search_limit=2,
+        search_timeout_seconds=3.0,
+        search_include_domains=["example.com"],
+        search_exclude_domains=[],
+        search_api_key_env="EXA_API_KEY",
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=StringIO())
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert payload["metadata"]["search_retrieval"] == {"provider": "exa", "accepted_count": 1}
+
+
+def test_cli_agent_dry_run_search_failure_short_circuits_auto_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    def fake_search(options: ingest_cli.SearchRetrievalOptions) -> ingest_cli.SearchRetrievalResult:
+        return ingest_cli.SearchRetrievalResult(
+            evidence=[],
+            diagnostics=[
+                Diagnostic(
+                    level="error",
+                    code="EXA_SEARCH_REQUEST_FAILED",
+                    message="Exa search request failed: TimeoutError",
+                )
+            ],
+            metadata={"provider": "exa", "diagnostic_count": 1},
+        )
+
+    async def fail_run(*args: Any, **kwargs: Any) -> IngestionReport:
+        raise AssertionError("search failure must not call ingestion runtime")
+
+    monkeypatch.setattr(ingest_cli, "retrieve_search_evidence", fake_search)
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fail_run)
+    stdout = StringIO()
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=["search query"],
+        search_provider="exa",
+        search_limit=2,
+        search_timeout_seconds=3.0,
+        search_include_domains=[],
+        search_exclude_domains=[],
+        search_api_key_env="EXA_API_KEY",
+        auto_write=True,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=StringIO())
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert payload["mode"] == "write"
+    assert payload["written_relation_ids"] == []
+    assert payload["diagnostics"][0]["code"] == "EXA_SEARCH_REQUEST_FAILED"
+    assert payload["metadata"]["auto_write_requested"] is True
+
+
+def test_cli_agent_dry_run_empty_search_results_return_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_search(options: ingest_cli.SearchRetrievalOptions) -> ingest_cli.SearchRetrievalResult:
+        return ingest_cli.SearchRetrievalResult(
+            evidence=[],
+            diagnostics=[
+                Diagnostic(
+                    level="warning",
+                    code="SEARCH_NO_ACCEPTED_RESULTS",
+                    message="no Exa search results accepted for query: search query",
+                )
+            ],
+            metadata={"provider": "exa", "accepted_count": 0},
+        )
+
+    async def fail_run(*args: Any, **kwargs: Any) -> IngestionReport:
+        raise AssertionError("empty evidence must not call ingestion runtime")
+
+    monkeypatch.setattr(ingest_cli, "retrieve_search_evidence", fake_search)
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fail_run)
+    stdout = StringIO()
+    args = argparse.Namespace(
+        input=None,
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=["search query"],
+        search_provider="exa",
+        search_limit=2,
+        search_timeout_seconds=3.0,
+        search_include_domains=[],
+        search_exclude_domains=[],
+        search_api_key_env="EXA_API_KEY",
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=StringIO())
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert [diagnostic["code"] for diagnostic in payload["diagnostics"]] == [
+        "SEARCH_NO_ACCEPTED_RESULTS",
+        "INGESTION_EVIDENCE_MISSING",
+    ]
 
 
 def test_cli_disable_tracing_default_openai_path(
