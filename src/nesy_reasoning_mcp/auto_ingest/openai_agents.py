@@ -60,6 +60,16 @@ class OpenAICompatibleProviderConfig:
         object.__setattr__(self, "extra_body", MappingProxyType(dict(self.extra_body)))
 
 
+@dataclass(frozen=True)
+class ReviewerModelConfig:
+    """Resolved model/provider settings for one reviewer call."""
+
+    reviewer_id: str | None
+    model: str | None
+    provider_name: str | None = None
+    provider_config: OpenAICompatibleProviderConfig | None = None
+
+
 class OpenAIAgentsDryRunError(ValueError):
     """Raised when a live Agent SDK dry-run cannot start safely."""
 
@@ -70,6 +80,7 @@ async def run_openai_agents_dry_run(
     store: RelationStoreProtocol,
     model: str | None = None,
     reviewer_models: list[str] | None = None,
+    reviewer_configs: list[ReviewerModelConfig] | None = None,
     voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED,
     high_priority_reviewer_models: list[str] | None = None,
     env: Mapping[str, str] | None = None,
@@ -84,6 +95,7 @@ async def run_openai_agents_dry_run(
         store=store,
         model=model,
         reviewer_models=reviewer_models,
+        reviewer_configs=reviewer_configs,
         voting_policy=voting_policy,
         high_priority_reviewer_models=high_priority_reviewer_models,
         env=env,
@@ -101,6 +113,7 @@ async def run_openai_agents_ingestion(
     store: RelationStoreProtocol,
     model: str | None = None,
     reviewer_models: list[str] | None = None,
+    reviewer_configs: list[ReviewerModelConfig] | None = None,
     voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED,
     high_priority_reviewer_models: list[str] | None = None,
     env: Mapping[str, str] | None = None,
@@ -117,7 +130,12 @@ async def run_openai_agents_ingestion(
     runtime_env = env if env is not None else os.environ
     base_model_name = model or runtime_env.get("OPENAI_DEFAULT_MODEL")
     voting_policy = ReviewVotingPolicy(voting_policy)
-    reviewer_model_names = _reviewer_model_names(reviewer_models, base_model_name)
+    resolved_reviewers = _reviewer_model_configs(
+        reviewer_models=reviewer_models,
+        reviewer_configs=reviewer_configs,
+        default_model=base_model_name,
+        default_provider_config=provider_config,
+    )
     high_priority_models = _dedupe_model_names(high_priority_reviewer_models or [])
     use_json_object_provider = _uses_json_object_provider(provider_config)
     tracing_disabled = disable_tracing or (
@@ -161,26 +179,30 @@ async def run_openai_agents_ingestion(
         candidate_batch = _coerce_candidate_batch(extraction_output)
 
     reviews: list[ReviewDecision] = []
-    for reviewer_model_name in reviewer_model_names:
-        if use_json_object_provider:
+    for reviewer_config in resolved_reviewers:
+        reviewer_provider_config = reviewer_config.provider_config
+        if _uses_json_object_provider(reviewer_provider_config):
             review_batch = await _run_json_object_completion(
                 run_chat_completion,
-                model=reviewer_model_name,
-                provider_config=provider_config,
+                model=reviewer_config.model,
+                provider_config=reviewer_provider_config,
                 env=runtime_env,
                 instructions=_REVIEWER_INSTRUCTIONS,
                 prompt=_review_prompt(ingestion_input, candidate_batch),
                 output_type=ReviewDecisionBatch,
-                label=_reviewer_agent_name(reviewer_model_name),
+                label=_reviewer_agent_name(reviewer_config.reviewer_id),
             )
         else:
             reviewer_agent_model = (
                 agent_model
-                if reviewer_model_name == base_model_name
-                else _agent_model(reviewer_model_name, provider_config, runtime_env)
+                if (
+                    reviewer_provider_config == provider_config
+                    and reviewer_config.model == base_model_name
+                )
+                else _agent_model(reviewer_config.model, reviewer_provider_config, runtime_env)
             )
             reviewer = _build_agent(
-                name=_reviewer_agent_name(reviewer_model_name),
+                name=_reviewer_agent_name(reviewer_config.reviewer_id),
                 instructions=_REVIEWER_INSTRUCTIONS,
                 output_type=ReviewDecisionBatch,
                 model=reviewer_agent_model,
@@ -192,7 +214,7 @@ async def run_openai_agents_ingestion(
                 tracing_disabled=tracing_disabled,
             )
             review_batch = _coerce_review_batch(review_output)
-        reviews.extend(_reviews_with_model(review_batch.reviews, reviewer_model_name))
+        reviews.extend(_reviews_with_model(review_batch.reviews, reviewer_config.reviewer_id))
 
     aggregation = aggregate_review_decisions(
         candidates=candidate_batch.candidates,
@@ -200,9 +222,9 @@ async def run_openai_agents_ingestion(
         policy=voting_policy,
         high_priority_reviewer_models=high_priority_models,
         expected_reviewer_models=[
-            reviewer_model_name
-            for reviewer_model_name in reviewer_model_names
-            if reviewer_model_name is not None
+            reviewer_config.reviewer_id
+            for reviewer_config in resolved_reviewers
+            if reviewer_config.reviewer_id is not None
         ],
     )
 
@@ -247,6 +269,7 @@ async def run_openai_agents_ingestion(
             },
             "write_result": write_result,
             "provider": _provider_metadata(provider_config, tracing_disabled),
+            "reviewer_providers": _reviewer_provider_metadata(resolved_reviewers),
         },
     )
     if auto_write:
@@ -538,15 +561,69 @@ def _provider_metadata(
     return metadata
 
 
-def _reviewer_model_names(
+def _reviewer_provider_metadata(
+    reviewer_configs: list[ReviewerModelConfig],
+) -> list[dict[str, Any]]:
+    metadata: list[dict[str, Any]] = []
+    for reviewer_config in reviewer_configs:
+        item: dict[str, Any] = {
+            "reviewer_id": reviewer_config.reviewer_id,
+            "model": reviewer_config.model,
+            "provider": reviewer_config.provider_name or "run",
+        }
+        if reviewer_config.provider_config is None:
+            item["type"] = "openai"
+        else:
+            item.update(
+                {
+                    "type": "openai_compatible",
+                    "structured_output_mode": (
+                        reviewer_config.provider_config.structured_output_mode.value
+                    ),
+                    "header_keys": sorted(reviewer_config.provider_config.default_headers),
+                }
+            )
+        metadata.append(item)
+    return metadata
+
+
+def _reviewer_model_configs(
+    *,
     reviewer_models: list[str] | None,
+    reviewer_configs: list[ReviewerModelConfig] | None,
     default_model: str | None,
-) -> list[str | None]:
-    normalized = _dedupe_model_names(reviewer_models or [])
-    if normalized:
-        reviewer_names: list[str | None] = [*normalized]
-        return reviewer_names
-    return [default_model]
+    default_provider_config: OpenAICompatibleProviderConfig | None,
+) -> list[ReviewerModelConfig]:
+    resolved: list[ReviewerModelConfig] = []
+    seen: set[str] = set()
+    for model in _dedupe_model_names(reviewer_models or []):
+        if model in seen:
+            continue
+        seen.add(model)
+        resolved.append(
+            ReviewerModelConfig(
+                reviewer_id=model,
+                model=model,
+                provider_name=None,
+                provider_config=default_provider_config,
+            )
+        )
+    for reviewer_config in reviewer_configs or []:
+        if reviewer_config.reviewer_id is not None and reviewer_config.reviewer_id in seen:
+            continue
+        if reviewer_config.reviewer_id is not None:
+            seen.add(reviewer_config.reviewer_id)
+        resolved.append(reviewer_config)
+    if resolved:
+        return resolved
+    return [
+        ReviewerModelConfig(
+            reviewer_id=default_model,
+            model=default_model,
+            provider_name=None,
+            provider_config=default_provider_config,
+        )
+    ]
 
 
 def _dedupe_model_names(values: list[str]) -> list[str]:

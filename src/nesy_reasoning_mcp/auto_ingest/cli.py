@@ -44,6 +44,7 @@ from nesy_reasoning_mcp.auto_ingest.fetcher import (
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
     OpenAICompatibleProviderConfig,
+    ReviewerModelConfig,
     run_openai_agents_ingestion,
 )
 from nesy_reasoning_mcp.auto_ingest.providers import (
@@ -75,6 +76,7 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     next_state_for_failure,
     next_state_for_skip,
     next_state_for_success,
+    scheduled_reviewer_count,
     scheduled_write_diagnostics,
     write_scheduled_report,
 )
@@ -159,6 +161,13 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Reviewer model override. May be repeated for multi-reviewer voting.",
     )
     parser.add_argument(
+        "--reviewer",
+        action="append",
+        default=[],
+        dest="reviewers",
+        help="Provider-qualified reviewer in PROVIDER:MODEL form. May be repeated.",
+    )
+    parser.add_argument(
         "--voting-policy",
         choices=[policy.value for policy in ReviewVotingPolicy],
         default=ReviewVotingPolicy.RISK_TIERED.value,
@@ -170,6 +179,13 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=[],
         dest="high_priority_reviewer_models",
         help="Reviewer model whose reject or needs_human/downgrade vote has priority.",
+    )
+    parser.add_argument(
+        "--high-priority-reviewer",
+        action="append",
+        default=[],
+        dest="high_priority_reviewers",
+        help="Provider-qualified high-priority reviewer in PROVIDER:MODEL form.",
     )
     parser.add_argument(
         "--provider",
@@ -550,6 +566,8 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     provider_entry = _provider_entry_from_args(args)
     provider_config = _provider_config_from_args(args, provider_entry)
     model = _model_from_args(args, provider_entry)
+    reviewer_configs = _reviewer_configs_from_args(args)
+    high_priority_reviewers = _high_priority_reviewers_from_args(args)
     if provider_entry is not None and model is None and not os.environ.get("OPENAI_DEFAULT_MODEL"):
         raise ValueError(
             f"provider '{provider_entry.name}' requires --model or OPENAI_DEFAULT_MODEL"
@@ -632,10 +650,14 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         store=store,
         model=model,
         reviewer_models=getattr(args, "reviewer_models", []),
+        reviewer_configs=reviewer_configs,
         voting_policy=ReviewVotingPolicy(
             getattr(args, "voting_policy", ReviewVotingPolicy.RISK_TIERED.value)
         ),
-        high_priority_reviewer_models=getattr(args, "high_priority_reviewer_models", []),
+        high_priority_reviewer_models=[
+            *(getattr(args, "high_priority_reviewer_models", []) or []),
+            *high_priority_reviewers,
+        ],
         auto_write=args.auto_write,
         min_write_confidence=args.min_write_confidence,
         provider_config=provider_config,
@@ -1199,9 +1221,12 @@ def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
         provider_reasoning_effort=getattr(args, "provider_reasoning_effort", None),
         disable_tracing=bool(args.disable_tracing),
         reviewer_models=getattr(args, "reviewer_models", []) or [],
+        reviewers=getattr(args, "reviewers", []) or [],
         voting_policy=ReviewVotingPolicy(args.voting_policy),
         high_priority_reviewer_models=getattr(args, "high_priority_reviewer_models", []) or [],
+        high_priority_reviewers=getattr(args, "high_priority_reviewers", []) or [],
     )
+    _validate_provider_reviewer_specs(provider_config)
     write_config = ScheduledIngestionWriteConfig(
         auto_write=bool(args.auto_write),
         allow_scheduled_writes=bool(args.allow_scheduled_writes),
@@ -1244,8 +1269,10 @@ def _scheduled_job_args(job: ScheduledIngestionJob) -> argparse.Namespace:
         question=source.question,
         model=provider.model,
         reviewer_models=list(provider.reviewer_models),
+        reviewers=list(provider.reviewers),
         voting_policy=provider.voting_policy.value,
         high_priority_reviewer_models=list(provider.high_priority_reviewer_models),
+        high_priority_reviewers=list(provider.high_priority_reviewers),
         provider=provider.provider,
         list_providers=False,
         base_url=provider.base_url,
@@ -1319,7 +1346,7 @@ def _scheduled_run_metadata(
         "job_id": job.id,
         "job_name": job.name,
         "auto_write": job.write_config.auto_write,
-        "reviewer_count": len(job.provider_config.reviewer_models),
+        "reviewer_count": scheduled_reviewer_count(job.provider_config),
         "voting_policy": job.provider_config.voting_policy.value,
         "allow_single_reviewer_write": job.write_config.allow_single_reviewer_write,
         "diagnostic_count": len(diagnostics),
@@ -1359,7 +1386,7 @@ def _schedule_job_audit_metadata(job: ScheduledIngestionJob) -> dict[str, Any]:
         "job_id": job.id,
         "status": job.status.value,
         "next_run_at": job.state.next_run_at,
-        "reviewer_count": len(job.provider_config.reviewer_models),
+        "reviewer_count": scheduled_reviewer_count(job.provider_config),
         "voting_policy": job.provider_config.voting_policy.value,
         "allow_single_reviewer_write": job.write_config.allow_single_reviewer_write,
     }
@@ -1567,6 +1594,76 @@ def _provider_config_from_args(
         ),
         extra_body=extra_body,
     )
+
+
+def _provider_config_from_entry(
+    provider_entry: ProviderRegistryEntry,
+) -> OpenAICompatibleProviderConfig:
+    config = _provider_config_from_args(
+        argparse.Namespace(
+            base_url=None,
+            api_key_env=None,
+            provider_header=[],
+            provider_thinking=None,
+            provider_reasoning_effort=None,
+        ),
+        provider_entry,
+    )
+    if config is None:
+        raise ValueError(f"provider '{provider_entry.name}' requires provider configuration")
+    return config
+
+
+def _validate_provider_reviewer_specs(provider_config: ScheduledIngestionProviderConfig) -> None:
+    for spec in [*provider_config.reviewers, *provider_config.high_priority_reviewers]:
+        _parse_provider_reviewer_spec(spec)
+
+
+def _reviewer_configs_from_args(args: argparse.Namespace) -> list[ReviewerModelConfig]:
+    configs: list[ReviewerModelConfig] = []
+    seen: set[str] = set()
+    for spec in getattr(args, "reviewers", []) or []:
+        provider_entry, model, reviewer_id = _parse_provider_reviewer_spec(spec)
+        if reviewer_id in seen:
+            continue
+        seen.add(reviewer_id)
+        configs.append(
+            ReviewerModelConfig(
+                reviewer_id=reviewer_id,
+                model=model,
+                provider_name=provider_entry.name,
+                provider_config=_provider_config_from_entry(provider_entry),
+            )
+        )
+    return configs
+
+
+def _high_priority_reviewers_from_args(args: argparse.Namespace) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for spec in getattr(args, "high_priority_reviewers", []) or []:
+        _provider_entry, _model, reviewer_id = _parse_provider_reviewer_spec(spec)
+        if reviewer_id in seen:
+            continue
+        seen.add(reviewer_id)
+        ids.append(reviewer_id)
+    return ids
+
+
+def _parse_provider_reviewer_spec(
+    spec: str,
+) -> tuple[ProviderRegistryEntry, str, str]:
+    stripped = spec.strip()
+    if ":" not in stripped:
+        raise ValueError("provider-qualified reviewer must use PROVIDER:MODEL")
+    provider_name, model = stripped.split(":", 1)
+    provider_name = provider_name.strip()
+    model = model.strip()
+    if not provider_name or not model:
+        raise ValueError("provider-qualified reviewer must include provider and model")
+    provider_entry = get_provider_entry(provider_name)
+    reviewer_id = f"{provider_entry.name}:{model}"
+    return provider_entry, model, reviewer_id
 
 
 def _provider_entry_from_args(args: argparse.Namespace) -> ProviderRegistryEntry | None:

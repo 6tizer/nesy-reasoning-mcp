@@ -24,6 +24,7 @@ from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
     OpenAICompatibleProviderConfig,
+    ReviewerModelConfig,
     run_openai_agents_dry_run,
 )
 from nesy_reasoning_mcp.auto_ingest.providers import (
@@ -475,6 +476,96 @@ async def test_openrouter_json_object_provider_uses_chat_completions_json_mode(
     }
 
 
+async def test_cross_provider_reviewers_use_their_own_provider_configs() -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    captured_api_key_envs: list[str] = []
+    captured_models: list[str] = []
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        provider_config = kwargs["provider_config"]
+        captured_api_key_envs.append(provider_config.api_key_env)
+        captured_models.append(kwargs["model"])
+        if len(captured_api_key_envs) == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="deepseek-v4-pro",
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        reviewer_configs=[
+            ReviewerModelConfig(
+                reviewer_id="kimi:kimi-k2.6",
+                model="kimi-k2.6",
+                provider_name="kimi",
+                provider_config=OpenAICompatibleProviderConfig(
+                    base_url="https://api.moonshot.cn/v1",
+                    api_key_env="MOONSHOT_API_KEY",
+                    structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                    extra_body={"thinking": {"type": "enabled"}},
+                ),
+            ),
+            ReviewerModelConfig(
+                reviewer_id="openrouter:qwen/qwen3.7-max",
+                model="qwen/qwen3.7-max",
+                provider_name="openrouter",
+                provider_config=OpenAICompatibleProviderConfig(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key_env="OPENROUTER_API_KEY",
+                    structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                ),
+            ),
+        ],
+        high_priority_reviewer_models=["kimi:kimi-k2.6"],
+        env={
+            "DEEPSEEK_API_KEY": "secret",
+            "MOONSHOT_API_KEY": "secret",
+            "OPENROUTER_API_KEY": "secret",
+        },
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert captured_api_key_envs == [
+        "DEEPSEEK_API_KEY",
+        "MOONSHOT_API_KEY",
+        "OPENROUTER_API_KEY",
+    ]
+    assert captured_models == ["deepseek-v4-pro", "kimi-k2.6", "qwen/qwen3.7-max"]
+    assert [review.reviewer_model for review in report.reviews] == [
+        "kimi:kimi-k2.6",
+        "openrouter:qwen/qwen3.7-max",
+    ]
+    assert report.metadata["review_aggregation"]["high_priority_reviewer_models"] == [
+        "kimi:kimi-k2.6"
+    ]
+    assert report.metadata["reviewer_providers"] == [
+        {
+            "reviewer_id": "kimi:kimi-k2.6",
+            "model": "kimi-k2.6",
+            "provider": "kimi",
+            "type": "openai_compatible",
+            "structured_output_mode": "json_object",
+            "header_keys": [],
+        },
+        {
+            "reviewer_id": "openrouter:qwen/qwen3.7-max",
+            "model": "qwen/qwen3.7-max",
+            "provider": "openrouter",
+            "type": "openai_compatible",
+            "structured_output_mode": "json_object",
+            "header_keys": [],
+        },
+    ]
+
+
 async def test_deepseek_json_object_provider_runs_multiple_reviewers() -> None:
     candidate = _candidate()
     captured_models: list[str] = []
@@ -565,6 +656,53 @@ async def test_json_object_provider_rejects_mapping_without_choices_before_write
             auto_write=True,
         )
 
+    assert store.list_relations() == []
+    assert store.list_review_queue() == []
+
+
+async def test_cross_provider_reviewer_failure_happens_before_write_or_queue() -> None:
+    store = RelationStore()
+    candidate = _candidate()
+    calls = 0
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        raise OpenAIAgentsDryRunError("reviewer provider failed")
+
+    with pytest.raises(OpenAIAgentsDryRunError, match="reviewer provider failed"):
+        await openai_agents.run_openai_agents_ingestion(
+            IngestionInput(evidence=[_evidence()]),
+            store=store,
+            model="deepseek-v4-pro",
+            reviewer_configs=[
+                ReviewerModelConfig(
+                    reviewer_id="kimi:kimi-k2.6",
+                    model="kimi-k2.6",
+                    provider_name="kimi",
+                    provider_config=OpenAICompatibleProviderConfig(
+                        base_url="https://api.moonshot.cn/v1",
+                        api_key_env="MOONSHOT_API_KEY",
+                        structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                        extra_body={"thinking": {"type": "enabled"}},
+                    ),
+                )
+            ],
+            env={"DEEPSEEK_API_KEY": "secret", "MOONSHOT_API_KEY": "secret"},
+            provider_config=OpenAICompatibleProviderConfig(
+                base_url="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                reasoning_effort="high",
+                extra_body={"thinking": {"type": "enabled"}},
+            ),
+            run_chat_completion=fake_chat_completion,
+            auto_write=True,
+        )
+
+    assert calls == 2
     assert store.list_relations() == []
     assert store.list_review_queue() == []
 
@@ -858,6 +996,89 @@ def test_cli_agent_dry_run_passes_voting_options(
         reviewer_models=["reviewer-a", "reviewer-b"],
         voting_policy="majority",
         high_priority_reviewer_models=["reviewer-a"],
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_agent_dry_run_passes_provider_qualified_reviewers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == "deepseek-v4-pro"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            disable_tracing=True,
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+        reviewer_configs = kwargs["reviewer_configs"]
+        assert [config.reviewer_id for config in reviewer_configs] == [
+            "kimi:kimi-k2.6",
+            "openrouter:qwen/qwen3.7-max",
+        ]
+        assert [config.model for config in reviewer_configs] == [
+            "kimi-k2.6",
+            "qwen/qwen3.7-max",
+        ]
+        assert [config.provider_name for config in reviewer_configs] == ["kimi", "openrouter"]
+        assert [
+            config.provider_config.api_key_env
+            for config in reviewer_configs
+            if config.provider_config is not None
+        ] == ["MOONSHOT_API_KEY", "OPENROUTER_API_KEY"]
+        assert kwargs["high_priority_reviewer_models"] == [
+            "legacy-senior",
+            "deepseek:deepseek-v4-pro",
+        ]
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        provider="deepseek",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
+        disable_tracing=False,
+        reviewer_models=["legacy-reviewer"],
+        reviewers=["kimi:kimi-k2.6", "openrouter:qwen/qwen3.7-max"],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=["legacy-senior"],
+        high_priority_reviewers=["deepseek:deepseek-v4-pro"],
         auto_write=False,
         min_write_confidence=0.85,
         format="json",
@@ -1680,6 +1901,31 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
     assert "secret" not in rendered.lower()
 
 
+def test_parse_provider_qualified_reviewer_specs() -> None:
+    assert ingest_cli._parse_provider_reviewer_spec("deepseek:deepseek-v4-pro")[1:] == (
+        "deepseek-v4-pro",
+        "deepseek:deepseek-v4-pro",
+    )
+    assert ingest_cli._parse_provider_reviewer_spec("kimi:kimi-k2.6")[1:] == (
+        "kimi-k2.6",
+        "kimi:kimi-k2.6",
+    )
+    assert ingest_cli._parse_provider_reviewer_spec("openrouter:qwen/qwen3.7-max")[1:] == (
+        "qwen/qwen3.7-max",
+        "openrouter:qwen/qwen3.7-max",
+    )
+    assert ingest_cli._parse_provider_reviewer_spec("openrouter:test:model:v1")[1:] == (
+        "test:model:v1",
+        "openrouter:test:model:v1",
+    )
+    with pytest.raises(ValueError, match="PROVIDER:MODEL"):
+        ingest_cli._parse_provider_reviewer_spec("deepseek-v4-pro")
+    with pytest.raises(ValueError, match="provider and model"):
+        ingest_cli._parse_provider_reviewer_spec("deepseek:")
+    with pytest.raises(ValueError, match="unknown provider"):
+        ingest_cli._parse_provider_reviewer_spec("unknown:model")
+
+
 @pytest.mark.parametrize(
     (
         "provider_name",
@@ -2197,6 +2443,9 @@ def test_cli_openrouter_provider_requires_explicit_model(
         ({"provider": "openrouter", "provider_thinking": "disabled"}, "not supported"),
         ({"provider": "openrouter", "provider_reasoning_effort": "high"}, "not supported"),
         ({"provider": "kimi", "provider_reasoning_effort": "max"}, "not supported"),
+        ({"reviewers": ["deepseek-v4-pro"]}, "PROVIDER:MODEL"),
+        ({"reviewers": ["unknown:model"]}, "unknown provider"),
+        ({"high_priority_reviewers": [":model"]}, "provider and model"),
     ],
 )
 def test_cli_rejects_invalid_provider_config(

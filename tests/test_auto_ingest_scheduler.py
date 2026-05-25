@@ -123,6 +123,56 @@ def test_scheduled_write_requires_multi_reviewer_by_default(tmp_path: Path) -> N
         ingest_cli._scheduled_job_from_args(args)
 
 
+def test_scheduled_write_counts_distinct_reviewers(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        name="duplicate reviewer job",
+        cron="*/30 * * * *",
+        timezone="UTC",
+        input=None,
+        url=["https://example.com/source"],
+        retrieval_input=None,
+        task=None,
+        question=None,
+        timeout_seconds=3.0,
+        max_url_bytes=1000,
+        search_queries=[],
+        search_provider="exa",
+        search_limit=5,
+        search_timeout_seconds=3.0,
+        search_include_domains=[],
+        search_exclude_domains=[],
+        search_api_key_env="EXA_API_KEY",
+        crawl=False,
+        crawl_max_depth=1,
+        crawl_max_pages=10,
+        crawl_max_page_bytes=1000,
+        crawl_max_total_bytes=5000,
+        crawl_timeout_seconds=3.0,
+        crawl_allow_domains=[],
+        model=None,
+        provider=None,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        disable_tracing=False,
+        reviewer_models=[],
+        reviewers=["openrouter:qwen/qwen3.7-max", "openrouter:qwen/qwen3.7-max"],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=[],
+        high_priority_reviewers=[],
+        auto_write=True,
+        allow_scheduled_writes=True,
+        allow_single_reviewer_write=False,
+        min_write_confidence=0.85,
+        report_dir=str(tmp_path / "reports"),
+        max_retries=0,
+        retry_backoff_seconds=60,
+    )
+
+    with pytest.raises(ValueError, match="at least two reviewer models"):
+        ingest_cli._scheduled_job_from_args(args)
+
+
 def test_scheduled_provider_thinking_overrides_round_trip(tmp_path: Path) -> None:
     args = argparse.Namespace(
         name="deepseek job",
@@ -176,6 +226,63 @@ def test_scheduled_provider_thinking_overrides_round_trip(tmp_path: Path) -> Non
     assert job.provider_config.provider_reasoning_effort == "max"
     assert round_tripped.provider_thinking == "disabled"
     assert round_tripped.provider_reasoning_effort == "max"
+
+
+def test_scheduled_provider_qualified_reviewers_round_trip(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        name="cross provider job",
+        cron="*/30 * * * *",
+        timezone="UTC",
+        input=None,
+        url=["https://example.com/source"],
+        retrieval_input=None,
+        task=None,
+        question=None,
+        timeout_seconds=3.0,
+        max_url_bytes=1000,
+        search_queries=[],
+        search_provider="exa",
+        search_limit=5,
+        search_timeout_seconds=3.0,
+        search_include_domains=[],
+        search_exclude_domains=[],
+        search_api_key_env="EXA_API_KEY",
+        crawl=False,
+        crawl_max_depth=1,
+        crawl_max_pages=10,
+        crawl_max_page_bytes=1000,
+        crawl_max_total_bytes=5000,
+        crawl_timeout_seconds=3.0,
+        crawl_allow_domains=[],
+        model=None,
+        provider="deepseek",
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
+        disable_tracing=False,
+        reviewer_models=["legacy-reviewer"],
+        reviewers=["kimi:kimi-k2.6", "openrouter:qwen/qwen3.7-max"],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=["legacy-reviewer"],
+        high_priority_reviewers=["deepseek:deepseek-v4-pro"],
+        auto_write=True,
+        allow_scheduled_writes=True,
+        allow_single_reviewer_write=False,
+        min_write_confidence=0.85,
+        report_dir=str(tmp_path / "reports"),
+        max_retries=0,
+        retry_backoff_seconds=60,
+    )
+
+    job = ingest_cli._scheduled_job_from_args(args)
+    round_tripped = ingest_cli._scheduled_job_args(job)
+
+    assert job.provider_config.reviewers == ["kimi:kimi-k2.6", "openrouter:qwen/qwen3.7-max"]
+    assert job.provider_config.high_priority_reviewers == ["deepseek:deepseek-v4-pro"]
+    assert round_tripped.reviewers == ["kimi:kimi-k2.6", "openrouter:qwen/qwen3.7-max"]
+    assert round_tripped.high_priority_reviewers == ["deepseek:deepseek-v4-pro"]
 
 
 async def test_scheduled_dry_run_writes_report_without_graph_write(
