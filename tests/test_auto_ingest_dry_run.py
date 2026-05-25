@@ -28,6 +28,7 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
 )
 from nesy_reasoning_mcp.auto_ingest.providers import (
     PROVIDER_REGISTRY,
+    ProviderStructuredOutputMode,
     get_provider_entry,
     list_provider_entries,
 )
@@ -297,7 +298,159 @@ async def test_openai_compatible_provider_uses_env_key_headers_and_disables_trac
         "type": "openai_compatible",
         "header_keys": ["X-Test"],
         "tracing_disabled": True,
+        "structured_output_mode": "agent_schema",
     }
+
+
+async def test_deepseek_json_object_provider_uses_chat_completions_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    captured: list[dict[str, Any]] = []
+
+    def fail_build_agent(**kwargs: Any) -> None:
+        raise AssertionError("DeepSeek JSON Object mode must bypass AgentOutputSchema")
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        captured.append(kwargs)
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert kwargs["reasoning_effort"] == "high"
+        assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+        assert kwargs["provider_config"].api_key_env == "DEEPSEEK_API_KEY"
+        assert "secret" not in json.dumps(kwargs, default=str)
+        assert "JSON object" in kwargs["messages"][0]["content"]
+        if len(captured) == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fail_build_agent)
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="deepseek-v4-pro",
+        reviewer_models=["deepseek-v4-pro"],
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert [request["model"] for request in captured] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+    ]
+    assert report.candidates == [candidate]
+    assert report.reviews == [review.model_copy(update={"reviewer_model": "deepseek-v4-pro"})]
+    assert report.gate_results[0].action == "auto_write"
+    assert report.metadata["provider"] == {
+        "type": "openai_compatible",
+        "header_keys": [],
+        "tracing_disabled": True,
+        "structured_output_mode": "json_object",
+        "reasoning_effort": "high",
+        "thinking": {"type": "enabled"},
+    }
+
+
+async def test_deepseek_json_object_provider_runs_multiple_reviewers() -> None:
+    candidate = _candidate()
+    captured_models: list[str] = []
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        captured_models.append(kwargs["model"])
+        if len(captured_models) == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        review = ReviewDecision(
+            candidate_id=candidate.id,
+            decision=ReviewDecisionValue.APPROVE,
+            final_relation_type="sufficient",
+            final_confidence=0.9,
+            reasons=[f"{kwargs['model']} approved"],
+        )
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="extractor-model",
+        reviewer_models=["reviewer-a", "reviewer-b"],
+        voting_policy=openai_agents.ReviewVotingPolicy.MAJORITY,
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert captured_models == ["extractor-model", "reviewer-a", "reviewer-b"]
+    assert [review.reviewer_model for review in report.reviews] == ["reviewer-a", "reviewer-b"]
+    assert report.metadata["review_aggregation"]["candidates"][0]["review_count"] == 2
+    assert report.gate_results[0].action == "auto_write"
+
+
+async def test_json_object_provider_failure_happens_before_write() -> None:
+    store = RelationStore()
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        return ""
+
+    with pytest.raises(OpenAIAgentsDryRunError, match="empty JSON Object"):
+        await openai_agents.run_openai_agents_ingestion(
+            IngestionInput(evidence=[_evidence()]),
+            store=store,
+            model="deepseek-v4-pro",
+            env={"DEEPSEEK_API_KEY": "secret"},
+            provider_config=OpenAICompatibleProviderConfig(
+                base_url="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                reasoning_effort="high",
+                extra_body={"thinking": {"type": "enabled"}},
+            ),
+            run_chat_completion=fake_chat_completion,
+            auto_write=True,
+        )
+
+    assert store.list_relations() == []
+    assert store.list_review_queue() == []
+
+
+async def test_json_object_provider_rejects_mapping_without_choices_before_write() -> None:
+    store = RelationStore()
+
+    async def fake_chat_completion(**kwargs: Any) -> dict[str, Any]:
+        return {"id": "response-id", "usage": {"total_tokens": 10}}
+
+    with pytest.raises(OpenAIAgentsDryRunError, match="did not include choices"):
+        await openai_agents.run_openai_agents_ingestion(
+            IngestionInput(evidence=[_evidence()]),
+            store=store,
+            model="deepseek-v4-pro",
+            env={"DEEPSEEK_API_KEY": "secret"},
+            provider_config=OpenAICompatibleProviderConfig(
+                base_url="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                reasoning_effort="high",
+                extra_body={"thinking": {"type": "enabled"}},
+            ),
+            run_chat_completion=fake_chat_completion,
+            auto_write=True,
+        )
+
+    assert store.list_relations() == []
+    assert store.list_review_queue() == []
 
 
 async def test_custom_runner_can_receive_tracing_disabled(
@@ -334,11 +487,15 @@ def test_openai_compatible_provider_config_headers_are_read_only() -> None:
         base_url="https://api.deepseek.com",
         api_key_env="DEEPSEEK_API_KEY",
         default_headers={"X-Test": "yes"},
+        extra_body={"thinking": {"type": "enabled"}},
     )
 
     assert isinstance(config.default_headers, MappingProxyType)
+    assert isinstance(config.extra_body, MappingProxyType)
     with pytest.raises(TypeError):
         config.default_headers["X-Test"] = "no"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        config.extra_body["thinking"] = {"type": "disabled"}  # type: ignore[index]
 
 
 def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
@@ -348,14 +505,32 @@ def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
     assert [entry.name for entry in entries] == ["deepseek", "kimi", "openrouter"]
     assert get_provider_entry("deepseek").base_url == "https://api.deepseek.com"
     assert get_provider_entry("DeepSeek").base_url == "https://api.deepseek.com"
+    assert (
+        get_provider_entry("deepseek").structured_output_mode
+        is ProviderStructuredOutputMode.JSON_OBJECT
+    )
+    assert get_provider_entry("deepseek").reasoning_effort == "high"
+    assert get_provider_entry("deepseek").supported_models == (
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+    )
+    assert get_provider_entry("deepseek").extra_body == {"thinking": {"type": "enabled"}}
+    assert (
+        get_provider_entry("kimi").structured_output_mode
+        is ProviderStructuredOutputMode.AGENT_SCHEMA
+    )
     assert get_provider_entry("kimi").api_key_env == "MOONSHOT_API_KEY"
     assert get_provider_entry("openrouter").default_model is None
     assert get_provider_entry("openrouter").notes
     rendered = ingest_cli._render_provider_list()
-    assert "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url\tnotes" in rendered
+    assert (
+        "provider\tbase_url\tapi_key_env\tdefault_model\tstructured_output_mode"
+        "\tsupported_models\treasoning_effort\tdocs_url\tnotes"
+    ) in rendered
     assert "DEEPSEEK_API_KEY" in rendered
     assert "MOONSHOT_API_KEY" in rendered
     assert "OPENROUTER_API_KEY" in rendered
+    assert "deepseek-v4-pro\tjson_object\tdeepseek-v4-pro,deepseek-v4-flash\thigh" in rendered
     assert "OpenRouter requires an explicit model" in rendered
     assert "secret" not in rendered.lower()
 
@@ -1225,6 +1400,8 @@ def test_cli_disable_tracing_default_openai_path(
         base_url=None,
         api_key_env=None,
         provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
         disable_tracing=True,
         auto_write=False,
         min_write_confidence=0.85,
@@ -1336,6 +1513,8 @@ def test_cli_passes_openai_compatible_provider_config(
         base_url="https://api.deepseek.com",
         api_key_env="DEEPSEEK_API_KEY",
         provider_header=["X-Test=yes"],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
         disable_tracing=False,
         auto_write=False,
         min_write_confidence=0.85,
@@ -1361,18 +1540,49 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
     assert exit_code == 0
     assert stderr.getvalue() == ""
     rendered = stdout.getvalue()
-    assert "deepseek\thttps://api.deepseek.com\tDEEPSEEK_API_KEY\tdeepseek-v4-pro" in rendered
-    assert "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6" in rendered
-    assert "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-" in rendered
+    assert (
+        "deepseek\thttps://api.deepseek.com\tDEEPSEEK_API_KEY\tdeepseek-v4-pro"
+        "\tjson_object\tdeepseek-v4-pro,deepseek-v4-flash\thigh"
+    ) in rendered
+    assert (
+        "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6\tagent_schema\t-\t-"
+    ) in rendered
+    assert (
+        "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-\tagent_schema\t-\t-"
+    ) in rendered
     assert "OpenRouter requires an explicit model" in rendered
     assert "secret" not in rendered.lower()
 
 
 @pytest.mark.parametrize(
-    ("provider_name", "expected_base_url", "expected_api_key_env", "expected_model"),
+    (
+        "provider_name",
+        "expected_base_url",
+        "expected_api_key_env",
+        "expected_model",
+        "expected_output_mode",
+        "expected_reasoning_effort",
+        "expected_extra_body",
+    ),
     [
-        ("deepseek", "https://api.deepseek.com", "DEEPSEEK_API_KEY", "deepseek-v4-pro"),
-        ("kimi", "https://api.moonshot.cn/v1", "MOONSHOT_API_KEY", "kimi-k2.6"),
+        (
+            "deepseek",
+            "https://api.deepseek.com",
+            "DEEPSEEK_API_KEY",
+            "deepseek-v4-pro",
+            ProviderStructuredOutputMode.JSON_OBJECT,
+            "high",
+            {"thinking": {"type": "enabled"}},
+        ),
+        (
+            "kimi",
+            "https://api.moonshot.cn/v1",
+            "MOONSHOT_API_KEY",
+            "kimi-k2.6",
+            ProviderStructuredOutputMode.AGENT_SCHEMA,
+            None,
+            {},
+        ),
     ],
 )
 def test_cli_provider_shortcuts_fill_config_and_default_model(
@@ -1382,6 +1592,9 @@ def test_cli_provider_shortcuts_fill_config_and_default_model(
     expected_base_url: str,
     expected_api_key_env: str,
     expected_model: str,
+    expected_output_mode: ProviderStructuredOutputMode,
+    expected_reasoning_effort: str | None,
+    expected_extra_body: dict[str, Any],
 ) -> None:
     input_path = tmp_path / "input.json"
     input_path.write_text(
@@ -1409,6 +1622,9 @@ def test_cli_provider_shortcuts_fill_config_and_default_model(
             base_url=expected_base_url,
             api_key_env=expected_api_key_env,
             disable_tracing=True,
+            structured_output_mode=expected_output_mode,
+            reasoning_effort=expected_reasoning_effort,
+            extra_body=expected_extra_body,
         )
         assert disable_tracing is False
         return IngestionReport(candidates=[_candidate()])
@@ -1425,6 +1641,8 @@ def test_cli_provider_shortcuts_fill_config_and_default_model(
         base_url=None,
         api_key_env=None,
         provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
         disable_tracing=False,
         auto_write=False,
         min_write_confidence=0.85,
@@ -1468,6 +1686,9 @@ def test_cli_provider_explicit_flags_override_registry(
             api_key_env="CUSTOM_API_KEY",
             default_headers={"X-Test": "yes"},
             disable_tracing=True,
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
         )
         assert auto_write is False
         assert min_write_confidence == 0.85
@@ -1486,6 +1707,124 @@ def test_cli_provider_explicit_flags_override_registry(
         base_url="https://custom.example/v1",
         api_key_env="CUSTOM_API_KEY",
         provider_header=["X-Test=yes"],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_deepseek_provider_thinking_overrides_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert model == "deepseek-v4-pro"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            disable_tracing=True,
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="max",
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        provider="deepseek",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking="disabled",
+        provider_reasoning_effort="max",
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_deepseek_provider_accepts_flash_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert model == "deepseek-v4-flash"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            disable_tracing=True,
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="deepseek-v4-flash",
+        provider="deepseek",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
         disable_tracing=False,
         auto_write=False,
         min_write_confidence=0.85,
@@ -1553,6 +1892,8 @@ def test_cli_openrouter_provider_accepts_headers_with_model(
             "HTTP-Referer=https://github.com/6tizer/nesy-reasoning-mcp",
             "X-OpenRouter-Title=NeSy Reasoning MCP",
         ],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
         disable_tracing=False,
         auto_write=False,
         min_write_confidence=0.85,
@@ -1587,6 +1928,8 @@ def test_cli_provider_unknown_returns_clear_error(tmp_path: Path) -> None:
             base_url=None,
             api_key_env=None,
             provider_header=[],
+            provider_thinking=None,
+            provider_reasoning_effort=None,
             disable_tracing=False,
             auto_write=False,
             min_write_confidence=0.85,
@@ -1629,6 +1972,8 @@ def test_cli_openrouter_provider_requires_explicit_model(
             base_url=None,
             api_key_env=None,
             provider_header=[],
+            provider_thinking=None,
+            provider_reasoning_effort=None,
             disable_tracing=False,
             auto_write=False,
             min_write_confidence=0.85,
@@ -1665,6 +2010,8 @@ def test_cli_openrouter_provider_requires_explicit_model(
             {"base_url": "https://api.deepseek.com", "provider_header": ["X-Test=bad\nvalue"]},
             "must not contain newlines",
         ),
+        ({"provider": "openrouter", "provider_thinking": "disabled"}, "JSON Object provider"),
+        ({"provider": "kimi", "provider_reasoning_effort": "max"}, "JSON Object provider"),
     ],
 )
 def test_cli_rejects_invalid_provider_config(
@@ -1688,6 +2035,8 @@ def test_cli_rejects_invalid_provider_config(
         "base_url": "https://api.deepseek.com",
         "api_key_env": "DEEPSEEK_API_KEY",
         "provider_header": [],
+        "provider_thinking": None,
+        "provider_reasoning_effort": None,
         "disable_tracing": False,
         "auto_write": False,
         "min_write_confidence": 0.85,

@@ -48,6 +48,7 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
 )
 from nesy_reasoning_mcp.auto_ingest.providers import (
     ProviderRegistryEntry,
+    ProviderStructuredOutputMode,
     get_provider_entry,
     list_provider_entries,
 )
@@ -195,6 +196,18 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="Provider header in KEY=VALUE form. May be repeated.",
+    )
+    parser.add_argument(
+        "--provider-thinking",
+        choices=["enabled", "disabled"],
+        default=None,
+        help="Override JSON Object provider thinking mode, for example DeepSeek.",
+    )
+    parser.add_argument(
+        "--provider-reasoning-effort",
+        choices=["high", "max"],
+        default=None,
+        help="Override JSON Object provider reasoning effort, for example DeepSeek.",
     )
     parser.add_argument(
         "--disable-tracing",
@@ -1182,6 +1195,8 @@ def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
         base_url=args.base_url,
         api_key_env=args.api_key_env,
         provider_headers=getattr(args, "provider_header", []) or [],
+        provider_thinking=getattr(args, "provider_thinking", None),
+        provider_reasoning_effort=getattr(args, "provider_reasoning_effort", None),
         disable_tracing=bool(args.disable_tracing),
         reviewer_models=getattr(args, "reviewer_models", []) or [],
         voting_policy=ReviewVotingPolicy(args.voting_policy),
@@ -1236,6 +1251,8 @@ def _scheduled_job_args(job: ScheduledIngestionJob) -> argparse.Namespace:
         base_url=provider.base_url,
         api_key_env=provider.api_key_env,
         provider_header=list(provider.provider_headers),
+        provider_thinking=provider.provider_thinking,
+        provider_reasoning_effort=provider.provider_reasoning_effort,
         disable_tracing=provider.disable_tracing,
         auto_write=write.auto_write,
         min_write_confidence=write.min_write_confidence,
@@ -1503,6 +1520,23 @@ def _provider_config_from_args(
     if not api_key_env:
         raise ValueError("--api-key-env is required when --base-url is set")
     _validate_provider_base_url(base_url)
+    structured_output_mode = (
+        provider_entry.structured_output_mode
+        if provider_entry is not None
+        else ProviderStructuredOutputMode.AGENT_SCHEMA
+    )
+    provider_thinking = getattr(args, "provider_thinking", None)
+    provider_reasoning_effort = getattr(args, "provider_reasoning_effort", None)
+    if (
+        provider_thinking is not None or provider_reasoning_effort is not None
+    ) and structured_output_mode is not ProviderStructuredOutputMode.JSON_OBJECT:
+        raise ValueError(
+            "--provider-thinking and --provider-reasoning-effort require a JSON Object "
+            "provider such as --provider deepseek"
+        )
+    extra_body = dict(provider_entry.extra_body) if provider_entry is not None else {}
+    if provider_thinking is not None:
+        extra_body["thinking"] = {"type": provider_thinking}
     return OpenAICompatibleProviderConfig(
         base_url=base_url,
         api_key_env=api_key_env,
@@ -1510,6 +1544,12 @@ def _provider_config_from_args(
         # OpenAI-compatible providers do not participate in OpenAI tracing.
         # Keep this disabled by default to avoid sending third-party runs to tracing.
         disable_tracing=provider_entry.tracing_disabled if provider_entry is not None else True,
+        structured_output_mode=structured_output_mode,
+        reasoning_effort=(
+            provider_reasoning_effort
+            or (provider_entry.reasoning_effort if provider_entry is not None else None)
+        ),
+        extra_body=extra_body,
     )
 
 
@@ -1561,7 +1601,10 @@ def _render_provider_list() -> str:
     # This explicit CLI listing may show env var names and base URLs,
     # but it must never include actual API key values.
     rows = [
-        "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url\tnotes",
+        (
+            "provider\tbase_url\tapi_key_env\tdefault_model\tstructured_output_mode"
+            "\tsupported_models\treasoning_effort\tdocs_url\tnotes"
+        ),
         *[
             "\t".join(
                 [
@@ -1569,6 +1612,9 @@ def _render_provider_list() -> str:
                     entry.base_url,
                     entry.api_key_env,
                     entry.default_model or "-",
+                    entry.structured_output_mode.value,
+                    ",".join(entry.supported_models) or "-",
+                    entry.reasoning_effort or "-",
                     entry.docs_url,
                     entry.notes,
                 ]

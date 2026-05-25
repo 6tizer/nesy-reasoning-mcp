@@ -8,9 +8,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from inspect import Parameter, signature
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
+from nesy_reasoning_mcp.auto_ingest.providers import ProviderStructuredOutputMode
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
 from nesy_reasoning_mcp.auto_ingest.review_voting import aggregate_review_decisions
 from nesy_reasoning_mcp.auto_ingest.schemas import (
@@ -27,6 +30,8 @@ from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
 AgentRunner = Callable[..., Awaitable[Any]]
+ChatCompletionRunner = Callable[..., Awaitable[Any]]
+OutputBatch = TypeVar("OutputBatch", bound=BaseModel)
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,9 @@ class OpenAICompatibleProviderConfig:
     api_key_env: str
     default_headers: Mapping[str, str] = field(default_factory=dict)
     disable_tracing: bool = True
+    structured_output_mode: ProviderStructuredOutputMode = ProviderStructuredOutputMode.AGENT_SCHEMA
+    reasoning_effort: str | None = None
+    extra_body: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -44,6 +52,12 @@ class OpenAICompatibleProviderConfig:
             "default_headers",
             MappingProxyType(dict(self.default_headers)),
         )
+        object.__setattr__(
+            self,
+            "structured_output_mode",
+            ProviderStructuredOutputMode(self.structured_output_mode),
+        )
+        object.__setattr__(self, "extra_body", MappingProxyType(dict(self.extra_body)))
 
 
 class OpenAIAgentsDryRunError(ValueError):
@@ -60,6 +74,7 @@ async def run_openai_agents_dry_run(
     high_priority_reviewer_models: list[str] | None = None,
     env: Mapping[str, str] | None = None,
     run_agent: AgentRunner | None = None,
+    run_chat_completion: ChatCompletionRunner | None = None,
     provider_config: OpenAICompatibleProviderConfig | None = None,
     disable_tracing: bool = False,
 ) -> IngestionReport:
@@ -73,6 +88,7 @@ async def run_openai_agents_dry_run(
         high_priority_reviewer_models=high_priority_reviewer_models,
         env=env,
         run_agent=run_agent,
+        run_chat_completion=run_chat_completion,
         provider_config=provider_config,
         disable_tracing=disable_tracing,
         auto_write=False,
@@ -89,6 +105,7 @@ async def run_openai_agents_ingestion(
     high_priority_reviewer_models: list[str] | None = None,
     env: Mapping[str, str] | None = None,
     run_agent: AgentRunner | None = None,
+    run_chat_completion: ChatCompletionRunner | None = None,
     auto_write: bool = False,
     min_write_confidence: float = 0.85,
     provider_config: OpenAICompatibleProviderConfig | None = None,
@@ -102,11 +119,7 @@ async def run_openai_agents_ingestion(
     voting_policy = ReviewVotingPolicy(voting_policy)
     reviewer_model_names = _reviewer_model_names(reviewer_models, base_model_name)
     high_priority_models = _dedupe_model_names(high_priority_reviewer_models or [])
-    agent_model = _agent_model(
-        base_model_name,
-        provider_config,
-        runtime_env,
-    )
+    use_json_object_provider = _uses_json_object_provider(provider_config)
     tracing_disabled = disable_tracing or (
         provider_config is not None and provider_config.disable_tracing
     )
@@ -115,40 +128,70 @@ async def run_openai_agents_ingestion(
             "OPENAI_API_KEY is required for live OpenAI Agents SDK ingestion"
         )
 
-    extractor = _build_agent(
-        name="NeSy relation extractor",
-        instructions=_EXTRACTOR_INSTRUCTIONS,
-        output_type=CandidateRelationBatch,
-        model=agent_model,
-    )
-    extraction_output = await _run_agent_with_optional_runner(
-        run_agent,
-        extractor,
-        _extraction_prompt(ingestion_input),
-        tracing_disabled=tracing_disabled,
-    )
-    candidate_batch = _coerce_candidate_batch(extraction_output)
+    if use_json_object_provider:
+        candidate_batch = await _run_json_object_completion(
+            run_chat_completion,
+            model=base_model_name,
+            provider_config=provider_config,
+            env=runtime_env,
+            instructions=_EXTRACTOR_INSTRUCTIONS,
+            prompt=_extraction_prompt(ingestion_input),
+            output_type=CandidateRelationBatch,
+            label="extractor",
+        )
+        agent_model = None
+    else:
+        agent_model = _agent_model(
+            base_model_name,
+            provider_config,
+            runtime_env,
+        )
+        extractor = _build_agent(
+            name="NeSy relation extractor",
+            instructions=_EXTRACTOR_INSTRUCTIONS,
+            output_type=CandidateRelationBatch,
+            model=agent_model,
+        )
+        extraction_output = await _run_agent_with_optional_runner(
+            run_agent,
+            extractor,
+            _extraction_prompt(ingestion_input),
+            tracing_disabled=tracing_disabled,
+        )
+        candidate_batch = _coerce_candidate_batch(extraction_output)
 
     reviews: list[ReviewDecision] = []
     for reviewer_model_name in reviewer_model_names:
-        reviewer_agent_model = (
-            agent_model
-            if reviewer_model_name == base_model_name
-            else _agent_model(reviewer_model_name, provider_config, runtime_env)
-        )
-        reviewer = _build_agent(
-            name=_reviewer_agent_name(reviewer_model_name),
-            instructions=_REVIEWER_INSTRUCTIONS,
-            output_type=ReviewDecisionBatch,
-            model=reviewer_agent_model,
-        )
-        review_output = await _run_agent_with_optional_runner(
-            run_agent,
-            reviewer,
-            _review_prompt(ingestion_input, candidate_batch),
-            tracing_disabled=tracing_disabled,
-        )
-        review_batch = _coerce_review_batch(review_output)
+        if use_json_object_provider:
+            review_batch = await _run_json_object_completion(
+                run_chat_completion,
+                model=reviewer_model_name,
+                provider_config=provider_config,
+                env=runtime_env,
+                instructions=_REVIEWER_INSTRUCTIONS,
+                prompt=_review_prompt(ingestion_input, candidate_batch),
+                output_type=ReviewDecisionBatch,
+                label=_reviewer_agent_name(reviewer_model_name),
+            )
+        else:
+            reviewer_agent_model = (
+                agent_model
+                if reviewer_model_name == base_model_name
+                else _agent_model(reviewer_model_name, provider_config, runtime_env)
+            )
+            reviewer = _build_agent(
+                name=_reviewer_agent_name(reviewer_model_name),
+                instructions=_REVIEWER_INSTRUCTIONS,
+                output_type=ReviewDecisionBatch,
+                model=reviewer_agent_model,
+            )
+            review_output = await _run_agent_with_optional_runner(
+                run_agent,
+                reviewer,
+                _review_prompt(ingestion_input, candidate_batch),
+                tracing_disabled=tracing_disabled,
+            )
+            review_batch = _coerce_review_batch(review_output)
         reviews.extend(_reviews_with_model(review_batch.reviews, reviewer_model_name))
 
     aggregation = aggregate_review_decisions(
@@ -252,6 +295,164 @@ def _build_agent(
     return Agent(**kwargs)
 
 
+def _uses_json_object_provider(
+    provider_config: OpenAICompatibleProviderConfig | None,
+) -> bool:
+    return (
+        provider_config is not None
+        and provider_config.structured_output_mode is ProviderStructuredOutputMode.JSON_OBJECT
+    )
+
+
+async def _run_json_object_completion(
+    run_chat_completion: ChatCompletionRunner | None,
+    *,
+    model: str | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    env: Mapping[str, str],
+    instructions: str,
+    prompt: str,
+    output_type: type[OutputBatch],
+    label: str,
+) -> OutputBatch:
+    if provider_config is None:
+        raise OpenAIAgentsDryRunError("provider_config is required for JSON Object mode")
+    if not model:
+        raise OpenAIAgentsDryRunError(
+            "--model or OPENAI_DEFAULT_MODEL is required for provider JSON Object mode"
+        )
+    api_key = env.get(provider_config.api_key_env)
+    if not api_key:
+        raise OpenAIAgentsDryRunError(
+            f"{provider_config.api_key_env} is required for OpenAI-compatible provider"
+        )
+    request_kwargs = _json_object_request_kwargs(
+        model=model,
+        provider_config=provider_config,
+        instructions=instructions,
+        prompt=prompt,
+        output_type=output_type,
+    )
+    if run_chat_completion is not None:
+        response = await run_chat_completion(
+            provider_config=provider_config,
+            **request_kwargs,
+        )
+    else:
+        response = await _run_openai_compatible_json_object_completion(
+            api_key=api_key,
+            provider_config=provider_config,
+            request_kwargs=request_kwargs,
+        )
+    if isinstance(response, output_type):
+        return response
+    content = _json_object_response_content(response)
+    if not content or not content.strip():
+        raise OpenAIAgentsDryRunError(f"{label} returned empty JSON Object content")
+    try:
+        return output_type.model_validate_json(content)
+    except ValidationError as exc:
+        raise OpenAIAgentsDryRunError(
+            f"{label} returned JSON that does not match {output_type.__name__}"
+        ) from exc
+
+
+def _json_object_request_kwargs(
+    *,
+    model: str,
+    provider_config: OpenAICompatibleProviderConfig,
+    instructions: str,
+    prompt: str,
+    output_type: type[BaseModel],
+) -> dict[str, Any]:
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": _json_object_system_prompt(instructions, output_type),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    if provider_config.reasoning_effort:
+        request_kwargs["reasoning_effort"] = provider_config.reasoning_effort
+    if provider_config.extra_body:
+        request_kwargs["extra_body"] = dict(provider_config.extra_body)
+    return request_kwargs
+
+
+def _json_object_system_prompt(
+    instructions: str,
+    output_type: type[BaseModel],
+) -> str:
+    schema_json = json.dumps(output_type.model_json_schema(), ensure_ascii=False)
+    example_json = json.dumps(_json_object_example(output_type), ensure_ascii=False)
+    return (
+        f"{instructions}\n"
+        "Return only one valid JSON object. Do not include markdown fences, prose, "
+        "or comments.\n"
+        "The JSON object must satisfy this JSON schema:\n"
+        f"{schema_json}\n"
+        "Example JSON output:\n"
+        f"{example_json}"
+    )
+
+
+def _json_object_example(output_type: type[BaseModel]) -> dict[str, object]:
+    if output_type is CandidateRelationBatch:
+        return {"candidates": []}
+    if output_type is ReviewDecisionBatch:
+        return {"reviews": []}
+    return {}
+
+
+async def _run_openai_compatible_json_object_completion(
+    *,
+    api_key: str,
+    provider_config: OpenAICompatibleProviderConfig,
+    request_kwargs: Mapping[str, Any],
+) -> Any:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=provider_config.base_url,
+        default_headers=provider_config.default_headers or None,
+    )
+    return await client.chat.completions.create(**dict(request_kwargs))
+
+
+def _json_object_response_content(response: Any) -> str | None:
+    if isinstance(response, str):
+        return response
+    if isinstance(response, Mapping):
+        choices = response.get("choices")
+        if choices is None:
+            raise OpenAIAgentsDryRunError("provider JSON Object response did not include choices")
+        return _json_object_content_from_choices(choices)
+    return _json_object_content_from_choices(getattr(response, "choices", None))
+
+
+def _json_object_content_from_choices(choices: Any) -> str | None:
+    if not choices:
+        return None
+    choice = choices[0]
+    message = (
+        choice.get("message") if isinstance(choice, Mapping) else getattr(choice, "message", None)
+    )
+    if message is None:
+        return None
+    content = (
+        message.get("content")
+        if isinstance(message, Mapping)
+        else getattr(message, "content", None)
+    )
+    return content if isinstance(content, str) else None
+
+
 def _agent_model(
     model: str | None,
     provider_config: OpenAICompatibleProviderConfig | None,
@@ -318,11 +519,23 @@ def _provider_metadata(
 ) -> dict[str, Any]:
     if provider_config is None:
         return {"type": "openai", "tracing_disabled": disable_tracing}
-    return {
+    thinking = provider_config.extra_body.get("thinking")
+    thinking_type = (
+        thinking.get("type")
+        if isinstance(thinking, Mapping) and isinstance(thinking.get("type"), str)
+        else None
+    )
+    metadata: dict[str, Any] = {
         "type": "openai_compatible",
         "header_keys": sorted(provider_config.default_headers),
         "tracing_disabled": disable_tracing or provider_config.disable_tracing,
+        "structured_output_mode": provider_config.structured_output_mode.value,
     }
+    if provider_config.reasoning_effort:
+        metadata["reasoning_effort"] = provider_config.reasoning_effort
+    if thinking_type:
+        metadata["thinking"] = {"type": thinking_type}
+    return metadata
 
 
 def _reviewer_model_names(

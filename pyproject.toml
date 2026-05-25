@@ -9,6 +9,7 @@ dependencies = [
   "networkx>=3,<4",
   "openai-agents>=0.17,<1",
   "pydantic>=2,<3",
+  "socksio>=1,<2",
   "starlette>=0.50,<1",
   "uvicorn>=0.38,<1",
 ]

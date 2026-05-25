@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from types import MappingProxyType
+
+
+class ProviderStructuredOutputMode(StrEnum):
+    """Structured output strategy used by an OpenAI-compatible provider."""
+
+    AGENT_SCHEMA = "agent_schema"
+    JSON_OBJECT = "json_object"
 
 
 @dataclass(frozen=True)
@@ -18,6 +26,19 @@ class ProviderRegistryEntry:
     docs_url: str
     notes: str
     tracing_disabled: bool = True
+    structured_output_mode: ProviderStructuredOutputMode = ProviderStructuredOutputMode.AGENT_SCHEMA
+    supported_models: tuple[str, ...] = ()
+    reasoning_effort: str | None = None
+    extra_body: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "structured_output_mode",
+            ProviderStructuredOutputMode(self.structured_output_mode),
+        )
+        object.__setattr__(self, "supported_models", tuple(self.supported_models))
+        object.__setattr__(self, "extra_body", MappingProxyType(dict(self.extra_body)))
 
 
 PROVIDER_REGISTRY: Mapping[str, ProviderRegistryEntry] = MappingProxyType(
@@ -28,7 +49,14 @@ PROVIDER_REGISTRY: Mapping[str, ProviderRegistryEntry] = MappingProxyType(
             api_key_env="DEEPSEEK_API_KEY",
             default_model="deepseek-v4-pro",
             docs_url="https://api-docs.deepseek.com/zh-cn/",
-            notes="DeepSeek OpenAI-compatible Chat Completions endpoint.",
+            notes=(
+                "DeepSeek V4 Pro uses JSON Object mode; thinking is enabled with high "
+                "reasoning effort."
+            ),
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            supported_models=("deepseek-v4-pro", "deepseek-v4-flash"),
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
         ),
         "kimi": ProviderRegistryEntry(
             name="kimi",

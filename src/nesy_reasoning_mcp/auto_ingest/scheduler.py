@@ -153,12 +153,21 @@ class ScheduledIngestionProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     provider_headers: list[str] = Field(default_factory=list)
+    provider_thinking: str | None = None
+    provider_reasoning_effort: str | None = None
     disable_tracing: bool = False
     reviewer_models: list[str] = Field(default_factory=list)
     voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED
     high_priority_reviewer_models: list[str] = Field(default_factory=list)
 
-    @field_validator("model", "provider", "base_url", "api_key_env")
+    @field_validator(
+        "model",
+        "provider",
+        "base_url",
+        "api_key_env",
+        "provider_thinking",
+        "provider_reasoning_effort",
+    )
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         """Strip optional text values and reject empty provided values."""
@@ -177,6 +186,22 @@ class ScheduledIngestionProviderConfig(BaseModel):
         if any(not item for item in stripped):
             raise ValueError("must not contain empty values")
         return stripped
+
+    @field_validator("provider_thinking")
+    @classmethod
+    def validate_provider_thinking(cls, value: str | None) -> str | None:
+        """Validate provider thinking mode overrides."""
+        if value is None or value in {"enabled", "disabled"}:
+            return value
+        raise ValueError("must be enabled or disabled")
+
+    @field_validator("provider_reasoning_effort")
+    @classmethod
+    def validate_provider_reasoning_effort(cls, value: str | None) -> str | None:
+        """Validate provider reasoning effort overrides."""
+        if value is None or value in {"high", "max"}:
+            return value
+        raise ValueError("must be high or max")
 
 
 class ScheduledIngestionWriteConfig(BaseModel):
