@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from datetime import UTC, datetime
 from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.schemas import (
@@ -38,6 +37,7 @@ from nesy_reasoning_mcp.storage.common import (
     _merge_propositions,
     _normalize_relation_identities,
     _relation_for_store,
+    _utc_now_iso,
     graph_stats_for,
 )
 
@@ -383,14 +383,12 @@ class MemoryRelationStore:
         return len(incoming_relations), len(incoming_groups), updated_relations, updated_groups
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 def _review_queue_matches_filter(
     record: ReviewQueueRecord,
     queue_filter: ReviewQueueFilter,
 ) -> bool:
+    if queue_filter.ids and record.id not in queue_filter.ids:
+        return False
     if queue_filter.status is not None and record.status != queue_filter.status:
         return False
     if queue_filter.run_id is not None and record.run_id != queue_filter.run_id:
@@ -399,7 +397,13 @@ def _review_queue_matches_filter(
         return False
     if queue_filter.store_id is not None and record.candidate.store_id != queue_filter.store_id:
         return False
-    return not (
-        queue_filter.context_id is not None
-        and record.candidate.context_id != queue_filter.context_id
-    )
+    if queue_filter.context_id is not None and record.candidate.context_id != (
+        queue_filter.context_id
+    ):
+        return False
+    if queue_filter.after_created_at is not None and queue_filter.after_id is not None:
+        return (record.created_at, record.id) > (
+            queue_filter.after_created_at,
+            queue_filter.after_id,
+        )
+    return True

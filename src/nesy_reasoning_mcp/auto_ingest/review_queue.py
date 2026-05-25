@@ -9,7 +9,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     IngestionReport,
     ReviewQueueRecord,
 )
-from nesy_reasoning_mcp.schemas import PropositionRecord
+from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord
 
 
 def queued_records_from_report(
@@ -35,13 +35,21 @@ def queued_records_from_report(
                     "generated_at": report.generated_at,
                     "mode": report.mode.value,
                     "metadata": report.metadata,
+                    "diagnostic_count": len(report.diagnostics),
                 },
                 candidate=candidate,
                 review=reviews_by_id.get(candidate.id),
                 gate_result=gate_result,
-                diagnostics=report.diagnostics,
+                diagnostics=_diagnostics_for_candidate(report.diagnostics, candidate.id),
                 propositions=propositions,
                 context_metadata=context_metadata,
             )
         )
     return records
+
+
+def _diagnostics_for_candidate(
+    diagnostics: list[Diagnostic],
+    candidate_id: str,
+) -> list[Diagnostic]:
+    return [diagnostic for diagnostic in diagnostics if candidate_id in diagnostic.related_ids]

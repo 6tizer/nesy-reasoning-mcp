@@ -46,6 +46,7 @@ from nesy_reasoning_mcp.storage.common import (
     _normalize_relation_identities,
     _relation_for_store,
     _relation_from_row,
+    _utc_now_iso,
     graph_stats_for,
 )
 
@@ -110,6 +111,9 @@ def _review_queue_filter_sql(queue_filter: ReviewQueueFilter | None) -> tuple[st
         return "", []
     clauses: list[str] = []
     params: list[Any] = []
+    if queue_filter.ids:
+        clauses.append(f"id IN ({','.join('?' for _ in queue_filter.ids)})")
+        params.extend(queue_filter.ids)
     if queue_filter.status is not None:
         clauses.append("status = ?")
         params.append(queue_filter.status.value)
@@ -125,6 +129,15 @@ def _review_queue_filter_sql(queue_filter: ReviewQueueFilter | None) -> tuple[st
     if queue_filter.context_id is not None:
         clauses.append("context_id = ?")
         params.append(queue_filter.context_id)
+    if queue_filter.after_created_at is not None and queue_filter.after_id is not None:
+        clauses.append("(created_at > ? OR (created_at = ? AND id > ?))")
+        params.extend(
+            [
+                queue_filter.after_created_at,
+                queue_filter.after_created_at,
+                queue_filter.after_id,
+            ]
+        )
     return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
 
 
@@ -142,12 +155,26 @@ def _checked_identifier(value: str, allowed: set[str], label: str) -> str:
     return value
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 def _review_queue_from_row(row: sqlite3.Row) -> ReviewQueueRecord:
-    return ReviewQueueRecord.model_validate(_loads(row["payload_json"], {}))
+    record = ReviewQueueRecord.model_validate(_loads(row["payload_json"], {}))
+    expected_columns = {
+        "id": record.id,
+        "status": record.status.value,
+        "run_id": record.run_id,
+        "candidate_id": record.candidate.id,
+        "context_id": record.candidate.context_id,
+        "store_id": record.candidate.store_id,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+    mismatched = [
+        column for column, expected in expected_columns.items() if row[column] != expected
+    ]
+    if mismatched:
+        raise ValueError(
+            "review_queue indexed columns do not match payload: " + ", ".join(mismatched)
+        )
+    return record
 
 
 class SqliteRelationStore:
@@ -370,7 +397,7 @@ class SqliteRelationStore:
         """List review queue records matching an optional filter."""
         where_sql, params = _review_queue_filter_sql(queue_filter)
         sql = f"""
-            SELECT payload_json
+            SELECT *
             FROM review_queue
             {where_sql}
             ORDER BY created_at, id
@@ -910,7 +937,7 @@ class SqliteRelationStore:
             return []
         rows = self._conn.execute(
             f"""
-            SELECT payload_json
+            SELECT *
             FROM review_queue
             WHERE id IN ({",".join("?" for _ in id_list)})
             ORDER BY created_at, id

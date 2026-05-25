@@ -11,7 +11,10 @@ from nesy_reasoning_mcp.auto_ingest import (
     EvidenceRecord,
     GateAction,
     GateResult,
+    ReviewDecision,
+    ReviewDecisionValue,
     ReviewQueueRecord,
+    ReviewQueueStatus,
 )
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.store import create_relation_store
@@ -24,6 +27,40 @@ def _cli_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     if extra:
         env.update(extra)
     return env
+
+
+def _write_sqlite_config(tmp_path: Path) -> tuple[Path, Path]:
+    config_path = tmp_path / "nesy.json"
+    sqlite_path = tmp_path / "nesy.db"
+    config_path.write_text(
+        json.dumps({"storage": {"backend": "sqlite", "sqlite_path": str(sqlite_path)}}),
+        encoding="utf-8",
+    )
+    return config_path, sqlite_path
+
+
+def _review_queue_record(record_id: str = "queue-1") -> ReviewQueueRecord:
+    candidate = CandidateRelation(
+        id=f"candidate-{record_id}",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        confidence=0.9,
+        evidence=[EvidenceRecord(url="https://example.com/source", span="A enables B.")],
+    )
+    return ReviewQueueRecord(
+        id=record_id,
+        run_id="run-1",
+        candidate=candidate,
+        review=ReviewDecision(
+            candidate_id=candidate.id,
+            decision=ReviewDecisionValue.APPROVE,
+            final_relation_type="sufficient",
+            final_confidence=0.9,
+            reasons=["Evidence directly supports the relation."],
+        ),
+        gate_result=GateResult(candidate_id=candidate.id, action=GateAction.QUEUE),
+    )
 
 
 def test_help_writes_no_stdout_banner() -> None:
@@ -92,32 +129,11 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
 
 
 def test_ingest_queue_list_reads_persisted_records(tmp_path: Path) -> None:
-    config_path = tmp_path / "nesy.json"
-    sqlite_path = tmp_path / "nesy.db"
-    config_path.write_text(
-        json.dumps({"storage": {"backend": "sqlite", "sqlite_path": str(sqlite_path)}}),
-        encoding="utf-8",
-    )
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
     store = create_relation_store(
         NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
     )
-    candidate = CandidateRelation(
-        id="candidate-1",
-        source="A",
-        target="B",
-        relation_type="sufficient",
-        evidence=[EvidenceRecord(url="https://example.com/source", span="A enables B.")],
-    )
-    store.enqueue_review_queue(
-        [
-            ReviewQueueRecord(
-                id="queue-1",
-                run_id="run-1",
-                candidate=candidate,
-                gate_result=GateResult(candidate_id=candidate.id, action=GateAction.QUEUE),
-            )
-        ]
-    )
+    store.enqueue_review_queue([_review_queue_record()])
 
     completed = subprocess.run(
         [
@@ -138,7 +154,83 @@ def test_ingest_queue_list_reads_persisted_records(tmp_path: Path) -> None:
 
     payload = json.loads(completed.stdout)
     assert payload["records"][0]["id"] == "queue-1"
-    assert payload["records"][0]["candidate"]["id"] == "candidate-1"
+    assert payload["records"][0]["candidate"]["id"] == "candidate-queue-1"
+    assert completed.stderr == ""
+
+
+def test_ingest_queue_commit_commits_persisted_record(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    store = create_relation_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    )
+    store.enqueue_review_queue([_review_queue_record()])
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "queue",
+            "commit",
+            "--id",
+            "queue-1",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    reloaded = create_relation_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    )
+    assert payload["status"] == "ok"
+    assert payload["committed_count"] == 1
+    assert len(reloaded.list_relations()) == 1
+    assert reloaded.list_review_queue()[0].status == ReviewQueueStatus.COMMITTED
+    assert completed.stderr == ""
+
+
+def test_ingest_queue_resolve_resolves_persisted_record(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    store = create_relation_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    )
+    store.enqueue_review_queue([_review_queue_record()])
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "queue",
+            "resolve",
+            "--id",
+            "queue-1",
+            "--reason",
+            "duplicate",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    reloaded = create_relation_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    )
+    assert payload["status"] == "ok"
+    assert payload["resolved_count"] == 1
+    assert reloaded.list_review_queue()[0].status == ReviewQueueStatus.RESOLVED
+    assert reloaded.list_relations() == []
     assert completed.stderr == ""
 
 

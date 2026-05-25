@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CommitReviewedRelationsInput,
     ListReviewQueueInput,
     ResolveReviewQueueInput,
+    ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
 )
@@ -21,10 +25,20 @@ async def list_review_queue(
 ) -> dict[str, Any]:
     """Handle `nesy.list_review_queue`."""
     payload = ListReviewQueueInput.model_validate(arguments)
-    offset = int(payload.cursor or 0)
-    listed = store.list_review_queue(payload.filter, limit=payload.limit + 1, offset=offset)
+    queue_filter, cursor_diagnostic = _filter_with_cursor(payload.filter, payload.cursor)
+    if cursor_diagnostic is not None:
+        return {
+            "status": "error",
+            "records": [],
+            "total": 0,
+            "next_cursor": None,
+            "diagnostics": [cursor_diagnostic.model_dump(mode="json")],
+            "trace": ["Review queue list rejected invalid cursor."],
+            "graph_stats": store.graph_stats().model_dump(mode="json"),
+        }
+    listed = store.list_review_queue(queue_filter, limit=payload.limit + 1)
     records = listed[: payload.limit]
-    next_cursor = str(offset + len(records)) if len(listed) > payload.limit else None
+    next_cursor = _encode_review_queue_cursor(records[-1]) if len(listed) > payload.limit else None
     return {
         "status": "ok",
         "records": [_queue_record_dump(record) for record in records],
@@ -162,8 +176,8 @@ def _selected_pending_records(
     ids: list[str],
     store: RelationStoreProtocol,
 ) -> tuple[list[ReviewQueueRecord], list[Diagnostic]]:
-    all_records = store.list_review_queue()
-    records_by_id = {record.id: record for record in all_records}
+    selected_records = store.list_review_queue(ReviewQueueFilter(ids=ids), limit=len(ids))
+    records_by_id = {record.id: record for record in selected_records}
     records: list[ReviewQueueRecord] = []
     diagnostics: list[Diagnostic] = []
     for record_id in ids:
@@ -229,7 +243,8 @@ def _commit_blocked(
         "trace": [
             (
                 f"Validation did not approve all {len(records)} selected queue record(s); "
-                "no graph memory was written."
+                "no graph memory was written. This can happen when graph state changed "
+                "after the record was enqueued."
             )
         ],
         "graph_stats": store.graph_stats().model_dump(mode="json"),
@@ -246,3 +261,52 @@ def _merged_propositions(records: list[ReviewQueueRecord]) -> list[PropositionRe
 
 def _queue_record_dump(record: ReviewQueueRecord) -> dict[str, Any]:
     return record.model_dump(mode="json", exclude_none=True)
+
+
+def _filter_with_cursor(
+    queue_filter: ReviewQueueFilter,
+    cursor: str | None,
+) -> tuple[ReviewQueueFilter, Diagnostic | None]:
+    if cursor is None:
+        return queue_filter, None
+    decoded = _decode_review_queue_cursor(cursor)
+    if decoded is None:
+        return queue_filter, Diagnostic(
+            level="error",
+            code="REVIEW_QUEUE_CURSOR_INVALID",
+            message="Review queue cursor is invalid or expired.",
+        )
+    created_at, record_id = decoded
+    return (
+        queue_filter.model_copy(
+            update={
+                "after_created_at": created_at,
+                "after_id": record_id,
+            }
+        ),
+        None,
+    )
+
+
+def _encode_review_queue_cursor(record: ReviewQueueRecord) -> str:
+    raw = json.dumps(
+        {"created_at": record.created_at, "id": record.id},
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_review_queue_cursor(cursor: str) -> tuple[str, str] | None:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
+        payload = json.loads(decoded)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    created_at = str(payload.get("created_at", "")).strip()
+    record_id = str(payload.get("id", "")).strip()
+    if not created_at or not record_id:
+        return None
+    return created_at, record_id

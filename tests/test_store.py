@@ -876,6 +876,30 @@ def test_memory_review_queue_lifecycle() -> None:
     assert listed[0].committed_relation_ids == ["rel-1"]
 
 
+def test_memory_review_queue_filters_by_ids_and_keyset() -> None:
+    store = RelationStore()
+    store.enqueue_review_queue(
+        [
+            _queue_record("queue-1", candidate_id="candidate-1").model_copy(
+                update={"created_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _queue_record("queue-2", candidate_id="candidate-2").model_copy(
+                update={"created_at": "2026-01-01T00:00:02+00:00"}
+            ),
+        ]
+    )
+
+    listed = store.list_review_queue(
+        ReviewQueueFilter(
+            ids=["queue-1", "queue-missing"],
+            after_created_at="2026-01-01T00:00:00+00:00",
+            after_id="queue-0",
+        )
+    )
+
+    assert [record.id for record in listed] == ["queue-1"]
+
+
 def test_memory_review_queue_resolve() -> None:
     store = RelationStore()
     store.enqueue_review_queue([_queue_record()])
@@ -916,6 +940,79 @@ def test_sqlite_store_persists_review_queue_and_filters(tmp_path) -> None:
 
     assert [record.id for record in listed] == ["queue-2"]
     assert listed[0].candidate.context_id == "ctx-b"
+
+
+def test_sqlite_store_filters_review_queue_by_ids_and_keyset(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_review_queue(
+        [
+            _queue_record("queue-1", candidate_id="candidate-1").model_copy(
+                update={
+                    "created_at": "2026-01-01T00:00:01+00:00",
+                    "updated_at": "2026-01-01T00:00:01+00:00",
+                }
+            ),
+            _queue_record("queue-2", candidate_id="candidate-2").model_copy(
+                update={
+                    "created_at": "2026-01-01T00:00:02+00:00",
+                    "updated_at": "2026-01-01T00:00:02+00:00",
+                }
+            ),
+            _queue_record("queue-3", candidate_id="candidate-3").model_copy(
+                update={
+                    "created_at": "2026-01-01T00:00:03+00:00",
+                    "updated_at": "2026-01-01T00:00:03+00:00",
+                }
+            ),
+        ]
+    )
+
+    listed = store.list_review_queue(
+        ReviewQueueFilter(
+            ids=["queue-1", "queue-2", "queue-missing"],
+            after_created_at="2026-01-01T00:00:01+00:00",
+            after_id="queue-1",
+        )
+    )
+
+    assert [record.id for record in listed] == ["queue-2"]
+
+
+def test_sqlite_review_queue_rejects_index_payload_mismatch(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_review_queue([_queue_record()])
+    store._conn.execute(  # noqa: SLF001
+        "UPDATE review_queue SET candidate_id = ? WHERE id = ?",
+        ("candidate-other", "queue-1"),
+    )
+    store._conn.commit()  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="indexed columns"):
+        store.list_review_queue(ReviewQueueFilter(ids=["queue-1"]))
+
+
+def test_sqlite_review_queue_threaded_enqueue_and_list(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    def enqueue_and_read(index: int) -> int:
+        record_id = f"queue-{index}"
+        store.enqueue_review_queue([_queue_record(record_id, candidate_id=f"candidate-{index}")])
+        return len(store.list_review_queue(ReviewQueueFilter(ids=[record_id])))
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(enqueue_and_read, range(12)))
+
+    assert results == [1] * 12
+    assert len(store.list_review_queue()) == 12
 
 
 def test_memory_import_records_keeps_context_metadata() -> None:

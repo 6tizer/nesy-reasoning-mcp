@@ -307,6 +307,23 @@ class ReviewQueueRecord(BaseModel):
     committed_relation_ids: list[str] = Field(default_factory=list)
     resolution: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_timestamps(cls, value: Any) -> Any:
+        """Use one timestamp for both generated creation/update defaults."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if data.get("created_at") is None and data.get("updated_at") is None:
+            timestamp = datetime.now(UTC).isoformat()
+            data["created_at"] = timestamp
+            data["updated_at"] = timestamp
+        elif data.get("created_at") is None:
+            data["created_at"] = data["updated_at"]
+        elif data.get("updated_at") is None:
+            data["updated_at"] = data["created_at"]
+        return data
+
     @field_validator("id", "run_id", "created_at", "updated_at")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
@@ -343,12 +360,31 @@ class ReviewQueueFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: ReviewQueueStatus | None = None
+    ids: list[str] = Field(default_factory=list)
     run_id: str | None = None
     candidate_id: str | None = None
     store_id: str | None = None
     context_id: str | None = None
+    after_created_at: str | None = None
+    after_id: str | None = None
 
-    @field_validator("run_id", "candidate_id", "store_id", "context_id")
+    @field_validator("ids")
+    @classmethod
+    def strip_ids(cls, value: list[str]) -> list[str]:
+        """Strip IDs, reject empties, and de-duplicate in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("ids must not contain empty values")
+        return list(dict.fromkeys(stripped))
+
+    @field_validator(
+        "run_id",
+        "candidate_id",
+        "store_id",
+        "context_id",
+        "after_created_at",
+        "after_id",
+    )
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         """Strip optional filter values and reject empty provided values."""
@@ -358,6 +394,13 @@ class ReviewQueueFilter(BaseModel):
         if not stripped:
             raise ValueError("must not be empty")
         return stripped
+
+    @model_validator(mode="after")
+    def require_complete_keyset_cursor(self) -> ReviewQueueFilter:
+        """Require complete keyset cursor fields when either is supplied."""
+        if (self.after_created_at is None) != (self.after_id is None):
+            raise ValueError("after_created_at and after_id must be provided together")
+        return self
 
 
 class ListReviewQueueInput(BaseModel):
@@ -372,7 +415,7 @@ class ListReviewQueueInput(BaseModel):
     @field_validator("cursor")
     @classmethod
     def strip_cursor(cls, value: str | None) -> str | None:
-        """Strip cursor values and reject empty provided values."""
+        """Strip opaque cursor values and reject empty provided values."""
         if value is None:
             return None
         stripped = value.strip()
