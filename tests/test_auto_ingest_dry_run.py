@@ -26,6 +26,11 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAICompatibleProviderConfig,
     run_openai_agents_dry_run,
 )
+from nesy_reasoning_mcp.auto_ingest.providers import (
+    PROVIDER_REGISTRY,
+    get_provider_entry,
+    list_provider_entries,
+)
 from nesy_reasoning_mcp.store import RelationStore
 
 
@@ -276,6 +281,30 @@ def test_openai_compatible_provider_config_headers_are_read_only() -> None:
     assert isinstance(config.default_headers, MappingProxyType)
     with pytest.raises(TypeError):
         config.default_headers["X-Test"] = "no"  # type: ignore[index]
+
+
+def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
+    assert set(PROVIDER_REGISTRY) == {"deepseek", "kimi", "openrouter"}
+    assert isinstance(PROVIDER_REGISTRY, MappingProxyType)
+    entries = list_provider_entries()
+    assert [entry.name for entry in entries] == ["deepseek", "kimi", "openrouter"]
+    assert get_provider_entry("deepseek").base_url == "https://api.deepseek.com"
+    assert get_provider_entry("DeepSeek").base_url == "https://api.deepseek.com"
+    assert get_provider_entry("kimi").api_key_env == "MOONSHOT_API_KEY"
+    assert get_provider_entry("openrouter").default_model is None
+    assert get_provider_entry("openrouter").notes
+    rendered = ingest_cli._render_provider_list()
+    assert "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url\tnotes" in rendered
+    assert "DEEPSEEK_API_KEY" in rendered
+    assert "MOONSHOT_API_KEY" in rendered
+    assert "OPENROUTER_API_KEY" in rendered
+    assert "OpenRouter requires an explicit model" in rendered
+    assert "secret" not in rendered.lower()
+
+
+def test_provider_registry_lookup_error_lists_supported_providers() -> None:
+    with pytest.raises(ValueError, match="supported providers: deepseek, kimi, openrouter"):
+        get_provider_entry("unknown")
 
 
 async def test_openai_compatible_provider_requires_model_and_env_key() -> None:
@@ -590,6 +619,297 @@ def test_cli_passes_openai_compatible_provider_config(
     assert stderr.getvalue() == ""
 
 
+def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
+    stdout = StringIO()
+    stderr = StringIO()
+    args = argparse.Namespace(list_providers=True)
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=stderr)
+
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    rendered = stdout.getvalue()
+    assert "deepseek\thttps://api.deepseek.com\tDEEPSEEK_API_KEY\tdeepseek-v4-pro" in rendered
+    assert "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6" in rendered
+    assert "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-" in rendered
+    assert "OpenRouter requires an explicit model" in rendered
+    assert "secret" not in rendered.lower()
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "expected_base_url", "expected_api_key_env", "expected_model"),
+    [
+        ("deepseek", "https://api.deepseek.com", "DEEPSEEK_API_KEY", "deepseek-v4-pro"),
+        ("kimi", "https://api.moonshot.cn/v1", "MOONSHOT_API_KEY", "kimi-k2.6"),
+    ],
+)
+def test_cli_provider_shortcuts_fill_config_and_default_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    expected_base_url: str,
+    expected_api_key_env: str,
+    expected_model: str,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == expected_model
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url=expected_base_url,
+            api_key_env=expected_api_key_env,
+            disable_tracing=True,
+        )
+        assert disable_tracing is False
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        provider=provider_name,
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_provider_explicit_flags_override_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == "custom-model"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://custom.example/v1",
+            api_key_env="CUSTOM_API_KEY",
+            default_headers={"X-Test": "yes"},
+            disable_tracing=True,
+        )
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert disable_tracing is False
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="custom-model",
+        provider="deepseek",
+        list_providers=False,
+        base_url="https://custom.example/v1",
+        api_key_env="CUSTOM_API_KEY",
+        provider_header=["X-Test=yes"],
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_openrouter_provider_accepts_headers_with_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == "openai/gpt-latest"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+            default_headers={
+                "HTTP-Referer": "https://github.com/6tizer/nesy-reasoning-mcp",
+                "X-OpenRouter-Title": "NeSy Reasoning MCP",
+            },
+            disable_tracing=True,
+        )
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert disable_tracing is False
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="openai/gpt-latest",
+        provider="openrouter",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[
+            "HTTP-Referer=https://github.com/6tizer/nesy-reasoning-mcp",
+            "X-OpenRouter-Title=NeSy Reasoning MCP",
+        ],
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_provider_unknown_returns_clear_error(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    stderr = StringIO()
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(
+        argparse.Namespace(
+            input=str(input_path),
+            url=[],
+            task=None,
+            question=None,
+            model=None,
+            provider="unknown",
+            list_providers=False,
+            base_url=None,
+            api_key_env=None,
+            provider_header=[],
+            disable_tracing=False,
+            auto_write=False,
+            min_write_confidence=0.85,
+            format="json",
+            output=None,
+            timeout_seconds=1.0,
+            max_url_bytes=1000,
+        ),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert "unknown provider 'unknown'" in stderr.getvalue()
+    assert "deepseek, kimi, openrouter" in stderr.getvalue()
+    assert "--list-providers" in stderr.getvalue()
+
+
+def test_cli_openrouter_provider_requires_explicit_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_DEFAULT_MODEL", raising=False)
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    stderr = StringIO()
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(
+        argparse.Namespace(
+            input=str(input_path),
+            url=[],
+            task=None,
+            question=None,
+            model=None,
+            provider="openrouter",
+            list_providers=False,
+            base_url=None,
+            api_key_env=None,
+            provider_header=[],
+            disable_tracing=False,
+            auto_write=False,
+            min_write_confidence=0.85,
+            format="json",
+            output=None,
+            timeout_seconds=1.0,
+            max_url_bytes=1000,
+        ),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert "provider 'openrouter' requires --model or OPENAI_DEFAULT_MODEL" in stderr.getvalue()
+
+
 @pytest.mark.parametrize(
     ("args_update", "message"),
     [
@@ -628,6 +948,8 @@ def test_cli_rejects_invalid_provider_config(
         "task": None,
         "question": None,
         "model": "provider-model",
+        "provider": None,
+        "list_providers": False,
         "base_url": "https://api.deepseek.com",
         "api_key_env": "DEEPSEEK_API_KEY",
         "provider_header": [],
@@ -661,6 +983,8 @@ def test_cli_agent_dry_run_invalid_input_returns_nonzero(tmp_path: Path) -> None
         task=None,
         question=None,
         model=None,
+        provider=None,
+        list_providers=False,
         auto_write=False,
         min_write_confidence=0.85,
         format="json",
