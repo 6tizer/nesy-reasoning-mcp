@@ -190,6 +190,38 @@ Search failures return an `IngestionReport` with diagnostics and
 memory is not written. If all search results are filtered and no other evidence
 exists, the command returns a diagnostic report instead of running extraction.
 
+External GraphRAG or memory systems can pass provider-neutral retrieval batches
+without adding a vector store to NeSy core:
+
+```bash
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --retrieval-input retrieval-batch.json \
+  --task "Extract only evidence-backed sufficient or necessary relations" \
+  --format json
+```
+
+The retrieval batch can contain evidence records or candidate relations. Evidence
+records are converted to existing `EvidenceRecord` items with
+`source_type="external_retrieval"` and provenance under
+`metadata.retrieval`. Missing `retriever_name` or both `original_url` and
+`source_document_id` produces a diagnostic report and does not call the Agent SDK
+runtime or write graph memory. Retrieval evidence is ordered after input-file
+evidence and before fetched/crawled URL evidence and search evidence.
+
+Retrieved candidate relations can be validated without running extraction:
+
+```bash
+uv run --no-editable nesy-reasoning-mcp ingest retrieval validate \
+  --input retrieval-batch.json \
+  --voting-policy risk_tiered \
+  --format json
+```
+
+This command calls the existing `nesy.validate_candidate_relations` path and
+always returns `persisted=false`. Retrieved candidates that lack retriever/source
+provenance are forced to `queue` even if the deterministic gate would otherwise
+approve them.
+
 The script wrapper calls the same implementation:
 
 ```bash

@@ -105,6 +105,7 @@ def test_ingest_help_lists_agent_dry_run_subcommand() -> None:
 
     assert "agent-dry-run" in completed.stdout
     assert "queue" in completed.stdout
+    assert "retrieval" in completed.stdout
     assert completed.stderr == ""
 
 
@@ -141,6 +142,31 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     assert "--crawl-max-total-bytes" in completed.stdout
     assert "--crawl-timeout-seconds" in completed.stdout
     assert "--crawl-allow-domain" in completed.stdout
+    assert "--retrieval-input" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_retrieval_validate_help_lists_options() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "retrieval",
+            "validate",
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    assert "--input" in completed.stdout
+    assert "--min-write-confidence" in completed.stdout
+    assert "--voting-policy" in completed.stdout
+    assert "--high-priority-reviewer-model" in completed.stdout
     assert completed.stderr == ""
 
 
