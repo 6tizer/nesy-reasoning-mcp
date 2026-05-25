@@ -170,6 +170,66 @@ def test_ingest_retrieval_validate_help_lists_options() -> None:
     assert completed.stderr == ""
 
 
+def test_ingest_retrieval_validate_end_to_end(tmp_path: Path) -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        confidence=0.9,
+        evidence=[EvidenceRecord(url="https://example.com/source", span="A enables B.")],
+    )
+    review = ReviewDecision(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type="sufficient",
+        final_confidence=0.9,
+        reasons=["Evidence directly supports the relation."],
+    )
+    retrieval_path = tmp_path / "retrieval.json"
+    retrieval_path.write_text(
+        json.dumps(
+            {
+                "retriever_name": "graph-rag",
+                "candidates": [
+                    {
+                        "candidate": candidate.model_dump(mode="json"),
+                        "source_document_id": "doc-1",
+                    }
+                ],
+                "reviews": [review.model_dump(mode="json")],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "retrieval",
+            "validate",
+            "--input",
+            str(retrieval_path),
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "ok"
+    assert payload["persisted"] is False
+    assert payload["approved_count"] == 1
+    assert payload["external_retrieval"]["retriever_name"] == "graph-rag"
+    assert completed.stderr == ""
+
+
 def test_ingest_queue_list_reads_persisted_records(tmp_path: Path) -> None:
     config_path, sqlite_path = _write_sqlite_config(tmp_path)
     store = create_relation_store(

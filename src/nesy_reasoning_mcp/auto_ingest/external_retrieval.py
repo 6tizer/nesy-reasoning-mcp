@@ -16,6 +16,8 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
 from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.time_utils import utc_now_iso
 
+MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES = 5_000_000
+
 
 class ExternalRetrievedEvidence(BaseModel):
     """Evidence returned by an external GraphRAG or memory retriever."""
@@ -122,6 +124,23 @@ def convert_external_retrieval_batch(
     diagnostics: list[Diagnostic] = []
     evidence: list[EvidenceRecord] = []
     missing_candidate_provenance_ids: list[str] = []
+    candidate_ids = {item.candidate.id for item in batch.candidates}
+    orphan_review_candidate_ids = list(
+        dict.fromkeys(
+            review.candidate_id
+            for review in batch.reviews
+            if review.candidate_id not in candidate_ids
+        )
+    )
+    if orphan_review_candidate_ids:
+        diagnostics.append(
+            Diagnostic(
+                level="warning",
+                code="RETRIEVAL_ORPHAN_REVIEW",
+                message="retrieval reviews reference candidates not present in the batch",
+                related_ids=orphan_review_candidate_ids,
+            )
+        )
 
     for index, item in enumerate(batch.evidence, start=1):
         provenance = _retrieval_metadata(batch, item)
@@ -156,6 +175,7 @@ def convert_external_retrieval_batch(
         "accepted_evidence_count": len(evidence),
         "candidate_count": len(batch.candidates),
         "review_count": len(batch.reviews),
+        "orphan_review_candidate_ids": orphan_review_candidate_ids,
         "missing_candidate_provenance_ids": missing_candidate_provenance_ids,
         "diagnostic_count": diagnostic_count,
     }

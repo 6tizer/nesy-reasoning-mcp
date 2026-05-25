@@ -29,6 +29,7 @@ from nesy_reasoning_mcp.auto_ingest.crawler import (
     crawl_url_evidence,
 )
 from nesy_reasoning_mcp.auto_ingest.external_retrieval import (
+    MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES,
     ExternalRetrievalBatch,
     ExternalRetrievalConversion,
     convert_external_retrieval_batch,
@@ -686,6 +687,7 @@ async def _run_retrieval_command(args: argparse.Namespace) -> dict[str, Any]:
             store,
         )
         structured = dict(result.structuredContent or {})
+        structured = _append_retrieval_diagnostics(structured, conversion.diagnostics)
         structured = _apply_retrieval_provenance_gate(structured, conversion)
         structured["external_retrieval"] = conversion.metadata
         return structured
@@ -693,7 +695,11 @@ async def _run_retrieval_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _load_external_retrieval(path: str) -> ExternalRetrievalConversion:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    input_path = Path(path)
+    size = input_path.stat().st_size
+    if size > MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES:
+        raise ValueError(f"retrieval input JSON exceeds {MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES} bytes")
+    data = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("retrieval input JSON must be an object")
     batch = ExternalRetrievalBatch.model_validate(data)
@@ -737,6 +743,7 @@ def _apply_retrieval_provenance_gate(
     for item in structured.get("gate_results", []):
         if not isinstance(item, dict):
             continue
+        item = dict(item)
         if item.get("candidate_id") in missing_ids and item.get("action") == "auto_write":
             item = {
                 **item,
@@ -745,15 +752,14 @@ def _apply_retrieval_provenance_gate(
             }
         gate_results.append(item)
 
-    approved_relations = [
-        item
-        for item in structured.get("approved_relations", [])
-        if not (
-            isinstance(item, dict)
-            and isinstance(item.get("provenance"), dict)
-            and item["provenance"].get("candidate_id") in missing_ids
-        )
-    ]
+    approved_relations: list[dict[str, Any]] = []
+    for item in structured.get("approved_relations", []):
+        if not isinstance(item, dict):
+            continue
+        provenance = item.get("provenance")
+        if isinstance(provenance, dict) and provenance.get("candidate_id") in missing_ids:
+            continue
+        approved_relations.append(dict(item))
     diagnostics = list(structured.get("diagnostics", []))
     diagnostics.append(
         Diagnostic(
@@ -778,6 +784,22 @@ def _apply_retrieval_provenance_gate(
         "gate_results": gate_results,
         "approved_relations": approved_relations,
         "diagnostics": diagnostics,
+    }
+
+
+def _append_retrieval_diagnostics(
+    structured: dict[str, Any],
+    diagnostics: list[Diagnostic],
+) -> dict[str, Any]:
+    if not diagnostics:
+        return structured
+    rendered = [item.model_dump(mode="json") for item in diagnostics]
+    status = structured.get("status")
+    next_status = "error" if status == "error" else "warning"
+    return {
+        **structured,
+        "status": next_status,
+        "diagnostics": [*structured.get("diagnostics", []), *rendered],
     }
 
 

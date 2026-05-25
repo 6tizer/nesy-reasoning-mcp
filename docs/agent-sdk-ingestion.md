@@ -207,6 +207,11 @@ records are converted to existing `EvidenceRecord` items with
 `source_document_id` produces a diagnostic report and does not call the Agent SDK
 runtime or write graph memory. Retrieval evidence is ordered after input-file
 evidence and before fetched/crawled URL evidence and search evidence.
+Retrieval input JSON is bounded to 5,000,000 bytes. Scores are stored as raw
+retriever metadata and are not normalized or used for gating. When an evidence
+record has `source_document_id` but no `original_url`, its `EvidenceRecord.url`
+uses an internal `external-retrieval://<document_id>#<chunk_id>` audit URI; this
+scheme is not fetchable and is only a local provenance identifier.
 
 Retrieved candidate relations can be validated without running extraction:
 

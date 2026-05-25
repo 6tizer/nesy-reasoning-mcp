@@ -750,6 +750,36 @@ def test_cli_agent_dry_run_retrieval_provenance_error_short_circuits(
     assert payload["metadata"]["external_retrieval"]["diagnostic_count"] == 1
 
 
+def test_cli_agent_dry_run_retrieval_input_size_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retrieval_path = tmp_path / "retrieval.json"
+    retrieval_path.write_text(json.dumps({"evidence": []}), encoding="utf-8")
+    monkeypatch.setattr(ingest_cli, "MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES", 8)
+    stderr = StringIO()
+    args = argparse.Namespace(
+        input=None,
+        retrieval_input=str(retrieval_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=[],
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=stderr)
+
+    assert exit_code == 2
+    assert "retrieval input JSON exceeds" in stderr.getvalue()
+
+
 def test_cli_agent_dry_run_search_failure_short_circuits_auto_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1100,9 +1130,59 @@ def test_cli_retrieval_validate_queues_missing_candidate_provenance(
     assert exit_code == 0
     assert payload["status"] == "warning"
     assert payload["approved_count"] == 0
+    assert payload["approved_relations"] == []
     assert payload["queued_count"] == 1
     assert payload["gate_results"][0]["action"] == "queue"
     assert payload["diagnostics"][-1]["code"] == "RETRIEVAL_PROVENANCE_MISSING"
+
+
+def test_cli_retrieval_validate_reports_orphan_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retrieval_path = tmp_path / "retrieval.json"
+    candidate = _candidate()
+    retrieval_path.write_text(
+        json.dumps(
+            {
+                "retriever_name": "graph-rag",
+                "candidates": [
+                    {
+                        "candidate": candidate.model_dump(mode="json"),
+                        "source_document_id": "doc-1",
+                    }
+                ],
+                "reviews": [
+                    {
+                        "candidate_id": "missing-candidate",
+                        "decision": "needs_human",
+                        "reasons": ["No matching candidate."],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ingest_cli, "create_relation_store", lambda config: RelationStore())
+    stdout = StringIO()
+    args = argparse.Namespace(
+        retrieval_command="validate",
+        input=str(retrieval_path),
+        min_write_confidence=0.85,
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=[],
+        format="json",
+    )
+
+    exit_code = ingest_cli.run_retrieval_cli(args, stdout=stdout, stderr=StringIO())
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert payload["status"] == "warning"
+    assert "RETRIEVAL_ORPHAN_REVIEW" in [
+        diagnostic["code"] for diagnostic in payload["diagnostics"]
+    ]
+    assert payload["external_retrieval"]["orphan_review_candidate_ids"] == ["missing-candidate"]
 
 
 def test_cli_disable_tracing_default_openai_path(

@@ -36,6 +36,11 @@ def test_external_retrieval_batch_rejects_unknown_fields() -> None:
         )
 
 
+def test_external_retrieval_evidence_rejects_empty_span() -> None:
+    with pytest.raises(ValidationError):
+        ExternalRetrievedEvidence(span=" ")
+
+
 def test_external_retrieval_evidence_round_trips_provenance() -> None:
     conversion = convert_external_retrieval_batch(
         ExternalRetrievalBatch(
@@ -123,3 +128,29 @@ def test_external_retrieval_missing_candidate_provenance_is_marked_for_queue() -
     assert conversion.missing_candidate_provenance_ids == ["candidate-1"]
     assert conversion.metadata["diagnostic_count"] == 1
     assert conversion.candidates[0].metadata["retrieval"]["provenance_complete"] is False
+
+
+def test_external_retrieval_orphan_review_is_reported() -> None:
+    conversion = convert_external_retrieval_batch(
+        ExternalRetrievalBatch(
+            retriever_name="graph-rag",
+            candidates=[
+                ExternalRetrievedCandidate(
+                    candidate=_candidate(),
+                    source_document_id="doc-1",
+                )
+            ],
+            reviews=[
+                {
+                    "candidate_id": "missing-candidate",
+                    "decision": "needs_human",
+                    "reasons": ["No matching candidate."],
+                }
+            ],
+        )
+    )
+
+    assert conversion.has_errors is False
+    assert conversion.diagnostics[0].code == "RETRIEVAL_ORPHAN_REVIEW"
+    assert conversion.diagnostics[0].related_ids == ["missing-candidate"]
+    assert conversion.metadata["orphan_review_candidate_ids"] == ["missing-candidate"]
