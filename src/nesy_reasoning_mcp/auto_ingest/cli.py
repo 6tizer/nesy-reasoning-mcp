@@ -14,6 +14,20 @@ from urllib.parse import urlparse
 import anyio
 from pydantic import ValidationError
 
+from nesy_reasoning_mcp.auto_ingest.crawler import (
+    DEFAULT_CRAWL_MAX_DEPTH,
+    DEFAULT_CRAWL_MAX_PAGE_BYTES,
+    DEFAULT_CRAWL_MAX_PAGES,
+    DEFAULT_CRAWL_MAX_TOTAL_BYTES,
+    DEFAULT_CRAWL_TIMEOUT_SECONDS,
+    MAX_CRAWL_MAX_DEPTH,
+    MAX_CRAWL_MAX_PAGES,
+    MAX_CRAWL_MAX_TOTAL_BYTES,
+    MAX_CRAWL_TIMEOUT_SECONDS,
+    CrawlOptions,
+    CrawlResult,
+    crawl_url_evidence,
+)
 from nesy_reasoning_mcp.auto_ingest.fetcher import (
     DEFAULT_FETCH_TIMEOUT_SECONDS,
     DEFAULT_MAX_FETCH_BYTES,
@@ -206,6 +220,48 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_SEARCH_API_KEY_ENV,
         help="Environment variable containing the search provider API key.",
     )
+    parser.add_argument(
+        "--crawl",
+        action="store_true",
+        help="Crawl explicit URL seeds with bounded same-domain traversal.",
+    )
+    parser.add_argument(
+        "--crawl-max-depth",
+        type=int,
+        default=DEFAULT_CRAWL_MAX_DEPTH,
+        help=f"Maximum crawl link depth, 0-{MAX_CRAWL_MAX_DEPTH}.",
+    )
+    parser.add_argument(
+        "--crawl-max-pages",
+        type=int,
+        default=DEFAULT_CRAWL_MAX_PAGES,
+        help=f"Maximum crawl pages, 1-{MAX_CRAWL_MAX_PAGES}.",
+    )
+    parser.add_argument(
+        "--crawl-max-page-bytes",
+        type=int,
+        default=DEFAULT_CRAWL_MAX_PAGE_BYTES,
+        help="Maximum bytes to read from each crawled page.",
+    )
+    parser.add_argument(
+        "--crawl-max-total-bytes",
+        type=int,
+        default=DEFAULT_CRAWL_MAX_TOTAL_BYTES,
+        help=f"Maximum bytes to read across the crawl, max {MAX_CRAWL_MAX_TOTAL_BYTES}.",
+    )
+    parser.add_argument(
+        "--crawl-timeout-seconds",
+        type=float,
+        default=DEFAULT_CRAWL_TIMEOUT_SECONDS,
+        help=f"Per-page crawl timeout, max {MAX_CRAWL_TIMEOUT_SECONDS} seconds.",
+    )
+    parser.add_argument(
+        "--crawl-allow-domain",
+        action="append",
+        default=[],
+        dest="crawl_allow_domains",
+        help="Additional domain allowed for crawl links. May be repeated.",
+    )
 
 
 def add_review_queue_arguments(parser: argparse.ArgumentParser) -> None:
@@ -310,6 +366,9 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         )
     ingestion_input = _load_ingestion_input(args)
     search_result = _search_result_from_args(args)
+    crawl_enabled = bool(getattr(args, "crawl", False))
+    if crawl_enabled and not ingestion_input.urls:
+        raise ValueError("--crawl requires at least one --url or input urls")
     if not ingestion_input.evidence and not ingestion_input.urls and search_result is None:
         raise ValueError(
             "agent-dry-run requires --input evidence, at least one --url, or --search-query"
@@ -317,16 +376,23 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     if search_result is not None and search_result.has_errors:
         return _diagnostic_report_from_search(args, ingestion_input, search_result)
 
-    fetched = fetch_url_evidence_many(
-        ingestion_input.urls,
-        timeout_seconds=args.timeout_seconds,
-        max_bytes=args.max_url_bytes,
+    crawl_result = _crawl_result_from_args(args, ingestion_input) if crawl_enabled else None
+    fetched = (
+        crawl_result.evidence
+        if crawl_result is not None
+        else fetch_url_evidence_many(
+            ingestion_input.urls,
+            timeout_seconds=args.timeout_seconds,
+            max_bytes=args.max_url_bytes,
+        )
     )
+    crawl_diagnostics = crawl_result.diagnostics if crawl_result is not None else []
     search_evidence = search_result.evidence if search_result is not None else []
     search_diagnostics = search_result.diagnostics if search_result is not None else []
     evidence = [*ingestion_input.evidence, *fetched, *search_evidence]
     if not evidence:
         diagnostics = [
+            *crawl_diagnostics,
             *search_diagnostics,
             Diagnostic(
                 level="error",
@@ -338,6 +404,7 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
             args,
             ingestion_input,
             search_result,
+            crawl_result=crawl_result,
             diagnostics=diagnostics,
         )
     effective_input = ingestion_input.model_copy(
@@ -361,12 +428,23 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         disable_tracing=bool(getattr(args, "disable_tracing", False)),
     )
     if search_result is None:
-        return report
+        if crawl_result is None:
+            return report
+        return report.model_copy(
+            update={
+                "diagnostics": [*crawl_diagnostics, *report.diagnostics],
+                "metadata": {
+                    **report.metadata,
+                    "crawl_retrieval": crawl_result.metadata,
+                },
+            }
+        )
     return report.model_copy(
         update={
-            "diagnostics": [*search_diagnostics, *report.diagnostics],
+            "diagnostics": [*crawl_diagnostics, *search_diagnostics, *report.diagnostics],
             "metadata": {
                 **report.metadata,
+                **({"crawl_retrieval": crawl_result.metadata} if crawl_result is not None else {}),
                 "search_retrieval": search_result.metadata,
             },
         }
@@ -393,11 +471,28 @@ def _search_result_from_args(args: argparse.Namespace) -> SearchRetrievalResult 
     return retrieve_search_evidence(options)
 
 
+def _crawl_result_from_args(
+    args: argparse.Namespace,
+    ingestion_input: IngestionInput,
+) -> CrawlResult:
+    options = CrawlOptions(
+        seed_urls=ingestion_input.urls,
+        max_depth=getattr(args, "crawl_max_depth", DEFAULT_CRAWL_MAX_DEPTH),
+        max_pages=getattr(args, "crawl_max_pages", DEFAULT_CRAWL_MAX_PAGES),
+        max_page_bytes=getattr(args, "crawl_max_page_bytes", DEFAULT_CRAWL_MAX_PAGE_BYTES),
+        max_total_bytes=getattr(args, "crawl_max_total_bytes", DEFAULT_CRAWL_MAX_TOTAL_BYTES),
+        timeout_seconds=getattr(args, "crawl_timeout_seconds", DEFAULT_CRAWL_TIMEOUT_SECONDS),
+        allow_domains=getattr(args, "crawl_allow_domains", []) or [],
+    )
+    return crawl_url_evidence(options)
+
+
 def _diagnostic_report_from_search(
     args: argparse.Namespace,
     ingestion_input: IngestionInput,
     search_result: SearchRetrievalResult | None,
     *,
+    crawl_result: CrawlResult | None = None,
     diagnostics: list[Diagnostic] | None = None,
 ) -> IngestionReport:
     return IngestionReport(
@@ -414,6 +509,7 @@ def _diagnostic_report_from_search(
             "evidence_count": len(ingestion_input.evidence),
             "url_count": len(ingestion_input.urls),
             "auto_write_requested": bool(getattr(args, "auto_write", False)),
+            "crawl_retrieval": crawl_result.metadata if crawl_result is not None else None,
             "search_retrieval": search_result.metadata if search_result is not None else None,
         },
     )

@@ -134,6 +134,13 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     assert "--search-include-domain" in completed.stdout
     assert "--search-exclude-domain" in completed.stdout
     assert "--search-api-key-env" in completed.stdout
+    assert "--crawl" in completed.stdout
+    assert "--crawl-max-depth" in completed.stdout
+    assert "--crawl-max-pages" in completed.stdout
+    assert "--crawl-max-page-bytes" in completed.stdout
+    assert "--crawl-max-total-bytes" in completed.stdout
+    assert "--crawl-timeout-seconds" in completed.stdout
+    assert "--crawl-allow-domain" in completed.stdout
     assert completed.stderr == ""
 
 
