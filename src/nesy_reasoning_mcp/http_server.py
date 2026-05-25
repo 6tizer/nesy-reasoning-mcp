@@ -84,6 +84,7 @@ class HttpGuardMiddleware:
         client = scope.get("client")
         key = str(client[0]) if client else "unknown"
         now = time.monotonic()
+        self._prune_rate_hits(now)
         window_start, count = self._hits.get(key, (now, 0))
         if now - window_start >= 60:
             self._hits[key] = (now, 1)
@@ -92,6 +93,13 @@ class HttpGuardMiddleware:
             return False
         self._hits[key] = (window_start, count + 1)
         return True
+
+    def _prune_rate_hits(self, now: float) -> None:
+        expired = [
+            key for key, (window_start, _count) in self._hits.items() if now - window_start >= 60
+        ]
+        for key in expired:
+            del self._hits[key]
 
 
 class StreamableHTTPASGIApp:

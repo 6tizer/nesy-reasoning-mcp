@@ -21,12 +21,10 @@ from nesy_reasoning_mcp.schemas import (
     RelationFilter,
     RelationInput,
     RelationRecord,
-    RelationType,
 )
 from nesy_reasoning_mcp.storage.audit import AuditEntry, _input_hash
 from nesy_reasoning_mcp.storage.common import (
     _dumps,
-    _edge,
     _group_for_store,
     _group_matches_scope,
     _independence_for_store,
@@ -42,6 +40,7 @@ from nesy_reasoning_mcp.storage.common import (
     _relation_from_row,
     _upsert_relations,
     graph_stats_for,
+    normalize_relation_edges,
 )
 
 P = ParamSpec("P")
@@ -59,6 +58,40 @@ def _locked(
             return method(self, *args, **kwargs)
 
     return cast(Any, wrapper)
+
+
+def _relation_filter_sql(relation_filter: RelationFilter | None) -> tuple[str, list[Any]]:
+    if relation_filter is None:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if relation_filter.source is not None:
+        clauses.append("source = ?")
+        params.append(relation_filter.source)
+    if relation_filter.target is not None:
+        clauses.append("target = ?")
+        params.append(relation_filter.target)
+    if relation_filter.relation_type is not None:
+        clauses.append("relation_type = ?")
+        params.append(relation_filter.relation_type.value)
+    if relation_filter.context_id is not None:
+        clauses.append("context_id = ?")
+        params.append(relation_filter.context_id)
+    if relation_filter.store_id is not None:
+        clauses.append("store_id = ?")
+        params.append(relation_filter.store_id)
+    if relation_filter.domain is not None:
+        clauses.append("json_extract(metadata_json, '$.domain') = ?")
+        params.append(relation_filter.domain)
+    return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
+
+
+def _require_unique(values: Iterable[str], label: str) -> None:
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            raise ValueError(f"duplicate {label}: {value}")
+        seen.add(value)
 
 
 class SqliteRelationStore:
@@ -202,24 +235,24 @@ class SqliteRelationStore:
         offset: int = 0,
     ) -> list[RelationRecord]:
         """List relation records matching an optional filter."""
-        rows = self._conn.execute(
-            """
+        where_sql, params = _relation_filter_sql(relation_filter)
+        sql = f"""
             SELECT id, source, source_id, target, target_id, relation_type, polarity,
                    confidence, context_id, store_id, temporal_json, assumptions_json,
                    provenance_json, metadata_json,
                    created_at, updated_at
             FROM relations
+            {where_sql}
             ORDER BY created_at, id
             """
-        ).fetchall()
-        records = [_relation_from_row(row) for row in rows]
-        matched = [
-            relation
-            for relation in records
-            if relation_filter is None or _matches_filter(relation, relation_filter)
-        ]
-        matched = matched[offset:]
-        return matched[:limit] if limit is not None else matched
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_relation_from_row(row) for row in rows]
 
     @_locked
     def list_exclusive_groups(self) -> list[ExclusiveGroupRecord]:
@@ -361,21 +394,7 @@ class SqliteRelationStore:
         selected = list(self.list_relations() if relations is None else relations)
         edges: list[CanonicalImplicationEdge] = []
         for relation in selected:
-            if relation.relation_type == RelationType.SUFFICIENT:
-                edges.append(
-                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
-                )
-            elif relation.relation_type == RelationType.NECESSARY:
-                edges.append(
-                    _edge(relation, relation.canonical_target, relation.canonical_source, "a")
-                )
-            elif relation.relation_type == RelationType.EQUIVALENT:
-                edges.append(
-                    _edge(relation, relation.canonical_source, relation.canonical_target, "a")
-                )
-                edges.append(
-                    _edge(relation, relation.canonical_target, relation.canonical_source, "b")
-                )
+            edges.extend(normalize_relation_edges(relation))
         return edges
 
     @_locked
@@ -603,6 +622,13 @@ class SqliteRelationStore:
               negates TEXT,
               metadata_json TEXT
             );
+
+            CREATE INDEX IF NOT EXISTS idx_relations_context_store_type
+              ON relations (context_id, store_id, relation_type);
+            CREATE INDEX IF NOT EXISTS idx_relations_source_target
+              ON relations (source, target);
+            CREATE INDEX IF NOT EXISTS idx_relations_created_id
+              ON relations (created_at, id);
             """
         )
         self._ensure_relation_identity_columns()
@@ -752,16 +778,263 @@ class SqliteRelationStore:
         context_metadata: dict[str, Any],
         propositions: Iterable[PropositionRecord],
     ) -> None:
-        self._conn.execute("DELETE FROM relations")
-        self._conn.execute("DELETE FROM exclusive_groups")
-        self._conn.execute("DELETE FROM independence_records")
-        self._conn.execute("DELETE FROM context_metadata")
-        self._conn.execute("DELETE FROM propositions")
-        self._insert_relations(relations)
-        self._insert_exclusive_groups(groups)
-        self._insert_independence_records(independence_records)
-        self._insert_context_metadata(context_metadata)
-        self._insert_propositions(propositions)
+        relation_list = list(relations)
+        group_list = list(groups)
+        independence_list = list(independence_records)
+        proposition_list = list(propositions)
+        _require_unique((record.id for record in relation_list), "relation id")
+        _require_unique((record.id for record in independence_list), "independence id")
+        _require_unique((record.id for record in proposition_list), "proposition id")
+
+        self._sync_single_key_table(
+            "relations",
+            "id",
+            [record.id for record in relation_list],
+            "desired_relation_ids",
+        )
+        self._sync_exclusive_groups(group_list)
+        self._sync_single_key_table(
+            "independence_records",
+            "id",
+            [record.id for record in independence_list],
+            "desired_independence_ids",
+        )
+        self._sync_single_key_table(
+            "context_metadata",
+            "context_id",
+            list(context_metadata),
+            "desired_context_ids",
+        )
+        self._sync_single_key_table(
+            "propositions",
+            "id",
+            [record.id for record in proposition_list],
+            "desired_proposition_ids",
+        )
+        self._upsert_relation_records(relation_list)
+        self._upsert_exclusive_group_records(group_list)
+        self._upsert_independence_record_rows(independence_list)
+        self._upsert_context_metadata(context_metadata)
+        self._upsert_proposition_records(proposition_list)
+
+    def _sync_single_key_table(
+        self,
+        table: str,
+        key_column: str,
+        desired_keys: list[str],
+        temp_table: str,
+    ) -> None:
+        self._conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {temp_table} (value TEXT PRIMARY KEY)")
+        self._conn.execute(f"DELETE FROM {temp_table}")
+        self._conn.executemany(
+            f"INSERT INTO {temp_table} (value) VALUES (?)",
+            [(key,) for key in desired_keys],
+        )
+        self._conn.execute(
+            f"""
+            DELETE FROM {table}
+            WHERE NOT EXISTS (
+              SELECT 1 FROM {temp_table}
+              WHERE {temp_table}.value = {table}.{key_column}
+            )
+            """
+        )
+
+    def _sync_exclusive_groups(self, records: list[ExclusiveGroupRecord]) -> None:
+        self._conn.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS desired_exclusive_group_rows (
+              group_id TEXT NOT NULL,
+              member TEXT NOT NULL,
+              context_id TEXT NOT NULL,
+              store_id TEXT NOT NULL,
+              PRIMARY KEY (group_id, member, context_id, store_id)
+            )
+            """
+        )
+        self._conn.execute("DELETE FROM desired_exclusive_group_rows")
+        self._conn.executemany(
+            """
+            INSERT INTO desired_exclusive_group_rows (group_id, member, context_id, store_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (record.group_id, member, record.context_id, record.store_id)
+                for record in records
+                for member in record.members
+            ],
+        )
+        self._conn.execute(
+            """
+            DELETE FROM exclusive_groups
+            WHERE NOT EXISTS (
+              SELECT 1 FROM desired_exclusive_group_rows desired
+              WHERE desired.group_id = exclusive_groups.group_id
+                AND desired.member = exclusive_groups.member
+                AND desired.context_id = exclusive_groups.context_id
+                AND desired.store_id = exclusive_groups.store_id
+            )
+            """
+        )
+
+    def _upsert_relation_records(self, records: Iterable[RelationRecord]) -> None:
+        self._conn.executemany(
+            """
+            INSERT INTO relations (
+                id, source, source_id, target, target_id, relation_type, polarity,
+                confidence, context_id, store_id, temporal_json, assumptions_json,
+                provenance_json, metadata_json,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                source = excluded.source,
+                source_id = excluded.source_id,
+                target = excluded.target,
+                target_id = excluded.target_id,
+                relation_type = excluded.relation_type,
+                polarity = excluded.polarity,
+                confidence = excluded.confidence,
+                context_id = excluded.context_id,
+                store_id = excluded.store_id,
+                temporal_json = excluded.temporal_json,
+                assumptions_json = excluded.assumptions_json,
+                provenance_json = excluded.provenance_json,
+                metadata_json = excluded.metadata_json,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    record.id,
+                    record.source,
+                    record.source_id,
+                    record.target,
+                    record.target_id,
+                    record.relation_type.value,
+                    record.polarity.value,
+                    record.confidence,
+                    record.context_id,
+                    record.store_id,
+                    _dumps(record.temporal),
+                    _dumps(record.assumptions),
+                    _dumps(record.provenance),
+                    _dumps(record.metadata),
+                    record.created_at,
+                    record.updated_at,
+                )
+                for record in records
+            ],
+        )
+
+    def _upsert_exclusive_group_records(self, records: Iterable[ExclusiveGroupRecord]) -> None:
+        rows: list[tuple[str, str, str, str, str, int, str | None, str, str]] = []
+        for record in records:
+            rows.extend(
+                (
+                    record.group_id,
+                    member,
+                    record.context_id,
+                    record.store_id,
+                    record.scope.value,
+                    index,
+                    _dumps(record.metadata),
+                    record.created_at,
+                    record.updated_at,
+                )
+                for index, member in enumerate(record.members)
+            )
+        self._conn.executemany(
+            """
+            INSERT INTO exclusive_groups (
+                group_id, member, context_id, store_id, scope, member_index,
+                metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(group_id, member, context_id, store_id) DO UPDATE SET
+                scope = excluded.scope,
+                member_index = excluded.member_index,
+                metadata_json = excluded.metadata_json,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+
+    def _upsert_independence_record_rows(self, records: Iterable[IndependenceRecord]) -> None:
+        self._conn.executemany(
+            """
+            INSERT INTO independence_records (
+                id, left_value, right_value, relation, confidence, context_id, store_id,
+                metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                left_value = excluded.left_value,
+                right_value = excluded.right_value,
+                relation = excluded.relation,
+                confidence = excluded.confidence,
+                context_id = excluded.context_id,
+                store_id = excluded.store_id,
+                metadata_json = excluded.metadata_json,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    record.id,
+                    record.left,
+                    record.right,
+                    record.relation,
+                    record.confidence,
+                    record.context_id,
+                    record.store_id,
+                    _dumps(record.metadata),
+                    record.created_at,
+                    record.updated_at,
+                )
+                for record in records
+            ],
+        )
+
+    def _upsert_context_metadata(self, context_metadata: dict[str, Any]) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        self._conn.executemany(
+            """
+            INSERT INTO context_metadata (context_id, metadata_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(context_id) DO UPDATE SET
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (context_id, _dumps(metadata), timestamp)
+                for context_id, metadata in sorted(context_metadata.items())
+            ],
+        )
+
+    def _upsert_proposition_records(self, records: Iterable[PropositionRecord]) -> None:
+        self._conn.executemany(
+            """
+            INSERT INTO propositions (id, label, aliases_json, negates, metadata_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label = excluded.label,
+                aliases_json = excluded.aliases_json,
+                negates = excluded.negates,
+                metadata_json = excluded.metadata_json
+            """,
+            [
+                (
+                    record.id,
+                    record.label,
+                    _dumps(record.aliases),
+                    record.negates,
+                    _dumps(record.metadata),
+                )
+                for record in records
+            ],
+        )
 
     def _insert_context_metadata(self, context_metadata: dict[str, Any]) -> None:
         timestamp = datetime.now(UTC).isoformat()

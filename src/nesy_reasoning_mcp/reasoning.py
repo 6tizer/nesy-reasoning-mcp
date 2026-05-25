@@ -22,7 +22,9 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     RelationType,
 )
+from nesy_reasoning_mcp.storage.common import normalize_relation_edges
 from nesy_reasoning_mcp.store import graph_stats_for
+from nesy_reasoning_mcp.time_utils import parse_datetime_value
 
 ZERO_CONFIDENCE_WEIGHT = 1_000_000_000.0
 
@@ -183,18 +185,18 @@ class GraphIndex:
             return [path] if path is not None else []
 
         node_paths = nx.all_simple_paths(graph, start, end, cutoff=cutoff)
-        paths = [
-            ReasoningPath(
-                nodes=list(nodes),
-                edges=self._best_edges_for_nodes(nodes, min_confidence=min_confidence),
-                evidence_confidence=aggregate_confidence(
-                    self._best_edges_for_nodes(nodes, min_confidence=min_confidence),
-                    confidence_policy,
-                ),
-                confidence_policy=confidence_policy,
+        paths: list[ReasoningPath] = []
+        for nodes in node_paths:
+            node_list = list(nodes)
+            edges = self._best_edges_for_nodes(node_list, min_confidence=min_confidence)
+            paths.append(
+                ReasoningPath(
+                    nodes=node_list,
+                    edges=edges,
+                    evidence_confidence=aggregate_confidence(edges, confidence_policy),
+                    confidence_policy=confidence_policy,
+                )
             )
-            for nodes in node_paths
-        ]
         if strategy == PathStrategy.SHORTEST:
             paths.sort(key=lambda path: (len(path.edges), -rank_confidence(path.edges)))
         else:
@@ -372,14 +374,7 @@ def find_exclusive_contradictions(
 
 def normalize_relation(relation: RelationRecord) -> list[CanonicalImplicationEdge]:
     """Normalize an external relation record into canonical implication edges."""
-    if relation.relation_type == RelationType.SUFFICIENT:
-        return [_edge(relation, relation.canonical_source, relation.canonical_target, "a")]
-    if relation.relation_type == RelationType.NECESSARY:
-        return [_edge(relation, relation.canonical_target, relation.canonical_source, "a")]
-    return [
-        _edge(relation, relation.canonical_source, relation.canonical_target, "a"),
-        _edge(relation, relation.canonical_target, relation.canonical_source, "b"),
-    ]
+    return normalize_relation_edges(relation)
 
 
 def relations_compatible_with_filter(
@@ -1007,37 +1002,4 @@ def _valid_at_matches(relation: RelationRecord, valid_at: datetime) -> bool:
 
 
 def _parse_temporal_value(value: Any, reference: datetime) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    else:
-        return None
-
-    if parsed.tzinfo is None and reference.tzinfo is not None:
-        return parsed.replace(tzinfo=reference.tzinfo)
-    if parsed.tzinfo is not None and reference.tzinfo is None:
-        return parsed.replace(tzinfo=None)
-    return parsed
-
-
-def _edge(
-    relation: RelationRecord,
-    antecedent: str,
-    consequent: str,
-    suffix: str,
-) -> CanonicalImplicationEdge:
-    return CanonicalImplicationEdge(
-        edge_id=f"edge_{relation.id}_{suffix}",
-        relation_id=relation.id,
-        antecedent=antecedent,
-        consequent=consequent,
-        source_relation_type=relation.relation_type,
-        confidence=relation.confidence,
-        context_id=relation.context_id,
-        store_id=relation.store_id,
-        assumptions=list(relation.assumptions),
-        temporal=relation.temporal,
-    )
+    return parse_datetime_value(value, default_tz=None, reference=reference)
