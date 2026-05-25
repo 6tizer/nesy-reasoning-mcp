@@ -1535,6 +1535,14 @@ def _provider_config_from_args(
             "provider such as --provider deepseek"
         )
     if (
+        provider_thinking is not None
+        and provider_entry is not None
+        and "thinking" not in provider_entry.extra_body
+    ):
+        raise ValueError(
+            f"--provider-thinking is not supported by provider '{provider_entry.name}'"
+        )
+    if (
         provider_reasoning_effort is not None
         and provider_entry is not None
         and provider_entry.reasoning_effort is None

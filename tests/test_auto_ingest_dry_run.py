@@ -414,6 +414,67 @@ async def test_kimi_json_object_provider_uses_chat_completions_json_mode(
     }
 
 
+async def test_openrouter_json_object_provider_uses_chat_completions_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    captured: list[dict[str, Any]] = []
+
+    def fail_build_agent(**kwargs: Any) -> None:
+        raise AssertionError("OpenRouter JSON Object mode must bypass AgentOutputSchema")
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        captured.append(kwargs)
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert "reasoning_effort" not in kwargs
+        assert "extra_body" not in kwargs
+        assert kwargs["provider_config"].api_key_env == "OPENROUTER_API_KEY"
+        assert kwargs["provider_config"].default_headers == {
+            "HTTP-Referer": "https://github.com/6tizer/nesy-reasoning-mcp",
+            "X-OpenRouter-Title": "NeSy Reasoning MCP",
+        }
+        assert "secret" not in json.dumps(kwargs, default=str)
+        assert "JSON object" in kwargs["messages"][0]["content"]
+        if len(captured) == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fail_build_agent)
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="qwen/qwen3.7-max",
+        reviewer_models=["qwen/qwen3.7-max"],
+        env={"OPENROUTER_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+            default_headers={
+                "HTTP-Referer": "https://github.com/6tizer/nesy-reasoning-mcp",
+                "X-OpenRouter-Title": "NeSy Reasoning MCP",
+            },
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+        ),
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert [request["model"] for request in captured] == [
+        "qwen/qwen3.7-max",
+        "qwen/qwen3.7-max",
+    ]
+    assert report.candidates == [candidate]
+    assert report.reviews == [review.model_copy(update={"reviewer_model": "qwen/qwen3.7-max"})]
+    assert report.gate_results[0].action == "auto_write"
+    assert report.metadata["provider"] == {
+        "type": "openai_compatible",
+        "header_keys": ["HTTP-Referer", "X-OpenRouter-Title"],
+        "tracing_disabled": True,
+        "structured_output_mode": "json_object",
+    }
+
+
 async def test_deepseek_json_object_provider_runs_multiple_reviewers() -> None:
     candidate = _candidate()
     captured_models: list[str] = []
@@ -578,6 +639,12 @@ def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
     assert get_provider_entry("kimi").reasoning_effort is None
     assert get_provider_entry("kimi").extra_body == {"thinking": {"type": "enabled"}}
     assert get_provider_entry("openrouter").default_model is None
+    assert (
+        get_provider_entry("openrouter").structured_output_mode
+        is ProviderStructuredOutputMode.JSON_OBJECT
+    )
+    assert get_provider_entry("openrouter").reasoning_effort is None
+    assert get_provider_entry("openrouter").extra_body == {}
     assert get_provider_entry("openrouter").notes
     rendered = ingest_cli._render_provider_list()
     assert (
@@ -588,7 +655,8 @@ def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
     assert "MOONSHOT_API_KEY" in rendered
     assert "OPENROUTER_API_KEY" in rendered
     assert "deepseek-v4-pro\tjson_object\tdeepseek-v4-pro,deepseek-v4-flash\thigh" in rendered
-    assert "OpenRouter requires an explicit model" in rendered
+    assert "OpenRouter uses JSON Object mode" in rendered
+    assert "requires an explicit model" in rendered
     assert "secret" not in rendered.lower()
 
 
@@ -1605,9 +1673,10 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
         "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6\tjson_object\t-\t-"
     ) in rendered
     assert (
-        "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-\tagent_schema\t-\t-"
+        "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-\tjson_object\t-\t-"
     ) in rendered
-    assert "OpenRouter requires an explicit model" in rendered
+    assert "OpenRouter uses JSON Object mode" in rendered
+    assert "requires an explicit model" in rendered
     assert "secret" not in rendered.lower()
 
 
@@ -1985,6 +2054,7 @@ def test_cli_openrouter_provider_accepts_headers_with_model(
                 "X-OpenRouter-Title": "NeSy Reasoning MCP",
             },
             disable_tracing=True,
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
         )
         assert auto_write is False
         assert min_write_confidence == 0.85
@@ -2124,7 +2194,8 @@ def test_cli_openrouter_provider_requires_explicit_model(
             {"base_url": "https://api.deepseek.com", "provider_header": ["X-Test=bad\nvalue"]},
             "must not contain newlines",
         ),
-        ({"provider": "openrouter", "provider_thinking": "disabled"}, "JSON Object provider"),
+        ({"provider": "openrouter", "provider_thinking": "disabled"}, "not supported"),
+        ({"provider": "openrouter", "provider_reasoning_effort": "high"}, "not supported"),
         ({"provider": "kimi", "provider_reasoning_effort": "max"}, "not supported"),
     ],
 )

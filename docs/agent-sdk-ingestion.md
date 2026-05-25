@@ -315,6 +315,13 @@ OPENROUTER_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-
   --format json
 ```
 
+The `openrouter` shortcut uses the direct Chat Completions JSON Object path by
+default because OpenRouter routes to heterogeneous model backends. The runtime
+sends `response_format={"type":"json_object"}` and keeps model selection
+explicit with `--model` or `OPENAI_DEFAULT_MODEL`. It does not set provider-wide
+thinking or reasoning defaults because those capabilities vary by OpenRouter
+model.
+
 Use `--list-providers` to inspect built-in shortcuts. The registry is static
 code and documentation, not a writable provider database.
 
@@ -333,11 +340,11 @@ DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-ru
 When `--provider` or `--base-url` is set, tracing is disabled by default for
 that run because third-party provider calls should not be sent to OpenAI
 tracing. Most provider shortcuts use `OpenAIChatCompletionsModel` with an
-`AsyncOpenAI` client; DeepSeek and Kimi use a direct Chat Completions JSON
-Object path because their APIs are more reliable with JSON Object response
-formats for this ingestion schema. Provider metadata in the report
-intentionally omits API-key environment names and base URLs. LiteLLM, Ollama,
-and Claude Agent SDK adapters are separate future work.
+`AsyncOpenAI` client; DeepSeek, Kimi, and OpenRouter use a direct Chat
+Completions JSON Object path because their APIs are more reliable with JSON
+Object response formats for this ingestion schema. Provider metadata in the
+report intentionally omits API-key environment names, base URLs, and provider
+header values. Cross-provider reviewer voting is separate future work.
 
 JSON input accepts:
 
