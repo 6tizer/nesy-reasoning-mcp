@@ -64,7 +64,9 @@ PROVIDER_REGISTRY: Mapping[str, ProviderRegistryEntry] = MappingProxyType(
             api_key_env="MOONSHOT_API_KEY",
             default_model="kimi-k2.6",
             docs_url="https://platform.kimi.com/docs/api/overview",
-            notes="Moonshot Kimi OpenAI-compatible Chat Completions endpoint.",
+            notes=("Kimi K2.6 uses JSON Object mode; thinking is enabled by default."),
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            extra_body={"thinking": {"type": "enabled"}},
         ),
         "openrouter": ProviderRegistryEntry(
             name="openrouter",
