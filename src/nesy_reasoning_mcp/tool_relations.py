@@ -132,6 +132,7 @@ def _relations_after_assert(
     records: list[RelationRecord],
     mode: str,
 ) -> list[RelationRecord]:
+    """Build the effective relation view; update counts are owned by the store."""
     relations, _updated = _apply_assert_relations_mode(current, records, mode)
     return relations
 

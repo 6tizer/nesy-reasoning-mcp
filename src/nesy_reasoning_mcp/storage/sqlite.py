@@ -144,6 +144,7 @@ class SqliteRelationStore:
         """Add relation records and return added records plus update count."""
         normalized_inputs = _normalize_relation_identities(inputs, self.list_propositions())
         records = [RelationRecord.from_input(item) for item in normalized_inputs]
+        # Append uses incremental insert below, so avoid loading a merged full-store view.
         current_relations = [] if mode == "append" else self.list_relations()
         merged, updated = _apply_assert_relations_mode(current_relations, records, mode)
 
