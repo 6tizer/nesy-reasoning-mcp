@@ -130,12 +130,12 @@ def _build_agent(
     output_type: type[Any],
     model: str | None,
 ) -> Any:
-    from agents import Agent
+    from agents import Agent, AgentOutputSchema
 
     kwargs: dict[str, Any] = {
         "name": name,
         "instructions": instructions,
-        "output_type": output_type,
+        "output_type": AgentOutputSchema(output_type, strict_json_schema=False),
     }
     if model:
         kwargs["model"] = model

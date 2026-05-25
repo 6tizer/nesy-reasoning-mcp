@@ -58,6 +58,18 @@ def _approval(candidate: CandidateRelation) -> ReviewDecision:
     )
 
 
+def test_openai_agents_output_schema_accepts_ingestion_batches() -> None:
+    agent = openai_agents._build_agent(
+        name="test extractor",
+        instructions="test",
+        output_type=openai_agents.CandidateRelationBatch,
+        model=None,
+    )
+
+    assert agent.output_type.output_type is openai_agents.CandidateRelationBatch
+    assert agent.output_type._strict_json_schema is False
+
+
 def test_fetch_url_evidence_allows_only_http_https(monkeypatch: pytest.MonkeyPatch) -> None:
     class Response:
         headers = {"content-type": "text/plain; charset=utf-8"}
