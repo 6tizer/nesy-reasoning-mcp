@@ -28,6 +28,34 @@ class _Response:
         return self._body[:size]
 
 
+class _Socket:
+    def __init__(self) -> None:
+        self.timeout: float | None = None
+
+    def settimeout(self, value: float) -> None:
+        self.timeout = value
+
+
+class _Raw:
+    def __init__(self, sock: _Socket) -> None:
+        self._sock = sock
+
+
+class _Fp:
+    def __init__(self, sock: _Socket) -> None:
+        self.raw = _Raw(sock)
+
+
+class _SocketResponse(_Response):
+    def __init__(self, payload: dict[str, Any], sock: _Socket) -> None:
+        super().__init__(payload)
+        self.fp = _Fp(sock)
+
+    def read(self, size: int) -> bytes:
+        assert self.fp.raw._sock.timeout == 4
+        return super().read(size)
+
+
 def test_exa_search_response_converts_to_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -97,6 +125,36 @@ def test_exa_search_response_converts_to_evidence(
         "include": ["example.com"],
         "exclude": ["blocked.example.com"],
     }
+
+
+def test_exa_search_sets_socket_timeout_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(search, "validate_public_http_url", lambda url: url.strip())
+    sock = _Socket()
+
+    def fake_open(req: request.Request, timeout_seconds: float) -> _SocketResponse:
+        return _SocketResponse(
+            {
+                "results": [
+                    {
+                        "title": "Example",
+                        "url": "https://example.com/source",
+                        "highlights": ["Evidence."],
+                    }
+                ]
+            },
+            sock,
+        )
+
+    result = retrieve_search_evidence(
+        SearchRetrievalOptions(queries=["query"], timeout_seconds=4),
+        env={"EXA_API_KEY": "secret"},
+        urlopen=fake_open,
+    )
+
+    assert result.evidence
+    assert sock.timeout == 4
 
 
 def test_search_domain_filters_are_enforced_locally(
@@ -194,6 +252,25 @@ def test_search_provider_failure_returns_diagnostic() -> None:
     assert "secret" not in result.diagnostics[0].message
 
 
+def test_search_response_status_error_returns_diagnostic() -> None:
+    class StatusResponse(_Response):
+        status = 503
+
+    def fake_open(req: request.Request, timeout_seconds: float) -> StatusResponse:
+        return StatusResponse({"error": "unavailable"})
+
+    result = retrieve_search_evidence(
+        SearchRetrievalOptions(queries=["query"]),
+        env={"EXA_API_KEY": "secret"},
+        urlopen=fake_open,
+    )
+
+    assert result.evidence == []
+    assert result.has_errors is True
+    assert result.diagnostics[0].code == "EXA_SEARCH_RESPONSE_INVALID"
+    assert "503" in result.diagnostics[0].message
+
+
 def test_search_missing_api_key_does_not_call_provider() -> None:
     def fail_open(req: request.Request, timeout_seconds: float) -> _Response:
         raise AssertionError("provider must not be called without an API key")
@@ -216,9 +293,29 @@ def test_search_options_normalize_provider_string() -> None:
 
 
 @pytest.mark.parametrize(
+    "domain",
+    [
+        "localhost",
+        "service.localhost",
+        "service.local",
+        "127.0.0.1",
+        "10.0.0.1",
+        "169.254.0.1",
+        "240.0.0.1",
+        "224.0.0.1",
+    ],
+)
+def test_search_domain_filters_reject_local_ip_literals(domain: str) -> None:
+    with pytest.raises(ValueError, match="local"):
+        SearchRetrievalOptions(queries=["query"], include_domains=[domain])
+
+
+@pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"queries": [""]}, "queries"),
+        ({"queries": ["query"], "api_key_env": " "}, "env"),
+        ({"queries": ["query"], "max_response_bytes": 0}, "byte"),
         ({"queries": ["query"], "limit": 0}, "limit"),
         ({"queries": ["query"], "limit": 21}, "limit"),
         ({"queries": ["query"], "timeout_seconds": 0}, "timeout"),

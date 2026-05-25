@@ -31,3 +31,8 @@ def parse_datetime_value(
     if parsed.tzinfo is None and default_tz is not None:
         return parsed.replace(tzinfo=default_tz)
     return parsed
+
+
+def utc_now_iso() -> str:
+    """Return the current UTC timestamp as an ISO-8601 string."""
+    return datetime.now(UTC).isoformat()

@@ -6,7 +6,6 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import StrEnum
 from ipaddress import ip_address
 from typing import Any
@@ -15,7 +14,9 @@ from urllib.parse import urlparse
 
 from nesy_reasoning_mcp.auto_ingest.fetcher import validate_public_http_url
 from nesy_reasoning_mcp.auto_ingest.schemas import EvidenceRecord
+from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.schemas import Diagnostic
+from nesy_reasoning_mcp.time_utils import utc_now_iso
 
 EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search"
 DEFAULT_SEARCH_PROVIDER = "exa"
@@ -50,9 +51,14 @@ class SearchRetrievalOptions:
     max_response_bytes: int = DEFAULT_SEARCH_RESPONSE_BYTES
 
     def __post_init__(self) -> None:
-        queries = _dedupe_text(self.queries)
-        provider = SearchProviderName(self.provider)
-        if not queries:
+        normalized = {
+            "queries": dedupe_non_empty_text(self.queries),
+            "provider": SearchProviderName(self.provider),
+            "include_domains": _normalize_domain_filters(self.include_domains or []),
+            "exclude_domains": _normalize_domain_filters(self.exclude_domains or []),
+            "api_key_env": self.api_key_env.strip(),
+        }
+        if not normalized["queries"]:
             raise ValueError("search queries must not be empty")
         if not 1 <= self.limit <= MAX_SEARCH_LIMIT:
             raise ValueError(f"search limit must be between 1 and {MAX_SEARCH_LIMIT}")
@@ -60,23 +66,11 @@ class SearchRetrievalOptions:
             raise ValueError(
                 f"search timeout must be between 0 and {MAX_SEARCH_TIMEOUT_SECONDS} seconds"
             )
-        if not self.api_key_env.strip():
+        if not normalized["api_key_env"]:
             raise ValueError("search API key env var name must not be empty")
         if self.max_response_bytes < 1:
             raise ValueError("search response byte limit must be positive")
-        object.__setattr__(self, "queries", queries)
-        object.__setattr__(self, "provider", provider)
-        object.__setattr__(
-            self,
-            "include_domains",
-            _normalize_domain_filters(self.include_domains or []),
-        )
-        object.__setattr__(
-            self,
-            "exclude_domains",
-            _normalize_domain_filters(self.exclude_domains or []),
-        )
-        object.__setattr__(self, "api_key_env", self.api_key_env.strip())
+        self.__dict__.update(normalized)
 
 
 @dataclass(frozen=True)
@@ -265,6 +259,7 @@ def _load_json_response(
         status = int(getattr(response, "status", 200) or 200)
         if status >= 400:
             raise ValueError(f"Exa search failed with HTTP {status}")
+        _set_response_read_timeout(response, options.timeout_seconds)
         body = response.read(options.max_response_bytes + 1)
     if len(body) > options.max_response_bytes:
         raise ValueError("Exa search response exceeded byte limit")
@@ -319,7 +314,7 @@ def _evidence_from_exa_result(
             title=_optional_str(raw_result.get("title")),
             span=span,
             source_type="search",
-            retrieved_at=datetime.now(UTC).isoformat(),
+            retrieved_at=utc_now_iso(),
             metadata={key: value for key, value in metadata.items() if value is not None},
         ),
         None,
@@ -470,16 +465,27 @@ def _optional_float(value: Any) -> float | None:
     return None
 
 
-def _dedupe_text(values: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        normalized = value.strip()
-        if not normalized or normalized in seen:
-            continue
-        deduped.append(normalized)
-        seen.add(normalized)
-    return deduped
+def _set_response_read_timeout(response: Any, timeout_seconds: float) -> None:
+    for path in (
+        ("fp", "raw", "_sock"),
+        ("fp", "_sock"),
+        ("raw", "_sock"),
+        ("_sock",),
+    ):
+        target = _nested_attr(response, path)
+        settimeout = getattr(target, "settimeout", None)
+        if callable(settimeout):
+            settimeout(timeout_seconds)
+            return
+
+
+def _nested_attr(value: Any, path: tuple[str, ...]) -> Any:
+    current = value
+    for item in path:
+        current = getattr(current, item, None)
+        if current is None:
+            return None
+    return current
 
 
 def _open_url(req: request.Request, timeout_seconds: float) -> Any:
