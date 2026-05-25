@@ -660,6 +660,53 @@ async def test_json_object_provider_rejects_mapping_without_choices_before_write
     assert store.list_review_queue() == []
 
 
+async def test_cross_provider_reviewer_failure_happens_before_write_or_queue() -> None:
+    store = RelationStore()
+    candidate = _candidate()
+    calls = 0
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        raise OpenAIAgentsDryRunError("reviewer provider failed")
+
+    with pytest.raises(OpenAIAgentsDryRunError, match="reviewer provider failed"):
+        await openai_agents.run_openai_agents_ingestion(
+            IngestionInput(evidence=[_evidence()]),
+            store=store,
+            model="deepseek-v4-pro",
+            reviewer_configs=[
+                ReviewerModelConfig(
+                    reviewer_id="kimi:kimi-k2.6",
+                    model="kimi-k2.6",
+                    provider_name="kimi",
+                    provider_config=OpenAICompatibleProviderConfig(
+                        base_url="https://api.moonshot.cn/v1",
+                        api_key_env="MOONSHOT_API_KEY",
+                        structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                        extra_body={"thinking": {"type": "enabled"}},
+                    ),
+                )
+            ],
+            env={"DEEPSEEK_API_KEY": "secret", "MOONSHOT_API_KEY": "secret"},
+            provider_config=OpenAICompatibleProviderConfig(
+                base_url="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                reasoning_effort="high",
+                extra_body={"thinking": {"type": "enabled"}},
+            ),
+            run_chat_completion=fake_chat_completion,
+            auto_write=True,
+        )
+
+    assert calls == 2
+    assert store.list_relations() == []
+    assert store.list_review_queue() == []
+
+
 async def test_custom_runner_can_receive_tracing_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
