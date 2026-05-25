@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+from nesy_reasoning_mcp.auto_ingest.schemas import ReviewQueueFilter, ReviewQueueRecord
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
@@ -56,6 +57,37 @@ class RelationStoreProtocol(Protocol):
 
     def list_propositions(self) -> list[PropositionRecord]:
         """List all stored proposition records."""
+
+    def enqueue_review_queue(
+        self,
+        records: Iterable[ReviewQueueRecord],
+    ) -> tuple[list[ReviewQueueRecord], int]:
+        """Add review queue records and return stored records plus update count."""
+
+    def list_review_queue(
+        self,
+        queue_filter: ReviewQueueFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ReviewQueueRecord]:
+        """List review queue records matching an optional filter."""
+
+    def mark_review_queue_committed(
+        self,
+        ids: Iterable[str],
+        relation_ids_by_record: Mapping[str, list[str]],
+    ) -> int:
+        """Mark review queue records as committed and return updated count."""
+
+    def resolve_review_queue(
+        self,
+        ids: Iterable[str],
+        *,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Resolve review queue records without writing graph relations."""
 
     def clear_relations(
         self,

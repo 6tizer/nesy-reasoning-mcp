@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from functools import wraps
@@ -11,6 +11,11 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
+from nesy_reasoning_mcp.auto_ingest.schemas import (
+    ReviewQueueFilter,
+    ReviewQueueRecord,
+    ReviewQueueStatus,
+)
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.normalization import normalize_relation_edges
 from nesy_reasoning_mcp.schemas import (
@@ -100,6 +105,29 @@ def _relation_filter_sql(relation_filter: RelationFilter | None) -> tuple[str, l
     return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
 
 
+def _review_queue_filter_sql(queue_filter: ReviewQueueFilter | None) -> tuple[str, list[Any]]:
+    if queue_filter is None:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if queue_filter.status is not None:
+        clauses.append("status = ?")
+        params.append(queue_filter.status.value)
+    if queue_filter.run_id is not None:
+        clauses.append("run_id = ?")
+        params.append(queue_filter.run_id)
+    if queue_filter.candidate_id is not None:
+        clauses.append("candidate_id = ?")
+        params.append(queue_filter.candidate_id)
+    if queue_filter.store_id is not None:
+        clauses.append("store_id = ?")
+        params.append(queue_filter.store_id)
+    if queue_filter.context_id is not None:
+        clauses.append("context_id = ?")
+        params.append(queue_filter.context_id)
+    return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
+
+
 def _require_unique(values: Iterable[str], label: str) -> None:
     seen: set[str] = set()
     for value in values:
@@ -112,6 +140,14 @@ def _checked_identifier(value: str, allowed: set[str], label: str) -> str:
     if value not in allowed:
         raise ValueError(f"unsupported SQL {label}: {value}")
     return value
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _review_queue_from_row(row: sqlite3.Row) -> ReviewQueueRecord:
+    return ReviewQueueRecord.model_validate(_loads(row["payload_json"], {}))
 
 
 class SqliteRelationStore:
@@ -295,6 +331,125 @@ class SqliteRelationStore:
             )
             for row in rows
         ]
+
+    @_locked
+    def enqueue_review_queue(
+        self,
+        records: Iterable[ReviewQueueRecord],
+    ) -> tuple[list[ReviewQueueRecord], int]:
+        """Add review queue records and return stored records plus update count."""
+        queued = [record.model_copy(deep=True) for record in records]
+        if not queued:
+            return [], 0
+        existing_ids = {
+            row["id"]
+            for row in self._conn.execute(
+                f"""
+                SELECT id FROM review_queue
+                WHERE id IN ({",".join("?" for _ in queued)})
+                """,
+                [record.id for record in queued],
+            ).fetchall()
+        }
+        try:
+            self._upsert_review_queue_records(queued)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return queued, len(existing_ids)
+
+    @_locked
+    def list_review_queue(
+        self,
+        queue_filter: ReviewQueueFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ReviewQueueRecord]:
+        """List review queue records matching an optional filter."""
+        where_sql, params = _review_queue_filter_sql(queue_filter)
+        sql = f"""
+            SELECT payload_json
+            FROM review_queue
+            {where_sql}
+            ORDER BY created_at, id
+            """
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_review_queue_from_row(row) for row in rows]
+
+    @_locked
+    def mark_review_queue_committed(
+        self,
+        ids: Iterable[str],
+        relation_ids_by_record: Mapping[str, list[str]],
+    ) -> int:
+        """Mark review queue records as committed and return updated count."""
+        records = self._review_queue_records_by_ids(ids)
+        if not records:
+            return 0
+        updated_at = _utc_now_iso()
+        updated_records = [
+            record.model_copy(
+                deep=True,
+                update={
+                    "status": ReviewQueueStatus.COMMITTED,
+                    "updated_at": updated_at,
+                    "committed_relation_ids": relation_ids_by_record.get(record.id, []),
+                },
+            )
+            for record in records
+        ]
+        try:
+            self._upsert_review_queue_records(updated_records)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return len(updated_records)
+
+    @_locked
+    def resolve_review_queue(
+        self,
+        ids: Iterable[str],
+        *,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Resolve review queue records without writing graph relations."""
+        records = self._review_queue_records_by_ids(ids)
+        if not records:
+            return 0
+        updated_at = _utc_now_iso()
+        resolution = {
+            "reason": reason,
+            "metadata": metadata or {},
+            "resolved_at": updated_at,
+        }
+        updated_records = [
+            record.model_copy(
+                deep=True,
+                update={
+                    "status": ReviewQueueStatus.RESOLVED,
+                    "updated_at": updated_at,
+                    "resolution": resolution,
+                },
+            )
+            for record in records
+        ]
+        try:
+            self._upsert_review_queue_records(updated_records)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return len(updated_records)
 
     @_locked
     def clear_relations(
@@ -601,6 +756,18 @@ class SqliteRelationStore:
               metadata_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS review_queue (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL CHECK (status IN ('pending','committed','resolved')),
+              run_id TEXT NOT NULL,
+              candidate_id TEXT NOT NULL,
+              context_id TEXT NOT NULL,
+              store_id TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_relations_context_store_type
               ON relations (context_id, store_id, relation_type);
             CREATE INDEX IF NOT EXISTS idx_relations_source_target
@@ -609,6 +776,14 @@ class SqliteRelationStore:
               ON relations (created_at, id);
             CREATE INDEX IF NOT EXISTS idx_relations_domain
               ON relations (json_extract(metadata_json, '$.domain'));
+            CREATE INDEX IF NOT EXISTS idx_review_queue_status
+              ON review_queue (status);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_run_id
+              ON review_queue (run_id);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_candidate_id
+              ON review_queue (candidate_id);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_context_store
+              ON review_queue (context_id, store_id);
             """
         )
         self._ensure_relation_identity_columns()
@@ -727,6 +902,57 @@ class SqliteRelationStore:
                 )
                 for record in records
             ],
+        )
+
+    def _review_queue_records_by_ids(self, ids: Iterable[str]) -> list[ReviewQueueRecord]:
+        id_list = list(dict.fromkeys(ids))
+        if not id_list:
+            return []
+        rows = self._conn.execute(
+            f"""
+            SELECT payload_json
+            FROM review_queue
+            WHERE id IN ({",".join("?" for _ in id_list)})
+            ORDER BY created_at, id
+            """,
+            id_list,
+        ).fetchall()
+        return [_review_queue_from_row(row) for row in rows]
+
+    def _upsert_review_queue_records(self, records: Iterable[ReviewQueueRecord]) -> None:
+        rows = []
+        for record in records:
+            rows.append(
+                (
+                    record.id,
+                    record.status.value,
+                    record.run_id,
+                    record.candidate.id,
+                    record.candidate.context_id,
+                    record.candidate.store_id,
+                    _dumps(record.model_dump(mode="json", exclude_none=True)),
+                    record.created_at,
+                    record.updated_at,
+                )
+            )
+        self._conn.executemany(
+            """
+            INSERT INTO review_queue (
+                id, status, run_id, candidate_id, context_id, store_id,
+                payload_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                run_id = excluded.run_id,
+                candidate_id = excluded.candidate_id,
+                context_id = excluded.context_id,
+                store_id = excluded.store_id,
+                payload_json = excluded.payload_json,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            rows,
         )
 
     def _delete_relation_ids(self, relation_ids: Iterable[str]) -> None:

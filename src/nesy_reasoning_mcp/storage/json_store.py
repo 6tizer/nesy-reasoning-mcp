@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from nesy_reasoning_mcp.auto_ingest.schemas import ReviewQueueRecord
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
@@ -78,6 +79,37 @@ class JsonRelationStore(MemoryRelationStore):
             self._persist()
         return removed, removed_groups
 
+    def enqueue_review_queue(
+        self,
+        records: Iterable[ReviewQueueRecord],
+    ) -> tuple[list[ReviewQueueRecord], int]:
+        """Add review queue records and persist the JSON relation set."""
+        queued, updated = super().enqueue_review_queue(records)
+        self._persist()
+        return queued, updated
+
+    def mark_review_queue_committed(
+        self,
+        ids: Iterable[str],
+        relation_ids_by_record: Mapping[str, list[str]],
+    ) -> int:
+        """Mark review queue records as committed and persist the JSON relation set."""
+        updated = super().mark_review_queue_committed(ids, relation_ids_by_record)
+        self._persist()
+        return updated
+
+    def resolve_review_queue(
+        self,
+        ids: Iterable[str],
+        *,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Resolve review queue records and persist the JSON relation set."""
+        updated = super().resolve_review_queue(ids, reason=reason, metadata=metadata)
+        self._persist()
+        return updated
+
     def record_audit(
         self,
         *,
@@ -142,6 +174,9 @@ class JsonRelationStore(MemoryRelationStore):
         self._propositions = [
             PropositionRecord.model_validate(item) for item in data.get("propositions", [])
         ]
+        self._review_queue = [
+            ReviewQueueRecord.model_validate(item) for item in data.get("review_queue", [])
+        ]
         self._audit_log = [_audit_from_dict(item) for item in data.get("audit_log", [])]
         self._context_metadata = data.get("context_metadata", {})
 
@@ -158,6 +193,9 @@ class JsonRelationStore(MemoryRelationStore):
             "propositions": [
                 proposition.model_dump(mode="json", exclude_none=True)
                 for proposition in self._propositions
+            ],
+            "review_queue": [
+                record.model_dump(mode="json", exclude_none=True) for record in self._review_queue
             ],
             "audit_log": [entry.to_dict() for entry in self._audit_log],
             "context_metadata": self._context_metadata,

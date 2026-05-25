@@ -8,13 +8,14 @@ from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tools import (
     ASSERT_RELATIONS,
     CHECK_CONTRADICTIONS,
+    LIST_REVIEW_QUEUE,
     REASON_OVER_RELATIONS,
     VALIDATE_CANDIDATE_RELATIONS,
 )
 
 
 @pytest.mark.asyncio
-async def test_tools_list_returns_thirteen_tools_with_schemas() -> None:
+async def test_tools_list_returns_sixteen_tools_with_schemas() -> None:
     server = create_server(RelationStore())
     handler = server.request_handlers[ListToolsRequest]
     result = await handler(ListToolsRequest(method="tools/list"))
@@ -34,6 +35,9 @@ async def test_tools_list_returns_thirteen_tools_with_schemas() -> None:
         "nesy.counterfactual",
         "nesy.reason_over_relations",
         "nesy.validate_candidate_relations",
+        "nesy.list_review_queue",
+        "nesy.commit_reviewed_relations",
+        "nesy.resolve_review_queue",
     ]
     assert all(tool.inputSchema for tool in tools)
     assert all(tool.outputSchema for tool in tools)
@@ -44,6 +48,8 @@ async def test_tools_list_returns_thirteen_tools_with_schemas() -> None:
     assert "query" in ephemeral_tool.inputSchema["properties"]
     validation_tool = next(tool for tool in tools if tool.name == VALIDATE_CANDIDATE_RELATIONS)
     assert "candidates" in validation_tool.inputSchema["properties"]
+    queue_tool = next(tool for tool in tools if tool.name == LIST_REVIEW_QUEUE)
+    assert "filter" in queue_tool.inputSchema["properties"]
 
 
 @pytest.mark.asyncio

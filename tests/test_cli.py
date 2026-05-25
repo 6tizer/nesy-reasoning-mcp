@@ -6,6 +6,13 @@ from pathlib import Path
 
 import anyio
 
+from nesy_reasoning_mcp.auto_ingest import (
+    CandidateRelation,
+    EvidenceRecord,
+    GateAction,
+    GateResult,
+    ReviewQueueRecord,
+)
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.store import create_relation_store
 from nesy_reasoning_mcp.tools import ASSERT_RELATIONS, call_tool
@@ -60,6 +67,7 @@ def test_ingest_help_lists_agent_dry_run_subcommand() -> None:
     )
 
     assert "agent-dry-run" in completed.stdout
+    assert "queue" in completed.stdout
     assert completed.stderr == ""
 
 
@@ -80,6 +88,57 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     assert "--api-key-env" in completed.stdout
     assert "--provider-header" in completed.stdout
     assert "--disable-tracing" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_queue_list_reads_persisted_records(tmp_path: Path) -> None:
+    config_path = tmp_path / "nesy.json"
+    sqlite_path = tmp_path / "nesy.db"
+    config_path.write_text(
+        json.dumps({"storage": {"backend": "sqlite", "sqlite_path": str(sqlite_path)}}),
+        encoding="utf-8",
+    )
+    store = create_relation_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path)))
+    )
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[EvidenceRecord(url="https://example.com/source", span="A enables B.")],
+    )
+    store.enqueue_review_queue(
+        [
+            ReviewQueueRecord(
+                id="queue-1",
+                run_id="run-1",
+                candidate=candidate,
+                gate_result=GateResult(candidate_id=candidate.id, action=GateAction.QUEUE),
+            )
+        ]
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "queue",
+            "list",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["records"][0]["id"] == "queue-1"
+    assert payload["records"][0]["candidate"]["id"] == "candidate-1"
     assert completed.stderr == ""
 
 

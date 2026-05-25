@@ -12,11 +12,14 @@ from nesy_reasoning_mcp.tool_names import (
     CHECK_CONTRADICTIONS,
     CLASSIFY,
     CLEAR_RELATIONS,
+    COMMIT_REVIEWED_RELATIONS,
     COUNTERFACTUAL,
     EXPORT_RELATIONS,
     LIST_RELATIONS,
+    LIST_REVIEW_QUEUE,
     LOAD_RELATIONS,
     REASON_OVER_RELATIONS,
+    RESOLVE_REVIEW_QUEUE,
     SUMMARIZE_GRAPH,
     VALIDATE_CANDIDATE_RELATIONS,
     VERIFY_CHAIN,
@@ -31,6 +34,11 @@ from nesy_reasoning_mcp.tool_relations import (
     list_relations,
 )
 from nesy_reasoning_mcp.tool_result import make_result
+from nesy_reasoning_mcp.tool_review_queue import (
+    commit_reviewed_relations,
+    list_review_queue,
+    resolve_review_queue,
+)
 from nesy_reasoning_mcp.tool_summary import summarize_graph
 
 __all__ = [
@@ -39,11 +47,14 @@ __all__ = [
     "CHECK_CONTRADICTIONS",
     "CLASSIFY",
     "CLEAR_RELATIONS",
+    "COMMIT_REVIEWED_RELATIONS",
     "COUNTERFACTUAL",
     "EXPORT_RELATIONS",
     "LIST_RELATIONS",
+    "LIST_REVIEW_QUEUE",
     "LOAD_RELATIONS",
     "REASON_OVER_RELATIONS",
+    "RESOLVE_REVIEW_QUEUE",
     "SUMMARIZE_GRAPH",
     "VALIDATE_CANDIDATE_RELATIONS",
     "VERIFY_CHAIN",
@@ -56,10 +67,13 @@ __all__ = [
     "counterfactual",
     "export_relations",
     "get_tools",
+    "commit_reviewed_relations",
     "list_relations",
+    "list_review_queue",
     "load_relations",
     "make_result",
     "reason_over_relations",
+    "resolve_review_queue",
     "summarize_graph",
     "validate_candidate_relations",
     "verify_chain",

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
 
+from nesy_reasoning_mcp.auto_ingest.schemas import (
+    ReviewQueueFilter,
+    ReviewQueueRecord,
+    ReviewQueueStatus,
+)
 from nesy_reasoning_mcp.config import NesyConfig, load_config
 from nesy_reasoning_mcp.normalization import normalize_relation_edges
 from nesy_reasoning_mcp.schemas import (
@@ -45,6 +51,7 @@ class MemoryRelationStore:
         self._exclusive_groups: list[ExclusiveGroupRecord] = []
         self._independence_records: list[IndependenceRecord] = []
         self._propositions: list[PropositionRecord] = []
+        self._review_queue: list[ReviewQueueRecord] = []
         self._audit_log: list[AuditEntry] = []
         self._context_metadata: dict[str, Any] = {}
 
@@ -113,6 +120,102 @@ class MemoryRelationStore:
     def list_propositions(self) -> list[PropositionRecord]:
         """List all stored proposition records."""
         return [proposition.model_copy(deep=True) for proposition in self._propositions]
+
+    def enqueue_review_queue(
+        self,
+        records: Iterable[ReviewQueueRecord],
+    ) -> tuple[list[ReviewQueueRecord], int]:
+        """Add review queue records and return stored records plus update count."""
+        incoming = [record.model_copy(deep=True) for record in records]
+        incoming_by_id = {record.id: record for record in incoming}
+        updated = sum(1 for record in self._review_queue if record.id in incoming_by_id)
+        self._review_queue = [
+            record for record in self._review_queue if record.id not in incoming_by_id
+        ]
+        self._review_queue.extend(incoming)
+        return [record.model_copy(deep=True) for record in incoming], updated
+
+    def list_review_queue(
+        self,
+        queue_filter: ReviewQueueFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ReviewQueueRecord]:
+        """List review queue records matching an optional filter."""
+        matched = [
+            record.model_copy(deep=True)
+            for record in self._review_queue
+            if queue_filter is None or _review_queue_matches_filter(record, queue_filter)
+        ]
+        matched.sort(key=lambda record: (record.created_at, record.id))
+        matched = matched[offset:]
+        if limit is not None:
+            return matched[:limit]
+        return matched
+
+    def mark_review_queue_committed(
+        self,
+        ids: Iterable[str],
+        relation_ids_by_record: Mapping[str, list[str]],
+    ) -> int:
+        """Mark review queue records as committed and return updated count."""
+        id_set = set(ids)
+        updated_at = _utc_now_iso()
+        updated = 0
+        records: list[ReviewQueueRecord] = []
+        for record in self._review_queue:
+            if record.id not in id_set:
+                records.append(record)
+                continue
+            updated += 1
+            records.append(
+                record.model_copy(
+                    deep=True,
+                    update={
+                        "status": ReviewQueueStatus.COMMITTED,
+                        "updated_at": updated_at,
+                        "committed_relation_ids": relation_ids_by_record.get(record.id, []),
+                    },
+                )
+            )
+        self._review_queue = records
+        return updated
+
+    def resolve_review_queue(
+        self,
+        ids: Iterable[str],
+        *,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Resolve review queue records without writing graph relations."""
+        id_set = set(ids)
+        updated_at = _utc_now_iso()
+        resolution = {
+            "reason": reason,
+            "metadata": metadata or {},
+            "resolved_at": updated_at,
+        }
+        updated = 0
+        records: list[ReviewQueueRecord] = []
+        for record in self._review_queue:
+            if record.id not in id_set:
+                records.append(record)
+                continue
+            updated += 1
+            records.append(
+                record.model_copy(
+                    deep=True,
+                    update={
+                        "status": ReviewQueueStatus.RESOLVED,
+                        "updated_at": updated_at,
+                        "resolution": resolution,
+                    },
+                )
+            )
+        self._review_queue = records
+        return updated
 
     def clear_relations(
         self,
@@ -278,3 +381,25 @@ class MemoryRelationStore:
             self._propositions = merged_propositions
             self._context_metadata = merged_metadata
         return len(incoming_relations), len(incoming_groups), updated_relations, updated_groups
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _review_queue_matches_filter(
+    record: ReviewQueueRecord,
+    queue_filter: ReviewQueueFilter,
+) -> bool:
+    if queue_filter.status is not None and record.status != queue_filter.status:
+        return False
+    if queue_filter.run_id is not None and record.run_id != queue_filter.run_id:
+        return False
+    if queue_filter.candidate_id is not None and record.candidate.id != queue_filter.candidate_id:
+        return False
+    if queue_filter.store_id is not None and record.candidate.store_id != queue_filter.store_id:
+        return False
+    return not (
+        queue_filter.context_id is not None
+        and record.candidate.context_id != queue_filter.context_id
+    )
