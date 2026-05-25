@@ -28,6 +28,12 @@ from nesy_reasoning_mcp.auto_ingest.crawler import (
     CrawlResult,
     crawl_url_evidence,
 )
+from nesy_reasoning_mcp.auto_ingest.external_retrieval import (
+    MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES,
+    ExternalRetrievalBatch,
+    ExternalRetrievalConversion,
+    convert_external_retrieval_batch,
+)
 from nesy_reasoning_mcp.auto_ingest.fetcher import (
     DEFAULT_FETCH_TIMEOUT_SECONDS,
     DEFAULT_MAX_FETCH_BYTES,
@@ -68,6 +74,7 @@ from nesy_reasoning_mcp.tool_names import (
     COMMIT_REVIEWED_RELATIONS,
     LIST_REVIEW_QUEUE,
     RESOLVE_REVIEW_QUEUE,
+    VALIDATE_CANDIDATE_RELATIONS,
 )
 from nesy_reasoning_mcp.tool_registry import call_tool
 
@@ -91,11 +98,21 @@ def add_ingest_subparser(subparsers: argparse._SubParsersAction[argparse.Argumen
         help="Inspect and act on persisted ingestion review queue records.",
     )
     add_review_queue_arguments(queue_parser)
+    retrieval_parser = ingest_subparsers.add_parser(
+        "retrieval",
+        help="Validate external retrieval candidate batches.",
+    )
+    add_retrieval_arguments(retrieval_parser)
 
 
 def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Add shared arguments for the OpenAI Agents SDK dry-run command."""
     parser.add_argument("--input", default=None, help="JSON input file path.")
+    parser.add_argument(
+        "--retrieval-input",
+        default=None,
+        help="External retrieval JSON batch to add as evidence.",
+    )
     parser.add_argument("--url", action="append", default=[], help="Explicit HTTP(S) URL source.")
     parser.add_argument("--task", default=None, help="Optional extraction task.")
     parser.add_argument("--question", default=None, help="Optional question to answer.")
@@ -294,12 +311,37 @@ def add_review_queue_arguments(parser: argparse.ArgumentParser) -> None:
     resolve_parser.add_argument("--format", choices=["json", "text"], default="json")
 
 
+def add_retrieval_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add external retrieval CLI subcommands."""
+    retrieval_subparsers = parser.add_subparsers(dest="retrieval_command")
+    validate_parser = retrieval_subparsers.add_parser(
+        "validate",
+        help="Validate external retrieval candidate relations without persisting.",
+    )
+    validate_parser.add_argument("--input", required=True, help="External retrieval JSON batch.")
+    validate_parser.add_argument("--min-write-confidence", type=float, default=0.85)
+    validate_parser.add_argument(
+        "--voting-policy",
+        choices=[policy.value for policy in ReviewVotingPolicy],
+        default=ReviewVotingPolicy.RISK_TIERED.value,
+    )
+    validate_parser.add_argument(
+        "--high-priority-reviewer-model",
+        action="append",
+        default=[],
+        dest="high_priority_reviewer_models",
+    )
+    validate_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+
 def run_ingest_cli(args: argparse.Namespace) -> int:
     """Dispatch ingestion CLI subcommands."""
     if args.ingest_command == "agent-dry-run":
         return run_agent_dry_run_cli(args)
     if args.ingest_command == "queue":
         return run_review_queue_cli(args)
+    if args.ingest_command == "retrieval":
+        return run_retrieval_cli(args)
     raise ValueError("ingest command requires a subcommand")
 
 
@@ -346,6 +388,23 @@ def run_review_queue_cli(
     return 2 if result.isError or structured.get("status") == "error" else 0
 
 
+def run_retrieval_cli(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    """Run external retrieval CLI commands."""
+    try:
+        result = anyio.run(_run_retrieval_command, args)
+    except (OSError, ValueError, ValidationError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    print(_render_retrieval_result(result, getattr(args, "format", "json")), file=stdout)
+    return 2 if result.get("status") == "error" else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the standalone OpenAI Agents SDK ingestion wrapper."""
     parser = argparse.ArgumentParser(prog="agent_ingest_openai.py")
@@ -365,16 +424,36 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
             f"provider '{provider_entry.name}' requires --model or OPENAI_DEFAULT_MODEL"
         )
     ingestion_input = _load_ingestion_input(args)
+    external_retrieval = _external_retrieval_from_args(args)
+    if external_retrieval is not None and external_retrieval.has_errors:
+        return _diagnostic_report_from_search(
+            args,
+            ingestion_input,
+            None,
+            external_retrieval=external_retrieval,
+            diagnostics=external_retrieval.diagnostics,
+        )
     search_result = _search_result_from_args(args)
     crawl_enabled = bool(getattr(args, "crawl", False))
     if crawl_enabled and not ingestion_input.urls:
         raise ValueError("--crawl requires at least one --url or input urls")
-    if not ingestion_input.evidence and not ingestion_input.urls and search_result is None:
+    if (
+        not ingestion_input.evidence
+        and not ingestion_input.urls
+        and search_result is None
+        and (external_retrieval is None or not external_retrieval.evidence)
+    ):
         raise ValueError(
-            "agent-dry-run requires --input evidence, at least one --url, or --search-query"
+            "agent-dry-run requires --input evidence, --retrieval-input evidence, "
+            "at least one --url, or --search-query"
         )
     if search_result is not None and search_result.has_errors:
-        return _diagnostic_report_from_search(args, ingestion_input, search_result)
+        return _diagnostic_report_from_search(
+            args,
+            ingestion_input,
+            search_result,
+            external_retrieval=external_retrieval,
+        )
 
     crawl_result = _crawl_result_from_args(args, ingestion_input) if crawl_enabled else None
     fetched = (
@@ -387,11 +466,14 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         )
     )
     crawl_diagnostics = crawl_result.diagnostics if crawl_result is not None else []
+    retrieval_evidence = external_retrieval.evidence if external_retrieval is not None else []
+    retrieval_diagnostics = external_retrieval.diagnostics if external_retrieval is not None else []
     search_evidence = search_result.evidence if search_result is not None else []
     search_diagnostics = search_result.diagnostics if search_result is not None else []
-    evidence = [*ingestion_input.evidence, *fetched, *search_evidence]
+    evidence = [*ingestion_input.evidence, *retrieval_evidence, *fetched, *search_evidence]
     if not evidence:
         diagnostics = [
+            *retrieval_diagnostics,
             *crawl_diagnostics,
             *search_diagnostics,
             Diagnostic(
@@ -405,6 +487,7 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
             ingestion_input,
             search_result,
             crawl_result=crawl_result,
+            external_retrieval=external_retrieval,
             diagnostics=diagnostics,
         )
     effective_input = ingestion_input.model_copy(
@@ -427,28 +510,33 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         provider_config=provider_config,
         disable_tracing=bool(getattr(args, "disable_tracing", False)),
     )
-    if search_result is None:
-        if crawl_result is None:
-            return report
-        return report.model_copy(
-            update={
-                "diagnostics": [*crawl_diagnostics, *report.diagnostics],
-                "metadata": {
-                    **report.metadata,
-                    "crawl_retrieval": crawl_result.metadata,
-                },
-            }
-        )
+    metadata = dict(report.metadata)
+    if external_retrieval is not None:
+        metadata["external_retrieval"] = external_retrieval.metadata
+    if crawl_result is not None:
+        metadata["crawl_retrieval"] = crawl_result.metadata
+    if search_result is not None:
+        metadata["search_retrieval"] = search_result.metadata
+    if metadata == report.metadata and not retrieval_diagnostics and not crawl_diagnostics:
+        return report
     return report.model_copy(
         update={
-            "diagnostics": [*crawl_diagnostics, *search_diagnostics, *report.diagnostics],
-            "metadata": {
-                **report.metadata,
-                **({"crawl_retrieval": crawl_result.metadata} if crawl_result is not None else {}),
-                "search_retrieval": search_result.metadata,
-            },
+            "diagnostics": [
+                *retrieval_diagnostics,
+                *crawl_diagnostics,
+                *search_diagnostics,
+                *report.diagnostics,
+            ],
+            "metadata": metadata,
         }
     )
+
+
+def _external_retrieval_from_args(args: argparse.Namespace) -> ExternalRetrievalConversion | None:
+    path = getattr(args, "retrieval_input", None)
+    if not path:
+        return None
+    return _load_external_retrieval(path)
 
 
 def _search_result_from_args(args: argparse.Namespace) -> SearchRetrievalResult | None:
@@ -493,6 +581,7 @@ def _diagnostic_report_from_search(
     search_result: SearchRetrievalResult | None,
     *,
     crawl_result: CrawlResult | None = None,
+    external_retrieval: ExternalRetrievalConversion | None = None,
     diagnostics: list[Diagnostic] | None = None,
 ) -> IngestionReport:
     return IngestionReport(
@@ -509,6 +598,9 @@ def _diagnostic_report_from_search(
             "evidence_count": len(ingestion_input.evidence),
             "url_count": len(ingestion_input.urls),
             "auto_write_requested": bool(getattr(args, "auto_write", False)),
+            "external_retrieval": (
+                external_retrieval.metadata if external_retrieval is not None else None
+            ),
             "crawl_retrieval": crawl_result.metadata if crawl_result is not None else None,
             "search_retrieval": search_result.metadata if search_result is not None else None,
         },
@@ -557,6 +649,158 @@ async def _run_review_queue_command(args: argparse.Namespace) -> Any:
             store,
         )
     raise ValueError("ingest queue command requires a subcommand")
+
+
+async def _run_retrieval_command(args: argparse.Namespace) -> dict[str, Any]:
+    if args.retrieval_command == "validate":
+        conversion = _load_external_retrieval(args.input)
+        if conversion.has_errors:
+            return _retrieval_diagnostic_result(conversion, status="error")
+        if not conversion.candidates:
+            return _retrieval_diagnostic_result(
+                conversion,
+                status="error",
+                diagnostics=[
+                    Diagnostic(
+                        level="error",
+                        code="RETRIEVAL_CANDIDATES_MISSING",
+                        message="ingest retrieval validate requires retrieved candidates",
+                    )
+                ],
+            )
+        store = create_relation_store(load_config())
+        result = await call_tool(
+            VALIDATE_CANDIDATE_RELATIONS,
+            {
+                "candidates": [
+                    candidate.model_dump(mode="json", exclude_none=True)
+                    for candidate in conversion.candidates
+                ],
+                "reviews": [
+                    review.model_dump(mode="json", exclude_none=True)
+                    for review in conversion.reviews
+                ],
+                "min_write_confidence": args.min_write_confidence,
+                "voting_policy": args.voting_policy,
+                "high_priority_reviewer_models": args.high_priority_reviewer_models,
+            },
+            store,
+        )
+        structured = dict(result.structuredContent or {})
+        structured = _append_retrieval_diagnostics(structured, conversion.diagnostics)
+        structured = _apply_retrieval_provenance_gate(structured, conversion)
+        structured["external_retrieval"] = conversion.metadata
+        return structured
+    raise ValueError("ingest retrieval command requires a subcommand")
+
+
+def _load_external_retrieval(path: str) -> ExternalRetrievalConversion:
+    input_path = Path(path)
+    size = input_path.stat().st_size
+    if size > MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES:
+        raise ValueError(f"retrieval input JSON exceeds {MAX_EXTERNAL_RETRIEVAL_INPUT_BYTES} bytes")
+    data = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("retrieval input JSON must be an object")
+    batch = ExternalRetrievalBatch.model_validate(data)
+    return convert_external_retrieval_batch(batch)
+
+
+def _retrieval_diagnostic_result(
+    conversion: ExternalRetrievalConversion,
+    *,
+    status: str,
+    diagnostics: list[Diagnostic] | None = None,
+) -> dict[str, Any]:
+    rendered_diagnostics = diagnostics if diagnostics is not None else conversion.diagnostics
+    return {
+        "status": status,
+        "persisted": False,
+        "candidate_count": len(conversion.candidates),
+        "approved_count": 0,
+        "queued_count": 0,
+        "rejected_count": 0,
+        "gate_results": [],
+        "approved_relations": [],
+        "review_aggregation": {},
+        "external_retrieval": conversion.metadata,
+        "diagnostics": [item.model_dump(mode="json") for item in rendered_diagnostics],
+        "reasoning": {},
+        "graph_stats": {},
+        "trace": ["Validated external retrieval input without persisting graph state."],
+    }
+
+
+def _apply_retrieval_provenance_gate(
+    structured: dict[str, Any],
+    conversion: ExternalRetrievalConversion,
+) -> dict[str, Any]:
+    missing_ids = set(conversion.missing_candidate_provenance_ids)
+    if not missing_ids:
+        return structured
+
+    gate_results = []
+    for item in structured.get("gate_results", []):
+        if not isinstance(item, dict):
+            continue
+        item = dict(item)
+        if item.get("candidate_id") in missing_ids and item.get("action") == "auto_write":
+            item = {
+                **item,
+                "action": "queue",
+                "reasons": ["retrieval provenance missing"],
+            }
+        gate_results.append(item)
+
+    approved_relations: list[dict[str, Any]] = []
+    for item in structured.get("approved_relations", []):
+        if not isinstance(item, dict):
+            continue
+        provenance = item.get("provenance")
+        if isinstance(provenance, dict) and provenance.get("candidate_id") in missing_ids:
+            continue
+        approved_relations.append(dict(item))
+    diagnostics = list(structured.get("diagnostics", []))
+    diagnostics.append(
+        Diagnostic(
+            level="warning",
+            code="RETRIEVAL_PROVENANCE_MISSING",
+            message=(
+                "retrieved candidate requires retriever_name and original_url or source_document_id"
+            ),
+            related_ids=sorted(missing_ids),
+        ).model_dump(mode="json")
+    )
+
+    queued_count = sum(1 for item in gate_results if item.get("action") == "queue")
+    rejected_count = sum(1 for item in gate_results if item.get("action") == "reject")
+    status = "error" if structured.get("status") == "error" else "warning"
+    return {
+        **structured,
+        "status": status,
+        "approved_count": len(approved_relations),
+        "queued_count": queued_count,
+        "rejected_count": rejected_count,
+        "gate_results": gate_results,
+        "approved_relations": approved_relations,
+        "diagnostics": diagnostics,
+    }
+
+
+def _append_retrieval_diagnostics(
+    structured: dict[str, Any],
+    diagnostics: list[Diagnostic],
+) -> dict[str, Any]:
+    if not diagnostics:
+        return structured
+    rendered = [item.model_dump(mode="json") for item in diagnostics]
+    status = structured.get("status")
+    next_status = "error" if status == "error" else "warning"
+    return {
+        **structured,
+        "status": next_status,
+        "diagnostics": [*structured.get("diagnostics", []), *rendered],
+    }
 
 
 def _provider_config_from_args(
@@ -709,3 +953,15 @@ def _render_queue_result(result: dict[str, Any], output_format: str) -> str:
     if "resolved_count" in result:
         return f"status: {result.get('status')}\nresolved: {result.get('resolved_count')}"
     return f"status: {result.get('status')}"
+
+
+def _render_retrieval_result(result: dict[str, Any], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(result, ensure_ascii=False)
+    return (
+        f"status: {result.get('status')}\n"
+        f"candidates: {result.get('candidate_count', 0)}\n"
+        f"approved: {result.get('approved_count', 0)}\n"
+        f"queued: {result.get('queued_count', 0)}\n"
+        f"rejected: {result.get('rejected_count', 0)}"
+    )

@@ -5,6 +5,13 @@ from nesy_reasoning_mcp.auto_ingest.crawler import (
     CrawlResult,
     crawl_url_evidence,
 )
+from nesy_reasoning_mcp.auto_ingest.external_retrieval import (
+    ExternalRetrievalBatch,
+    ExternalRetrievalConversion,
+    ExternalRetrievedCandidate,
+    ExternalRetrievedEvidence,
+    convert_external_retrieval_batch,
+)
 from nesy_reasoning_mcp.auto_ingest.policy import (
     DRY_RUN_TOOL_ALLOWLIST,
     WRITE_MODE_TOOL_ALLOWLIST,
@@ -45,6 +52,10 @@ __all__ = [
     "CrawlResult",
     "DRY_RUN_TOOL_ALLOWLIST",
     "EvidenceRecord",
+    "ExternalRetrievalBatch",
+    "ExternalRetrievalConversion",
+    "ExternalRetrievedCandidate",
+    "ExternalRetrievedEvidence",
     "GateAction",
     "GateResult",
     "IngestionInput",
@@ -63,6 +74,7 @@ __all__ = [
     "ResolveReviewQueueInput",
     "ValidateCandidateRelationsInput",
     "WRITE_MODE_TOOL_ALLOWLIST",
+    "convert_external_retrieval_batch",
     "crawl_url_evidence",
     "get_provider_entry",
     "list_provider_entries",
