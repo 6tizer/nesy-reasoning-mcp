@@ -266,6 +266,8 @@ def _parse_provider_headers(values: list[str]) -> dict[str, str]:
 
 
 def _render_provider_list() -> str:
+    # This explicit CLI listing is allowed to show env var names and base URLs,
+    # but it must never include actual API key values.
     rows = [
         "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url\tnotes",
         *[
