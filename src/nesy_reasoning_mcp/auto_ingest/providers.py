@@ -75,8 +75,10 @@ PROVIDER_REGISTRY: Mapping[str, ProviderRegistryEntry] = MappingProxyType(
             default_model=None,
             docs_url="https://openrouter.ai/docs/quickstart",
             notes=(
-                "OpenRouter requires an explicit model; optional attribution headers are supported."
+                "OpenRouter uses JSON Object mode; it requires an explicit model and supports "
+                "optional attribution headers."
             ),
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
         ),
     }
 )
