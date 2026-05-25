@@ -55,8 +55,8 @@ The shared schema module is `nesy_reasoning_mcp.auto_ingest`.
 - `EvidenceRecord`: required source URL and evidence span.
 - `CandidateRelation`: proposed relation plus confidence, context, store, and
   evidence.
-- `ReviewDecision`: reviewer decision, final relation type, confidence, reasons,
-  and risk flags.
+- `ReviewDecision`: reviewer decision, final relation type, confidence,
+  normalized implication support, reasons, and risk flags.
 - `ReviewVotingPolicy`: multi-reviewer aggregation policy: `risk_tiered`,
   `unanimous`, or `majority`.
 - `GateResult`: deterministic gate action: `auto_write`, `queue`, or `reject`.
@@ -511,14 +511,16 @@ Auto-write requires all of the following:
 - evidence URL exists
 - evidence span exists
 - reviewer decision is `approve`
+- reviewer confirms `normalized_implication_supported=true`
 - confidence meets the configured threshold
 - NeSy finds no hard contradiction
 - NeSy dry-run reasoning succeeds
 - write mode is explicitly enabled
 
-Queue for review when the reviewer downgrades the relation type, confidence is
-in the gray zone, source quality is weak, a hard contradiction appears, or the
-model backend has not been validated for structured outputs and tool behavior.
+Queue for review when the reviewer downgrades the relation type, does not
+confirm normalized implication support, confidence is in the gray zone, source
+quality is weak, a hard contradiction appears, or the model backend has not been
+validated for structured outputs and tool behavior.
 
 Reject when the claim has no evidence, only topical similarity, only
 correlation, or weak wording such as "may", "can", or "helps" was upgraded into

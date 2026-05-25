@@ -39,6 +39,7 @@ def _review(candidate_id: str = "candidate-1") -> ReviewDecision:
         decision=ReviewDecisionValue.APPROVE,
         final_relation_type="sufficient",
         final_confidence=0.9,
+        normalized_implication_supported=True,
         reasons=["Evidence directly supports the relation."],
     )
 
@@ -147,6 +148,23 @@ async def test_commit_reviewed_relations_revalidates_and_leaves_pending_when_blo
     assert result.structuredContent["status"] == "warning"
     assert result.structuredContent["committed_count"] == 0
     assert "graph state changed" in result.structuredContent["trace"][0]
+    assert store.list_review_queue()[0].status == ReviewQueueStatus.PENDING
+    assert store.list_relations() == []
+
+
+@pytest.mark.asyncio
+async def test_commit_keeps_legacy_review_without_direction_check_pending() -> None:
+    store = RelationStore()
+    legacy_record = _queue_record().model_copy(
+        update={"review": _review().model_copy(update={"normalized_implication_supported": None})}
+    )
+    store.enqueue_review_queue([legacy_record])
+
+    result = await call_tool(COMMIT_REVIEWED_RELATIONS, {"ids": ["queue-1"]}, store)
+
+    assert result.isError is False
+    assert result.structuredContent["status"] == "warning"
+    assert result.structuredContent["committed_count"] == 0
     assert store.list_review_queue()[0].status == ReviewQueueStatus.PENDING
     assert store.list_relations() == []
 

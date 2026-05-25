@@ -59,6 +59,7 @@ def _review(
             {
                 "final_relation_type": "sufficient",
                 "final_confidence": confidence,
+                "normalized_implication_supported": True,
             }
         )
     return ReviewDecision(**kwargs)

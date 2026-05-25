@@ -37,6 +37,7 @@ def _review(
     if decision in {ReviewDecisionValue.APPROVE, ReviewDecisionValue.DOWNGRADE}:
         kwargs["final_relation_type"] = relation_type
         kwargs["final_confidence"] = confidence
+        kwargs["normalized_implication_supported"] = True
     return ReviewDecision(**kwargs)
 
 
@@ -203,3 +204,21 @@ def test_positive_aggregate_without_confidence_queues_instead_of_crashing() -> N
 
     assert result.gate_reviews[0].decision == ReviewDecisionValue.NEEDS_HUMAN
     assert "missing final relation info" in result.gate_reviews[0].reasons[0]
+
+
+def test_positive_aggregate_without_normalized_implication_support_queues() -> None:
+    candidate = _candidate()
+
+    result = aggregate_review_decisions(
+        candidates=[candidate],
+        reviews=[
+            _review(reviewer_model="reviewer-a"),
+            _review(reviewer_model="reviewer-b").model_copy(
+                update={"normalized_implication_supported": None}
+            ),
+        ],
+        policy=ReviewVotingPolicy.MAJORITY,
+    )
+
+    assert result.gate_reviews[0].decision == ReviewDecisionValue.NEEDS_HUMAN
+    assert "missing normalized implication support" in result.gate_reviews[0].reasons[0]

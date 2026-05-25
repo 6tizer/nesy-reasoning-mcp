@@ -304,10 +304,22 @@ def _aggregate_review(
             kwargs["reasons"] = [
                 f"{reason}; aggregate positive decision missing final relation info"
             ]
+        elif not _all_selected_reviews_confirm_normalized_implication(selected):
+            kwargs["decision"] = ReviewDecisionValue.NEEDS_HUMAN
+            kwargs["reasons"] = [
+                f"{reason}; aggregate positive decision missing normalized implication support"
+            ]
         else:
             kwargs["final_relation_type"] = relation_type
             kwargs["final_confidence"] = min(confidences)
+            kwargs["normalized_implication_supported"] = True
     return ReviewDecision(**kwargs)
+
+
+def _all_selected_reviews_confirm_normalized_implication(
+    selected_reviews: list[ReviewDecision],
+) -> bool:
+    return all(review.normalized_implication_supported is True for review in selected_reviews)
 
 
 def _candidate_metadata(

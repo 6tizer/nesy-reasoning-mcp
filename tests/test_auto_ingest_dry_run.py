@@ -63,6 +63,7 @@ def _approval(candidate: CandidateRelation) -> ReviewDecision:
         decision=ReviewDecisionValue.APPROVE,
         final_relation_type="sufficient",
         final_confidence=0.9,
+        normalized_implication_supported=True,
         reasons=["Evidence is explicit."],
     )
 
@@ -188,6 +189,28 @@ async def test_openai_agents_dry_run_maps_runner_outputs_to_report(
     assert report.gate_results[0].reasons == ["dry-run approved; no persistent write performed"]
 
 
+def test_reviewer_prompt_includes_normalized_implication_rules_and_preview() -> None:
+    candidate = CandidateRelation(
+        id="candidate-necessary",
+        source="A",
+        target="B",
+        relation_type="necessary",
+        confidence=0.9,
+        evidence=[_evidence("B cannot happen without A.")],
+    )
+
+    prompt = openai_agents._review_prompt(
+        IngestionInput(evidence=[_evidence()]),
+        openai_agents.CandidateRelationBatch(candidates=[candidate]),
+    )
+
+    assert "necessary(A, B)=B -> A" in prompt
+    assert '"normalized_implications"' in prompt
+    assert '"antecedent": "B"' in prompt
+    assert '"consequent": "A"' in prompt
+    assert "normalized_implication_supported=true" in prompt
+
+
 async def test_openai_agents_dry_run_runs_multiple_reviewers_and_reports_voting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -215,6 +238,9 @@ async def test_openai_agents_dry_run_runs_multiple_reviewers_and_reports_voting(
             decision=decision,
             final_relation_type="sufficient" if decision == ReviewDecisionValue.APPROVE else None,
             final_confidence=0.88 if decision == ReviewDecisionValue.APPROVE else None,
+            normalized_implication_supported=True
+            if decision == ReviewDecisionValue.APPROVE
+            else None,
             reasons=[f"{agent.model} reviewed"],
             reviewer_model="model-reported-by-agent",
         )
@@ -579,6 +605,7 @@ async def test_deepseek_json_object_provider_runs_multiple_reviewers() -> None:
             decision=ReviewDecisionValue.APPROVE,
             final_relation_type="sufficient",
             final_confidence=0.9,
+            normalized_implication_supported=True,
             reasons=[f"{kwargs['model']} approved"],
         )
         return json.dumps({"reviews": [review.model_dump(mode="json")]})
@@ -856,6 +883,39 @@ async def test_dry_run_gate_approved_path_reports_without_writing() -> None:
 
     assert gate_results[0].action == "auto_write"
     assert approved_relations[0].source == "A"
+    assert store.list_relations() == []
+
+
+async def test_dry_run_gate_queues_approval_without_normalized_implication_confirmation() -> None:
+    store = RelationStore()
+    candidate = CandidateRelation(
+        id="candidate-necessary",
+        source="A",
+        target="B",
+        relation_type="necessary",
+        confidence=0.9,
+        evidence=[_evidence("B cannot happen without A.")],
+    )
+    review = _approval(candidate).model_copy(
+        update={
+            "final_relation_type": "necessary",
+            "normalized_implication_supported": None,
+        }
+    )
+
+    gate_results, approved_relations, _, _ = await run_dry_run_gate(
+        candidates=[candidate],
+        reviews=[review],
+        store=store,
+    )
+
+    assert gate_results[0].action == "queue"
+    assert gate_results[0].reasons == ["normalized implication support was not confirmed"]
+    assert gate_results[0].metadata["normalized_implications"] == {
+        "relation_type": "necessary",
+        "edges": [{"antecedent": "B", "consequent": "A"}],
+    }
+    assert approved_relations == []
     assert store.list_relations() == []
 
 

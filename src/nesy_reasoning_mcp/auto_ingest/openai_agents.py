@@ -27,6 +27,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
 )
 from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
+from nesy_reasoning_mcp.normalization import normalized_implication_preview
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
 AgentRunner = Callable[..., Awaitable[Any]]
@@ -685,6 +686,7 @@ def _coerce_review_batch(output: Any) -> ReviewDecisionBatch:
 def _extraction_prompt(ingestion_input: IngestionInput) -> str:
     return (
         "Extract only evidence-supported logical relations.\n"
+        f"{_RELATION_DIRECTION_RULES}\n"
         "Return no candidate when the evidence only shows topical similarity, "
         "correlation, weak possibility, or unsupported speculation.\n\n"
         f"Input JSON:\n{_input_json(ingestion_input)}"
@@ -697,14 +699,34 @@ def _review_prompt(
 ) -> str:
     payload = {
         "input": ingestion_input.model_dump(mode="json", exclude_none=True),
-        "candidates": candidate_batch.model_dump(mode="json", exclude_none=True),
+        "candidates": _candidate_review_payload(candidate_batch),
     }
     return (
         "Review each candidate relation against the evidence.\n"
+        f"{_RELATION_DIRECTION_RULES}\n"
         "Use approve only when source text directly supports the final relation. "
+        "Set normalized_implication_supported=true only when evidence directly "
+        "supports every normalized implication edge for the final relation type. "
         "Use reject for unsupported claims and needs_human for ambiguous claims.\n\n"
         f"Review payload JSON:\n{json.dumps(payload, ensure_ascii=False)}"
     )
+
+
+def _candidate_review_payload(candidate_batch: CandidateRelationBatch) -> list[dict[str, Any]]:
+    return [
+        {
+            **candidate.model_dump(mode="json", exclude_none=True),
+            "normalized_implications": {
+                "candidate_relation_type": candidate.relation_type.value,
+                "edges": normalized_implication_preview(
+                    candidate.source,
+                    candidate.target,
+                    candidate.relation_type,
+                ),
+            },
+        }
+        for candidate in candidate_batch.candidates
+    ]
 
 
 def _input_json(ingestion_input: IngestionInput) -> str:
@@ -716,6 +738,8 @@ def _input_json(ingestion_input: IngestionInput) -> str:
 _EXTRACTOR_INSTRUCTIONS = """\
 You extract candidate symbolic relations for NeSy Reasoning MCP.
 Only emit sufficient, necessary, or equivalent relations directly supported by evidence.
+Relation direction rules are strict: sufficient(A, B)=A -> B; necessary(A, B)=B -> A.
+Equivalent(A, B)=A -> B and B -> A.
 Each candidate must cite at least one provided EvidenceRecord.
 Do not turn "may improve", correlation, topical similarity, or vague support into a relation.
 """
@@ -723,6 +747,13 @@ Do not turn "may improve", correlation, topical similarity, or vague support int
 _REVIEWER_INSTRUCTIONS = """\
 You review candidate symbolic relations for NeSy Reasoning MCP.
 For approve or downgrade, provide final_relation_type and final_confidence.
+For approve or downgrade, set normalized_implication_supported=true only when evidence directly
+supports every normalized implication edge for the final relation type.
 Prefer reject or needs_human when evidence is weak, ambiguous, or missing.
 Do not approve claims that would require external knowledge not present in the evidence.
 """
+
+_RELATION_DIRECTION_RULES = (
+    "Relation direction rules: sufficient(A, B)=A -> B; "
+    "necessary(A, B)=B -> A; equivalent(A, B)=A -> B and B -> A."
+)

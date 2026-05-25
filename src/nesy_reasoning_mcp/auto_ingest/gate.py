@@ -12,7 +12,8 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewDecision,
     ReviewDecisionValue,
 )
-from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord, RelationInput
+from nesy_reasoning_mcp.normalization import normalized_implication_preview
+from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord, RelationInput, RelationType
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 from nesy_reasoning_mcp.tool_names import REASON_OVER_RELATIONS
 from nesy_reasoning_mcp.tool_registry import call_tool
@@ -55,6 +56,29 @@ async def run_dry_run_gate(
                     candidate_id=candidate.id,
                     action=GateAction.REJECT,
                     reasons=review.reasons or ["reviewer rejected candidate"],
+                )
+            )
+            continue
+        if (
+            review.decision
+            in {
+                ReviewDecisionValue.APPROVE,
+                ReviewDecisionValue.DOWNGRADE,
+            }
+            and review.normalized_implication_supported is not True
+        ):
+            gate_results.append(
+                GateResult(
+                    candidate_id=candidate.id,
+                    action=GateAction.QUEUE,
+                    reasons=["normalized implication support was not confirmed"],
+                    metadata={
+                        "review_reasons": review.reasons,
+                        "normalized_implications": _normalized_implication_metadata(
+                            candidate,
+                            review,
+                        ),
+                    },
                 )
             )
             continue
@@ -163,9 +187,25 @@ def _relation_from_review(candidate: CandidateRelation, review: ReviewDecision) 
         "reasons": review.reasons,
         "risk_flags": review.risk_flags,
         "reviewer_model": review.reviewer_model,
+        "normalized_implication_supported": review.normalized_implication_supported,
         "metadata": review.metadata,
     }
     return relation.model_copy(update={"provenance": provenance})
+
+
+def _normalized_implication_metadata(
+    candidate: CandidateRelation,
+    review: ReviewDecision,
+) -> dict[str, Any]:
+    relation_type = RelationType(review.final_relation_type or candidate.relation_type)
+    return {
+        "relation_type": relation_type.value,
+        "edges": normalized_implication_preview(
+            candidate.source,
+            candidate.target,
+            relation_type,
+        ),
+    }
 
 
 async def _check_approved_relations(
