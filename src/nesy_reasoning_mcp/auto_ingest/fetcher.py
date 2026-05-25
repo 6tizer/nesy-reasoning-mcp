@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from socket import getaddrinfo
@@ -15,6 +16,23 @@ DEFAULT_FETCH_TIMEOUT_SECONDS = 10.0
 DEFAULT_MAX_FETCH_BYTES = 200_000
 
 
+@dataclass(frozen=True)
+class FetchedUrlPage:
+    """Bounded body and metadata from a public HTTP(S) fetch."""
+
+    requested_url: str
+    final_url: str
+    body: bytes
+    content_type: str | None
+    charset: str
+    truncated: bool
+
+    @property
+    def text(self) -> str:
+        """Decode the fetched body using the response charset."""
+        return self.body.decode(self.charset, errors="replace")
+
+
 def fetch_url_evidence(
     url: str,
     *,
@@ -22,36 +40,21 @@ def fetch_url_evidence(
     max_bytes: int = DEFAULT_MAX_FETCH_BYTES,
 ) -> EvidenceRecord:
     """Fetch one explicit HTTP(S) URL and return a bounded evidence record."""
-    normalized_url = validate_public_http_url(url)
-    if max_bytes < 1:
-        raise ValueError("max_bytes must be positive")
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
-
-    req = request.Request(
-        normalized_url,
-        headers={"User-Agent": "nesy-reasoning-mcp-agent-ingest/1.0"},
+    page = fetch_public_http_url(
+        url,
+        timeout_seconds=timeout_seconds,
+        max_bytes=max_bytes,
     )
-    opener = request.build_opener(_SafeRedirectHandler)
-    with opener.open(req, timeout=timeout_seconds) as response:
-        body = response.read(max_bytes + 1)
-        truncated = len(body) > max_bytes
-        if truncated:
-            body = body[:max_bytes]
-        headers = getattr(response, "headers", {})
-        content_type = _header_get(headers, "content-type")
-        charset = _charset_from_content_type(content_type)
-        text = body.decode(charset, errors="replace")
 
     return EvidenceRecord(
-        url=normalized_url,
-        span=text,
+        url=page.requested_url,
+        span=page.text,
         source_type="url",
         retrieved_at=datetime.now(UTC).isoformat(),
         metadata={
-            "content_type": content_type,
-            "bytes_read": len(body),
-            "truncated": truncated,
+            "content_type": page.content_type,
+            "bytes_read": len(page.body),
+            "truncated": page.truncated,
         },
     )
 
@@ -76,6 +79,45 @@ def fetch_url_evidence_many(
 def validate_public_http_url(url: str) -> str:
     """Validate an explicit public HTTP(S) URL without fetching it."""
     return _validate_url(url)
+
+
+def fetch_public_http_url(
+    url: str,
+    *,
+    timeout_seconds: float = DEFAULT_FETCH_TIMEOUT_SECONDS,
+    max_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+) -> FetchedUrlPage:
+    """Fetch a public HTTP(S) URL with redirect validation and byte limits."""
+    normalized_url = validate_public_http_url(url)
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+
+    req = request.Request(
+        normalized_url,
+        headers={"User-Agent": "nesy-reasoning-mcp-agent-ingest/1.0"},
+    )
+    opener = request.build_opener(_SafeRedirectHandler)
+    with opener.open(req, timeout=timeout_seconds) as response:
+        body = response.read(max_bytes + 1)
+        truncated = len(body) > max_bytes
+        if truncated:
+            body = body[:max_bytes]
+        headers = getattr(response, "headers", {})
+        content_type = _header_get(headers, "content-type")
+        charset = _charset_from_content_type(content_type)
+        geturl = getattr(response, "geturl", None)
+        final_url = validate_public_http_url(str(geturl() if callable(geturl) else normalized_url))
+
+    return FetchedUrlPage(
+        requested_url=normalized_url,
+        final_url=final_url,
+        body=body,
+        content_type=content_type,
+        charset=charset,
+        truncated=truncated,
+    )
 
 
 def _validate_url(url: str) -> str:

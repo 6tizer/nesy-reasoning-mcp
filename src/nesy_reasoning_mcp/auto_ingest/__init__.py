@@ -1,5 +1,10 @@
 """Shared schemas for automated evidence ingestion workflows."""
 
+from nesy_reasoning_mcp.auto_ingest.crawler import (
+    CrawlOptions,
+    CrawlResult,
+    crawl_url_evidence,
+)
 from nesy_reasoning_mcp.auto_ingest.policy import (
     DRY_RUN_TOOL_ALLOWLIST,
     WRITE_MODE_TOOL_ALLOWLIST,
@@ -36,6 +41,8 @@ __all__ = [
     "CandidateRelation",
     "CandidateRelationBatch",
     "CommitReviewedRelationsInput",
+    "CrawlOptions",
+    "CrawlResult",
     "DRY_RUN_TOOL_ALLOWLIST",
     "EvidenceRecord",
     "GateAction",
@@ -56,6 +63,7 @@ __all__ = [
     "ResolveReviewQueueInput",
     "ValidateCandidateRelationsInput",
     "WRITE_MODE_TOOL_ALLOWLIST",
+    "crawl_url_evidence",
     "get_provider_entry",
     "list_provider_entries",
 ]

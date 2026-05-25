@@ -754,6 +754,167 @@ def test_cli_agent_dry_run_empty_search_results_return_diagnostic(
     ]
 
 
+def test_cli_agent_dry_run_crawl_adds_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    crawled = EvidenceRecord(
+        url="https://example.com/crawled",
+        span="Crawled evidence.",
+        source_type="crawl",
+        metadata={"crawl_depth": 0},
+    )
+
+    def fake_crawl(options: ingest_cli.CrawlOptions) -> ingest_cli.CrawlResult:
+        assert options.seed_urls == ["https://example.com/seed"]
+        assert options.max_depth == 1
+        assert options.allow_domains == ["docs.example.com"]
+        return ingest_cli.CrawlResult(
+            evidence=[crawled],
+            diagnostics=[
+                Diagnostic(
+                    level="info",
+                    code="CRAWL_URL_DUPLICATE",
+                    message="skipped duplicate",
+                )
+            ],
+            metadata={"accepted_count": 1},
+        )
+
+    def fail_fetch(*args: Any, **kwargs: Any) -> list[EvidenceRecord]:
+        raise AssertionError("--crawl must not also run explicit URL fetch")
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert [record.url for record in ingestion_input.evidence] == [
+            "https://example.com/source",
+            "https://example.com/crawled",
+        ]
+        assert kwargs["auto_write"] is True
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "crawl_url_evidence", fake_crawl)
+    monkeypatch.setattr(ingest_cli, "fetch_url_evidence_many", fail_fetch)
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    stdout = StringIO()
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=["https://example.com/seed"],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=[],
+        crawl=True,
+        crawl_max_depth=1,
+        crawl_max_pages=10,
+        crawl_max_page_bytes=1000,
+        crawl_max_total_bytes=5000,
+        crawl_timeout_seconds=3.0,
+        crawl_allow_domains=["docs.example.com"],
+        auto_write=True,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=StringIO())
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert payload["metadata"]["crawl_retrieval"] == {"accepted_count": 1}
+    assert payload["diagnostics"][0]["code"] == "CRAWL_URL_DUPLICATE"
+
+
+def test_cli_agent_dry_run_crawl_requires_seed() -> None:
+    stderr = StringIO()
+    args = argparse.Namespace(
+        input=None,
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=[],
+        crawl=True,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=stderr)
+
+    assert exit_code == 2
+    assert "--crawl requires at least one --url or input urls" in stderr.getvalue()
+
+
+def test_cli_agent_dry_run_empty_crawl_results_return_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_crawl(options: ingest_cli.CrawlOptions) -> ingest_cli.CrawlResult:
+        return ingest_cli.CrawlResult(
+            evidence=[],
+            diagnostics=[
+                Diagnostic(
+                    level="warning",
+                    code="CRAWL_FETCH_FAILED",
+                    message="could not fetch crawl URL",
+                )
+            ],
+            metadata={"accepted_count": 0},
+        )
+
+    async def fail_run(*args: Any, **kwargs: Any) -> IngestionReport:
+        raise AssertionError("empty crawl evidence must not call ingestion runtime")
+
+    monkeypatch.setattr(ingest_cli, "crawl_url_evidence", fake_crawl)
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fail_run)
+    stdout = StringIO()
+    args = argparse.Namespace(
+        input=None,
+        url=["https://example.com/seed"],
+        task=None,
+        question=None,
+        model=None,
+        search_queries=[],
+        crawl=True,
+        crawl_max_depth=1,
+        crawl_max_pages=10,
+        crawl_max_page_bytes=1000,
+        crawl_max_total_bytes=5000,
+        crawl_timeout_seconds=3.0,
+        crawl_allow_domains=[],
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=StringIO())
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert payload["metadata"]["crawl_retrieval"] == {"accepted_count": 0}
+    assert [diagnostic["code"] for diagnostic in payload["diagnostics"]] == [
+        "CRAWL_FETCH_FAILED",
+        "INGESTION_EVIDENCE_MISSING",
+    ]
+
+
 def test_cli_disable_tracing_default_openai_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

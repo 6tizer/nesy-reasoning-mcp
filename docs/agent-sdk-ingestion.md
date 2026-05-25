@@ -3,8 +3,8 @@
 This document defines automated candidate relation ingestion. The current
 implementation includes a live-capable OpenAI Agents SDK dry-run prototype and
 an explicit safe write mode, plus a pre-write MCP validation helper. It also
-supports explicit bounded Exa search retrieval for evidence. It does not add a
-crawler or embedding/vector retrieval layer.
+supports explicit bounded Exa search retrieval and explicit bounded crawling
+for evidence. It does not add an embedding/vector retrieval layer.
 
 ## Boundary
 
@@ -128,6 +128,34 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
   --url https://example.com/report \
   --task "Extract only evidence-backed sufficient or necessary relations"
 ```
+
+By default, URL sources are fetched exactly once and links are not followed.
+To crawl explicit seed URLs, opt in with `--crawl`:
+
+```bash
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --url https://example.com/report \
+  --crawl \
+  --crawl-max-depth 1 \
+  --crawl-max-pages 10 \
+  --crawl-allow-domain docs.example.com \
+  --task "Extract only evidence-backed sufficient or necessary relations" \
+  --format json
+```
+
+Crawler limits are bounded by depth, page count, bytes per page, total bytes,
+and per-page timeout. Seed pages are included at depth 0. Discovered links are
+deduplicated, fragments are ignored for duplicate detection, and traversal is
+restricted to seed hosts unless `--crawl-allow-domain` is provided. Redirects
+and discovered links use the same public HTTP(S), DNS, localhost, and
+private-address protections as explicit URL fetching.
+
+Crawler diagnostics are reported under `diagnostics`, and crawl run metadata is
+stored under `metadata.crawl_retrieval`. Per-page failures, duplicate links, and
+domain-filtered links do not fail the whole run if other evidence exists. If
+crawling yields no evidence and no other evidence is available, the command
+returns a diagnostic report and does not call the Agent SDK runtime or write
+graph memory.
 
 You may explicitly retrieve bounded search evidence through Exa. Search never
 runs unless `--search-query` is provided:
@@ -253,8 +281,9 @@ JSON input accepts:
 URL support is intentionally narrow: only explicit public `http` and `https`
 URLs are fetched, each with timeout and max-byte limits. Local URLs such as
 `file://`, `localhost`, and loopback/private IPs are rejected. The command does
-not search unless `--search-query` is explicit. It does not crawl links, build
-embeddings, or write durable graph memory by default.
+not search unless `--search-query` is explicit and does not crawl unless
+`--crawl` is explicit. It does not build embeddings or write durable graph
+memory by default.
 
 The prototype runs extractor and reviewer agents, aggregates reviewer votes
 when needed, then runs the deterministic dry-run gate through NeSy read-only
@@ -328,6 +357,7 @@ correlation, or weak wording such as "may", "can", or "helps" was upgraded into
 
 ## Next PRs
 
-The next implementation slices can add Claude-specific adapters, crawler
-sources, GraphRAG/vector retrieval, scheduling, or richer backend validation
-after model, tracing, retry, and gating behavior are validated.
+The next implementation slices can add Claude-specific adapters,
+GraphRAG/vector retrieval, scheduling, JavaScript/browser rendering, or richer
+backend validation after model, tracing, retry, and gating behavior are
+validated.
