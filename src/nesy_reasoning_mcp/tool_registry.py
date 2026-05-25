@@ -8,7 +8,12 @@ from typing import Any
 from mcp.types import CallToolResult, Tool
 from pydantic import ValidationError
 
-from nesy_reasoning_mcp.auto_ingest.schemas import ValidateCandidateRelationsInput
+from nesy_reasoning_mcp.auto_ingest.schemas import (
+    CommitReviewedRelationsInput,
+    ListReviewQueueInput,
+    ResolveReviewQueueInput,
+    ValidateCandidateRelationsInput,
+)
 from nesy_reasoning_mcp.schemas import (
     AssertExclusiveInput,
     AssertRelationsInput,
@@ -34,11 +39,14 @@ from nesy_reasoning_mcp.tool_names import (
     CHECK_CONTRADICTIONS,
     CLASSIFY,
     CLEAR_RELATIONS,
+    COMMIT_REVIEWED_RELATIONS,
     COUNTERFACTUAL,
     EXPORT_RELATIONS,
     LIST_RELATIONS,
+    LIST_REVIEW_QUEUE,
     LOAD_RELATIONS,
     REASON_OVER_RELATIONS,
+    RESOLVE_REVIEW_QUEUE,
     SUMMARIZE_GRAPH,
     VALIDATE_CANDIDATE_RELATIONS,
     VERIFY_CHAIN,
@@ -49,11 +57,14 @@ from nesy_reasoning_mcp.tool_output_schemas import (
     _check_contradictions_output_schema,
     _classify_output_schema,
     _clear_relations_output_schema,
+    _commit_reviewed_relations_output_schema,
     _counterfactual_output_schema,
     _export_relations_output_schema,
     _list_relations_output_schema,
+    _list_review_queue_output_schema,
     _load_relations_output_schema,
     _reason_over_relations_output_schema,
+    _resolve_review_queue_output_schema,
     _summarize_graph_output_schema,
     _validate_candidate_relations_output_schema,
     _verify_chain_output_schema,
@@ -72,6 +83,11 @@ from nesy_reasoning_mcp.tool_result import (
     make_result,
     runtime_error_content,
     unknown_tool_content,
+)
+from nesy_reasoning_mcp.tool_review_queue import (
+    commit_reviewed_relations,
+    list_review_queue,
+    resolve_review_queue,
 )
 from nesy_reasoning_mcp.tool_summary import summarize_graph
 
@@ -210,6 +226,32 @@ def get_tools() -> list[Tool]:
             inputSchema=ValidateCandidateRelationsInput.model_json_schema(),
             outputSchema=_validate_candidate_relations_output_schema(),
         ),
+        Tool(
+            name=LIST_REVIEW_QUEUE,
+            title="List Review Queue",
+            description="List persisted Agent SDK ingestion review queue records.",
+            inputSchema=ListReviewQueueInput.model_json_schema(),
+            outputSchema=_list_review_queue_output_schema(),
+        ),
+        Tool(
+            name=COMMIT_REVIEWED_RELATIONS,
+            title="Commit Reviewed Relations",
+            description=(
+                "Commit explicit pending review queue records after re-running validation "
+                "and safe-write checks."
+            ),
+            inputSchema=CommitReviewedRelationsInput.model_json_schema(),
+            outputSchema=_commit_reviewed_relations_output_schema(),
+        ),
+        Tool(
+            name=RESOLVE_REVIEW_QUEUE,
+            title="Resolve Review Queue",
+            description=(
+                "Resolve explicit pending review queue records without writing graph memory."
+            ),
+            inputSchema=ResolveReviewQueueInput.model_json_schema(),
+            outputSchema=_resolve_review_queue_output_schema(),
+        ),
     ]
 
 
@@ -236,6 +278,9 @@ async def call_tool(
         COUNTERFACTUAL: counterfactual,
         REASON_OVER_RELATIONS: reason_over_relations,
         VALIDATE_CANDIDATE_RELATIONS: _validate_candidate_relations_handler,
+        LIST_REVIEW_QUEUE: list_review_queue,
+        COMMIT_REVIEWED_RELATIONS: commit_reviewed_relations,
+        RESOLVE_REVIEW_QUEUE: resolve_review_queue,
     }
     handler = handlers.get(name)
     if handler is None:

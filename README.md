@@ -259,6 +259,9 @@ mutating the graph.
 | `nesy.counterfactual` | Analyze what changes if a proposition is assumed false. | No |
 | `nesy.reason_over_relations` | Run reasoning over caller-supplied temporary relations. | No |
 | `nesy.validate_candidate_relations` | Validate reviewed candidates before durable writes. | No |
+| `nesy.list_review_queue` | List persisted ingestion review queue records. | No |
+| `nesy.commit_reviewed_relations` | Commit explicit pending queue records after validation. | Yes |
+| `nesy.resolve_review_queue` | Resolve explicit pending queue records without writing relations. | Yes |
 
 ## Ephemeral Reasoning
 
@@ -282,7 +285,8 @@ persistent memory.
 Automated external evidence ingestion is tracked separately in the
 [Agent SDK ingestion design](docs/agent-sdk-ingestion.md). Its default mode is
 dry-run; durable writes require explicit `--auto-write`, gate approval,
-contradiction rejection, and `nesy.assert_relations`.
+contradiction rejection, and `nesy.assert_relations`. In write mode, queued
+candidates are persisted for later explicit review queue actions.
 
 For Agent SDK or other external orchestrators, `nesy.validate_candidate_relations`
 provides the same pre-write validation as an MCP helper. It returns gate results,

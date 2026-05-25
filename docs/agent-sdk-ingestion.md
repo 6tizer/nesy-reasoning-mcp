@@ -3,7 +3,7 @@
 This document defines automated candidate relation ingestion. The current
 implementation includes a live-capable OpenAI Agents SDK dry-run prototype and
 an explicit safe write mode, plus a pre-write MCP validation helper. It does not
-add a crawler, persistent review queue, or queue commit tools.
+add a crawler or search layer.
 
 ## Boundary
 
@@ -59,6 +59,8 @@ The shared schema module is `nesy_reasoning_mcp.auto_ingest`.
 - `GateResult`: deterministic gate action: `auto_write`, `queue`, or `reject`.
 - `IngestionReport`: run-level report with candidates, reviews, gate results,
   approved relation inputs, diagnostics, and metadata.
+- `ReviewQueueRecord`: persisted queued candidate, review, gate result,
+  diagnostics, provenance, and run metadata for later explicit action.
 
 The schemas are strict Pydantic models and reject unknown fields. Candidate
 relations can be converted to existing `RelationInput` records only after the
@@ -91,6 +93,9 @@ Safe write mode may additionally use:
 
 ```text
 nesy.assert_relations
+nesy.list_review_queue
+nesy.commit_reviewed_relations
+nesy.resolve_review_queue
 ```
 
 Write tools stay disabled unless a caller explicitly passes `--auto-write`.
@@ -225,13 +230,27 @@ OPENAI_API_KEY=... uv run python scripts/agent_ingest_openai.py \
 
 When `--auto-write` is present, the report mode is `write`. Gate-approved
 relations still appear in `approved_relations`, and successful persisted
-relation IDs appear in `written_relation_ids`. The review queue is not
-persisted; queued items remain visible through `gate_results`.
+relation IDs appear in `written_relation_ids`. Queued items are persisted as
+review queue records for JSON and SQLite backends; their IDs are also reported
+under `metadata.review_queue_record_ids`.
 
 Writes use only `nesy.assert_relations` with contradiction rejection enabled.
 The relation provenance includes candidate ID, evidence, reviewer reasons, risk
 flags, and reviewer model. If assertion fails, the report keeps diagnostics and
 does not pretend a relation was written.
+
+Review queue records can be inspected and acted on explicitly:
+
+```bash
+uv run --no-editable nesy-reasoning-mcp ingest queue list --format json
+uv run --no-editable nesy-reasoning-mcp ingest queue commit --id queue_...
+uv run --no-editable nesy-reasoning-mcp ingest queue resolve --id queue_... \
+  --reason "duplicate or out of scope"
+```
+
+Commit re-runs validation and safe-write checks before writing relations. If
+any selected pending record queues or rejects during validation, no selected
+record is written.
 
 ## Gate Rules
 
@@ -255,6 +274,6 @@ correlation, or weak wording such as "may", "can", or "helps" was upgraded into
 
 ## Next PRs
 
-The next implementation slices can add persistent review queue storage,
-multi-reviewer voting, Claude-specific adapters, or richer backend validation
-after model, tracing, retry, and gating behavior are validated.
+The next implementation slices can add multi-reviewer voting, Claude-specific
+adapters, retrieval/crawler sources, or richer backend validation after model,
+tracing, retry, and gating behavior are validated.

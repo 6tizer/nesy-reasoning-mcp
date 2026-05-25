@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -22,6 +23,11 @@ from nesy_reasoning_mcp.schemas import (
 )
 
 RelationT = TypeVar("RelationT", bound=RelationInput)
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC timestamp as an ISO-8601 string."""
+    return datetime.now(UTC).isoformat()
 
 
 def graph_stats_for(

@@ -94,6 +94,7 @@ async def test_default_dry_run_does_not_write(monkeypatch: pytest.MonkeyPatch) -
     assert report.mode == "dry_run"
     assert report.written_relation_ids == []
     assert report.approved_relations[0].source == "A"
+    assert store.list_review_queue() == []
     assert store.list_relations() == []
 
 
@@ -139,6 +140,9 @@ async def test_auto_write_queues_low_confidence_without_writing(
 
     assert report.gate_results[0].action == "queue"
     assert "below write threshold" in report.gate_results[0].reasons[0]
+    assert len(store.list_review_queue()) == 1
+    assert store.list_review_queue()[0].candidate.evidence[0].url == "https://example.com/source"
+    assert report.metadata["review_queue_record_ids"] == [store.list_review_queue()[0].id]
     assert report.approved_relations == []
     assert report.written_relation_ids == []
     assert store.list_relations() == []
@@ -198,6 +202,7 @@ async def test_auto_write_queues_hard_contradictions_without_writing(
     )
 
     assert {item.action for item in report.gate_results} == {"queue"}
+    assert len(store.list_review_queue()) == 2
     assert report.approved_relations == []
     assert report.written_relation_ids == []
     assert store.list_relations() == []

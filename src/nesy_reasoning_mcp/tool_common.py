@@ -19,8 +19,10 @@ from nesy_reasoning_mcp.tool_names import (
     ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
     CLEAR_RELATIONS,
+    COMMIT_REVIEWED_RELATIONS,
     EXPORT_RELATIONS,
     LOAD_RELATIONS,
+    RESOLVE_REVIEW_QUEUE,
 )
 
 
@@ -119,7 +121,7 @@ def _should_audit(name: str, arguments: dict[str, Any]) -> bool:
         return not bool(arguments.get("validate_only", False))
     if name == EXPORT_RELATIONS:
         return arguments.get("destination") == "file"
-    return False
+    return name in {COMMIT_REVIEWED_RELATIONS, RESOLVE_REVIEW_QUEUE}
 
 
 def _record_dump(record: RelationRecord) -> dict[str, Any]:

@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
+from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelationBatch,
     IngestionInput,
@@ -141,7 +142,7 @@ async def run_openai_agents_ingestion(
         )
         diagnostics = [*diagnostics, *write_diagnostics]
 
-    return IngestionReport(
+    report = IngestionReport(
         mode=IngestionMode.WRITE if auto_write else IngestionMode.DRY_RUN,
         candidates=candidate_batch.candidates,
         reviews=review_batch.reviews,
@@ -160,6 +161,31 @@ async def run_openai_agents_ingestion(
             "provider": _provider_metadata(provider_config, tracing_disabled),
         },
     )
+    if auto_write:
+        queued_records = queued_records_from_report(
+            report,
+            propositions=ingestion_input.propositions,
+            context_metadata=ingestion_input.context_metadata,
+        )
+        if queued_records:
+            stored_records, _updated = store.enqueue_review_queue(queued_records)
+            record_ids = [record.id for record in stored_records]
+            store.record_audit(
+                event_type="review_queue",
+                tool_name="auto_ingest.enqueue_review_queue",
+                arguments={"run_id": report.run_id, "queue_record_ids": record_ids},
+                result_status="ok",
+                metadata={"queued_count": len(record_ids)},
+            )
+            report = report.model_copy(
+                update={
+                    "metadata": {
+                        **report.metadata,
+                        "review_queue_record_ids": record_ids,
+                    }
+                }
+            )
+    return report
 
 
 def _build_agent(

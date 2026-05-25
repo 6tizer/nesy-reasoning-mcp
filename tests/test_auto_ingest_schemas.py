@@ -14,7 +14,11 @@ from nesy_reasoning_mcp.auto_ingest import (
     ReviewDecision,
     ReviewDecisionBatch,
     ReviewDecisionValue,
+    ReviewQueueRecord,
+    ReviewQueueStatus,
 )
+from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
+from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.tool_names import ASSERT_RELATIONS, LOAD_RELATIONS, REASON_OVER_RELATIONS
 
 
@@ -67,6 +71,111 @@ def test_candidate_review_gate_and_report_serialize() -> None:
         "https://"
     )
     assert dumped["written_relation_ids"] == ["rel-1"]
+
+
+def test_review_queue_record_round_trips_candidate_review_and_gate() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+    review = ReviewDecision(
+        candidate_id=candidate.id,
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type="sufficient",
+        final_confidence=0.9,
+        reasons=["Evidence supports the relation."],
+    )
+    gate = GateResult(candidate_id=candidate.id, action=GateAction.QUEUE)
+
+    record = ReviewQueueRecord(
+        id="queue-1",
+        run_id="run-1",
+        candidate=candidate,
+        review=review,
+        gate_result=gate,
+        run_metadata={"task": "demo"},
+    )
+    reloaded = ReviewQueueRecord.model_validate(record.model_dump(mode="json"))
+
+    assert reloaded.status == ReviewQueueStatus.PENDING
+    assert reloaded.created_at == reloaded.updated_at
+    assert reloaded.candidate.evidence[0].url == "https://example.com/docs"
+    assert reloaded.review is not None
+    assert reloaded.review.reasons == ["Evidence supports the relation."]
+    assert reloaded.gate_result.action == GateAction.QUEUE
+
+
+def test_review_queue_record_rejects_mismatched_candidate_ids() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+
+    with pytest.raises(ValidationError):
+        ReviewQueueRecord(
+            run_id="run-1",
+            candidate=candidate,
+            gate_result=GateResult(candidate_id="other", action=GateAction.QUEUE),
+        )
+
+
+def test_review_queue_record_requires_queue_gate_action() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+
+    with pytest.raises(ValidationError):
+        ReviewQueueRecord(
+            run_id="run-1",
+            candidate=candidate,
+            gate_result=GateResult(candidate_id=candidate.id, action=GateAction.AUTO_WRITE),
+        )
+
+
+def test_queued_records_keep_candidate_diagnostics_without_repeating_all_run_diagnostics() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+    report = IngestionReport(
+        run_id="run-1",
+        candidates=[candidate],
+        reviews=[],
+        gate_results=[GateResult(candidate_id=candidate.id, action=GateAction.QUEUE)],
+        diagnostics=[
+            Diagnostic(
+                level="warning",
+                code="CANDIDATE_LOW_CONFIDENCE",
+                message="candidate-specific",
+                related_ids=[candidate.id],
+            ),
+            Diagnostic(
+                level="warning",
+                code="RUN_LEVEL",
+                message="run-level",
+            ),
+        ],
+    )
+
+    records = queued_records_from_report(report, propositions=[], context_metadata={})
+
+    assert records[0].run_metadata["diagnostic_count"] == 2
+    assert [diagnostic.code for diagnostic in records[0].diagnostics] == [
+        "CANDIDATE_LOW_CONFIDENCE"
+    ]
 
 
 @pytest.mark.parametrize(

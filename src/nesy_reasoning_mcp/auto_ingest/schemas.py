@@ -46,6 +46,14 @@ class IngestionMode(StrEnum):
     WRITE = "write"
 
 
+class ReviewQueueStatus(StrEnum):
+    """Lifecycle status for persisted review queue records."""
+
+    PENDING = "pending"
+    COMMITTED = "committed"
+    RESOLVED = "resolved"
+
+
 class EvidenceRecord(BaseModel):
     """A source excerpt supporting a candidate relation."""
 
@@ -273,6 +281,192 @@ class IngestionReport(BaseModel):
     @classmethod
     def strip_non_empty(cls, value: str) -> str:
         """Strip report identifiers and reject empty values."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+
+class ReviewQueueRecord(BaseModel):
+    """A persisted candidate relation awaiting explicit review action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: f"queue_{uuid4().hex}", min_length=1)
+    status: ReviewQueueStatus = ReviewQueueStatus.PENDING
+    run_id: str = Field(min_length=1)
+    run_metadata: dict[str, Any] = Field(default_factory=dict)
+    candidate: CandidateRelation
+    review: ReviewDecision | None = None
+    gate_result: GateResult
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
+    propositions: list[PropositionRecord] = Field(default_factory=list)
+    context_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    committed_relation_ids: list[str] = Field(default_factory=list)
+    resolution: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_timestamps(cls, value: Any) -> Any:
+        """Use one timestamp for both generated creation/update defaults."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if data.get("created_at") is None and data.get("updated_at") is None:
+            timestamp = datetime.now(UTC).isoformat()
+            data["created_at"] = timestamp
+            data["updated_at"] = timestamp
+        elif data.get("created_at") is None:
+            data["created_at"] = data["updated_at"]
+        elif data.get("updated_at") is None:
+            data["updated_at"] = data["created_at"]
+        return data
+
+    @field_validator("id", "run_id", "created_at", "updated_at")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        """Strip required text fields and reject empty values."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @field_validator("committed_relation_ids")
+    @classmethod
+    def strip_relation_ids(cls, value: list[str]) -> list[str]:
+        """Strip relation IDs and reject empty provided values."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("committed_relation_ids must not contain empty values")
+        return stripped
+
+    @model_validator(mode="after")
+    def require_candidate_consistency(self) -> ReviewQueueRecord:
+        """Ensure review and gate entries refer to the queued candidate."""
+        if self.gate_result.action != GateAction.QUEUE:
+            raise ValueError("gate_result action must be queue")
+        if self.gate_result.candidate_id != self.candidate.id:
+            raise ValueError("gate_result candidate_id must match candidate id")
+        if self.review is not None and self.review.candidate_id != self.candidate.id:
+            raise ValueError("review candidate_id must match candidate id")
+        return self
+
+
+class ReviewQueueFilter(BaseModel):
+    """Filter for listing persisted review queue records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: ReviewQueueStatus | None = None
+    ids: list[str] = Field(default_factory=list)
+    run_id: str | None = None
+    candidate_id: str | None = None
+    store_id: str | None = None
+    context_id: str | None = None
+    after_created_at: str | None = None
+    after_id: str | None = None
+
+    @field_validator("ids")
+    @classmethod
+    def strip_ids(cls, value: list[str]) -> list[str]:
+        """Strip IDs, reject empties, and de-duplicate in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("ids must not contain empty values")
+        return list(dict.fromkeys(stripped))
+
+    @field_validator(
+        "run_id",
+        "candidate_id",
+        "store_id",
+        "context_id",
+        "after_created_at",
+        "after_id",
+    )
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        """Strip optional filter values and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @model_validator(mode="after")
+    def require_complete_keyset_cursor(self) -> ReviewQueueFilter:
+        """Require complete keyset cursor fields when either is supplied."""
+        if (self.after_created_at is None) != (self.after_id is None):
+            raise ValueError("after_created_at and after_id must be provided together")
+        return self
+
+
+class ListReviewQueueInput(BaseModel):
+    """Input for `nesy.list_review_queue`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filter: ReviewQueueFilter = Field(default_factory=ReviewQueueFilter)
+    limit: int = Field(default=50, ge=1, le=200)
+    cursor: str | None = None
+
+    @field_validator("cursor")
+    @classmethod
+    def strip_cursor(cls, value: str | None) -> str | None:
+        """Strip opaque cursor values and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+
+class CommitReviewedRelationsInput(BaseModel):
+    """Input for `nesy.commit_reviewed_relations`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(min_length=1)
+    min_write_confidence: float = Field(default=0.85, ge=0, le=1)
+    max_depth: int = Field(default=8, ge=1, le=20)
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
+    include_soft: bool = False
+
+    @field_validator("ids")
+    @classmethod
+    def strip_ids(cls, value: list[str]) -> list[str]:
+        """Strip IDs, reject empties, and de-duplicate in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("ids must not contain empty values")
+        return list(dict.fromkeys(stripped))
+
+
+class ResolveReviewQueueInput(BaseModel):
+    """Input for `nesy.resolve_review_queue`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("ids")
+    @classmethod
+    def strip_ids(cls, value: list[str]) -> list[str]:
+        """Strip IDs, reject empties, and de-duplicate in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("ids must not contain empty values")
+        return list(dict.fromkeys(stripped))
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        """Strip resolution reason and reject empty values."""
         stripped = value.strip()
         if not stripped:
             raise ValueError("must not be empty")

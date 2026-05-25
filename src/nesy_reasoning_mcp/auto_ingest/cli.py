@@ -32,6 +32,12 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
 from nesy_reasoning_mcp.auto_ingest.schemas import IngestionInput, IngestionReport
 from nesy_reasoning_mcp.config import load_config
 from nesy_reasoning_mcp.store import create_relation_store
+from nesy_reasoning_mcp.tool_names import (
+    COMMIT_REVIEWED_RELATIONS,
+    LIST_REVIEW_QUEUE,
+    RESOLVE_REVIEW_QUEUE,
+)
+from nesy_reasoning_mcp.tool_registry import call_tool
 
 _HTTP_HEADER_KEY_PATTERN = r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+"
 
@@ -48,6 +54,11 @@ def add_ingest_subparser(subparsers: argparse._SubParsersAction[argparse.Argumen
         help="Run OpenAI Agents SDK dry-run candidate ingestion.",
     )
     add_agent_dry_run_arguments(dry_run_parser)
+    queue_parser = ingest_subparsers.add_parser(
+        "queue",
+        help="Inspect and act on persisted ingestion review queue records.",
+    )
+    add_review_queue_arguments(queue_parser)
 
 
 def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -115,10 +126,42 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_review_queue_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add review queue CLI subcommands."""
+    queue_subparsers = parser.add_subparsers(dest="queue_command")
+    list_parser = queue_subparsers.add_parser("list", help="List pending review queue records.")
+    list_parser.add_argument("--status", choices=["pending", "committed", "resolved"])
+    list_parser.add_argument("--run-id")
+    list_parser.add_argument("--candidate-id")
+    list_parser.add_argument("--store-id")
+    list_parser.add_argument("--context-id")
+    list_parser.add_argument("--limit", type=int, default=50)
+    list_parser.add_argument("--cursor")
+    list_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    commit_parser = queue_subparsers.add_parser(
+        "commit",
+        help="Commit explicit pending review queue records.",
+    )
+    commit_parser.add_argument("--id", action="append", required=True, dest="ids")
+    commit_parser.add_argument("--min-write-confidence", type=float, default=0.85)
+    commit_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    resolve_parser = queue_subparsers.add_parser(
+        "resolve",
+        help="Resolve explicit pending review queue records without writing graph memory.",
+    )
+    resolve_parser.add_argument("--id", action="append", required=True, dest="ids")
+    resolve_parser.add_argument("--reason", required=True)
+    resolve_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+
 def run_ingest_cli(args: argparse.Namespace) -> int:
     """Dispatch ingestion CLI subcommands."""
     if args.ingest_command == "agent-dry-run":
         return run_agent_dry_run_cli(args)
+    if args.ingest_command == "queue":
+        return run_review_queue_cli(args)
     raise ValueError("ingest command requires a subcommand")
 
 
@@ -144,6 +187,25 @@ def run_agent_dry_run_cli(
     else:
         print(rendered, file=stdout)
     return 0
+
+
+def run_review_queue_cli(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    """Run review queue CLI commands."""
+    try:
+        result = anyio.run(_run_review_queue_command, args)
+    except (OSError, ValueError, ValidationError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    structured = dict(result.structuredContent or {})
+    rendered = _render_queue_result(structured, getattr(args, "format", "json"))
+    print(rendered, file=stdout)
+    return 2 if result.isError or structured.get("status") == "error" else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,6 +250,50 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         provider_config=provider_config,
         disable_tracing=bool(getattr(args, "disable_tracing", False)),
     )
+
+
+async def _run_review_queue_command(args: argparse.Namespace) -> Any:
+    store = create_relation_store(load_config())
+    if args.queue_command == "list":
+        filters = {
+            key: value
+            for key, value in {
+                "status": args.status,
+                "run_id": args.run_id,
+                "candidate_id": args.candidate_id,
+                "store_id": args.store_id,
+                "context_id": args.context_id,
+            }.items()
+            if value is not None
+        }
+        return await call_tool(
+            LIST_REVIEW_QUEUE,
+            {
+                "filter": filters,
+                "limit": args.limit,
+                "cursor": args.cursor,
+            },
+            store,
+        )
+    if args.queue_command == "commit":
+        return await call_tool(
+            COMMIT_REVIEWED_RELATIONS,
+            {
+                "ids": args.ids,
+                "min_write_confidence": args.min_write_confidence,
+            },
+            store,
+        )
+    if args.queue_command == "resolve":
+        return await call_tool(
+            RESOLVE_REVIEW_QUEUE,
+            {
+                "ids": args.ids,
+                "reason": args.reason,
+            },
+            store,
+        )
+    raise ValueError("ingest queue command requires a subcommand")
 
 
 def _provider_config_from_args(
@@ -317,3 +423,26 @@ def _render_report(report: IngestionReport, output_format: str) -> str:
         f"queued: {queued}\n"
         f"rejected: {rejected}"
     )
+
+
+def _render_queue_result(result: dict[str, Any], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(result, ensure_ascii=False)
+    if "records" in result:
+        rows = [
+            f"{record.get('id')}\t{record.get('status')}\t"
+            f"{record.get('candidate', {}).get('source')} -> "
+            f"{record.get('candidate', {}).get('target')}"
+            for record in result.get("records", [])
+            if isinstance(record, dict)
+        ]
+        return "\n".join(rows) if rows else "no review queue records"
+    if "committed_count" in result:
+        return (
+            f"status: {result.get('status')}\n"
+            f"committed: {result.get('committed_count')}\n"
+            f"relations: {len(result.get('relation_ids', []))}"
+        )
+    if "resolved_count" in result:
+        return f"status: {result.get('status')}\nresolved: {result.get('resolved_count')}"
+    return f"status: {result.get('status')}"

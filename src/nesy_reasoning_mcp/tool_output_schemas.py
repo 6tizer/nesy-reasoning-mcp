@@ -315,3 +315,55 @@ def _validate_candidate_relations_output_schema() -> dict[str, Any]:
         ],
         "additionalProperties": False,
     }
+
+
+def _list_review_queue_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "records": {"type": "array"},
+            "total": {"type": "integer"},
+            "next_cursor": {"type": ["string", "null"]},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "records", "total"],
+        "additionalProperties": False,
+    }
+
+
+def _commit_reviewed_relations_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "committed_count": {"type": "integer"},
+            "queue_ids": {"type": "array", "items": {"type": "string"}},
+            "relation_ids": {"type": "array", "items": {"type": "string"}},
+            "validation": {"type": "object"},
+            "write_result": {"type": "object"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "committed_count", "queue_ids", "relation_ids"],
+        "additionalProperties": False,
+    }
+
+
+def _resolve_review_queue_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "resolved_count": {"type": "integer"},
+            "queue_ids": {"type": "array", "items": {"type": "string"}},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["status", "resolved_count", "queue_ids"],
+        "additionalProperties": False,
+    }
