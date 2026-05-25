@@ -10,6 +10,15 @@ from nesy_reasoning_mcp.auto_ingest import (
     ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
+    ScheduledIngestionJob,
+    ScheduledIngestionJobFilter,
+    ScheduledIngestionJobStatus,
+    ScheduledIngestionRun,
+    ScheduledIngestionRunFilter,
+    ScheduledIngestionRunStatus,
+    ScheduledIngestionRunTrigger,
+    ScheduledIngestionSourceConfig,
+    ScheduledIngestionState,
 )
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.schemas import (
@@ -52,6 +61,36 @@ def _queue_record(
         run_id=run_id,
         candidate=candidate,
         gate_result=GateResult(candidate_id=candidate.id, action=GateAction.QUEUE),
+    )
+
+
+def _scheduled_job(
+    job_id: str = "sched-1",
+    *,
+    status: ScheduledIngestionJobStatus = ScheduledIngestionJobStatus.ACTIVE,
+    next_run_at: str = "2026-01-01T00:00:00+00:00",
+) -> ScheduledIngestionJob:
+    return ScheduledIngestionJob(
+        id=job_id,
+        name=f"job {job_id}",
+        status=status,
+        cron="*/30 * * * *",
+        source_config=ScheduledIngestionSourceConfig(urls=["https://example.com/source"]),
+        state=ScheduledIngestionState(next_run_at=next_run_at),
+    )
+
+
+def _scheduled_run(
+    run_id: str = "srun-1",
+    *,
+    job_id: str = "sched-1",
+    status: ScheduledIngestionRunStatus = ScheduledIngestionRunStatus.SUCCEEDED,
+) -> ScheduledIngestionRun:
+    return ScheduledIngestionRun(
+        id=run_id,
+        job_id=job_id,
+        trigger=ScheduledIngestionRunTrigger.MANUAL,
+        status=status,
     )
 
 
@@ -1013,6 +1052,87 @@ def test_sqlite_review_queue_threaded_enqueue_and_list(tmp_path) -> None:
 
     assert results == [1] * 12
     assert len(store.list_review_queue()) == 12
+
+
+def test_memory_scheduled_ingestion_job_and_run_lifecycle() -> None:
+    store = RelationStore()
+    job = _scheduled_job()
+
+    stored, updated = store.upsert_scheduled_ingestion_job(job)
+    run = store.append_scheduled_ingestion_run(_scheduled_run(job_id=job.id))
+
+    assert updated == 0
+    assert stored.id == job.id
+    assert store.get_scheduled_ingestion_job(job.id) is not None
+    assert store.list_scheduled_ingestion_jobs()[0].id == job.id
+    assert store.list_scheduled_ingestion_runs()[0].id == run.id
+
+    state = ScheduledIngestionState(
+        next_run_at="2026-01-01T00:30:00+00:00",
+        last_run_id=run.id,
+    )
+    updated_job = store.update_scheduled_ingestion_job_state(
+        job.id,
+        state=state,
+        status=ScheduledIngestionJobStatus.DISABLED,
+    )
+
+    assert updated_job is not None
+    assert updated_job.status == ScheduledIngestionJobStatus.DISABLED
+    assert updated_job.state.last_run_id == run.id
+
+
+def test_json_store_persists_scheduled_ingestion_jobs_and_runs(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.upsert_scheduled_ingestion_job(_scheduled_job())
+    store.append_scheduled_ingestion_run(_scheduled_run())
+
+    reloaded = JsonRelationStore(config)
+
+    assert reloaded.list_scheduled_ingestion_jobs()[0].id == "sched-1"
+    assert reloaded.list_scheduled_ingestion_runs()[0].id == "srun-1"
+
+
+def test_sqlite_store_persists_and_filters_scheduled_ingestion(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.upsert_scheduled_ingestion_job(
+        _scheduled_job("sched-1", next_run_at="2026-01-01T00:00:00+00:00")
+    )
+    store.upsert_scheduled_ingestion_job(
+        _scheduled_job(
+            "sched-2",
+            status=ScheduledIngestionJobStatus.DISABLED,
+            next_run_at="2026-01-01T00:30:00+00:00",
+        )
+    )
+    store.append_scheduled_ingestion_run(_scheduled_run("srun-1", job_id="sched-1"))
+    store.append_scheduled_ingestion_run(
+        _scheduled_run(
+            "srun-2",
+            job_id="sched-2",
+            status=ScheduledIngestionRunStatus.FAILED,
+        )
+    )
+
+    reloaded = SqliteRelationStore(config)
+    due = reloaded.list_scheduled_ingestion_jobs(
+        ScheduledIngestionJobFilter(
+            status=ScheduledIngestionJobStatus.ACTIVE,
+            due_before="2026-01-01T00:15:00+00:00",
+        )
+    )
+    failed_runs = reloaded.list_scheduled_ingestion_runs(
+        ScheduledIngestionRunFilter(status=ScheduledIngestionRunStatus.FAILED)
+    )
+
+    assert [job.id for job in due] == ["sched-1"]
+    assert [run.id for run in failed_runs] == ["srun-2"]
 
 
 def test_memory_import_records_keeps_context_metadata() -> None:

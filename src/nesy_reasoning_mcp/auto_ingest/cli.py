@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from re import fullmatch
 from typing import Any, TextIO
@@ -48,6 +49,32 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
     ProviderRegistryEntry,
     get_provider_entry,
     list_provider_entries,
+)
+from nesy_reasoning_mcp.auto_ingest.scheduler import (
+    DEFAULT_SCHEDULE_MAX_RETRIES,
+    DEFAULT_SCHEDULE_POLL_SECONDS,
+    DEFAULT_SCHEDULE_RETRY_BACKOFF_SECONDS,
+    DEFAULT_SCHEDULE_TIMEZONE,
+    MAX_SCHEDULE_POLL_SECONDS,
+    ScheduledIngestionJob,
+    ScheduledIngestionJobFilter,
+    ScheduledIngestionJobStatus,
+    ScheduledIngestionProviderConfig,
+    ScheduledIngestionRetryPolicy,
+    ScheduledIngestionRun,
+    ScheduledIngestionRunFilter,
+    ScheduledIngestionRunStatus,
+    ScheduledIngestionRunTrigger,
+    ScheduledIngestionSourceConfig,
+    ScheduledIngestionState,
+    ScheduledIngestionWriteConfig,
+    job_due,
+    next_cron_run,
+    next_state_for_failure,
+    next_state_for_skip,
+    next_state_for_success,
+    scheduled_write_diagnostics,
+    write_scheduled_report,
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     IngestionInput,
@@ -103,6 +130,11 @@ def add_ingest_subparser(subparsers: argparse._SubParsersAction[argparse.Argumen
         help="Validate external retrieval candidate batches.",
     )
     add_retrieval_arguments(retrieval_parser)
+    schedule_parser = ingest_subparsers.add_parser(
+        "schedule",
+        help="Manage scheduled Agent SDK ingestion jobs.",
+    )
+    add_schedule_arguments(schedule_parser)
 
 
 def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -334,6 +366,70 @@ def add_retrieval_arguments(parser: argparse.ArgumentParser) -> None:
     validate_parser.add_argument("--format", choices=["json", "text"], default="json")
 
 
+def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add scheduled ingestion CLI subcommands."""
+    schedule_subparsers = parser.add_subparsers(dest="schedule_command")
+
+    add_parser = schedule_subparsers.add_parser(
+        "add",
+        help="Create or update a scheduled Agent SDK ingestion job.",
+    )
+    add_parser.add_argument("--name", required=True)
+    add_parser.add_argument("--cron", required=True)
+    add_parser.add_argument("--timezone", default=DEFAULT_SCHEDULE_TIMEZONE)
+    add_parser.add_argument("--max-retries", type=int, default=DEFAULT_SCHEDULE_MAX_RETRIES)
+    add_parser.add_argument(
+        "--retry-backoff-seconds",
+        type=int,
+        default=DEFAULT_SCHEDULE_RETRY_BACKOFF_SECONDS,
+    )
+    add_parser.add_argument("--allow-scheduled-writes", action="store_true")
+    add_parser.add_argument("--allow-single-reviewer-write", action="store_true")
+    add_parser.add_argument("--report-dir", default=None)
+    add_agent_dry_run_arguments(add_parser)
+
+    list_parser = schedule_subparsers.add_parser("list", help="List scheduled ingestion jobs.")
+    list_parser.add_argument(
+        "--status",
+        choices=[status.value for status in ScheduledIngestionJobStatus],
+    )
+    list_parser.add_argument("--limit", type=int, default=50)
+    list_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    runs_parser = schedule_subparsers.add_parser("runs", help="List scheduled ingestion runs.")
+    runs_parser.add_argument("--job-id")
+    runs_parser.add_argument(
+        "--status",
+        choices=[status.value for status in ScheduledIngestionRunStatus],
+    )
+    runs_parser.add_argument("--limit", type=int, default=50)
+    runs_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    run_parser = schedule_subparsers.add_parser("run", help="Run one scheduled ingestion job now.")
+    run_parser.add_argument("--id", required=True, dest="job_id")
+    run_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    run_due_parser = schedule_subparsers.add_parser("run-due", help="Run due active jobs once.")
+    run_due_parser.add_argument("--limit", type=int, default=50)
+    run_due_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    worker_parser = schedule_subparsers.add_parser(
+        "worker",
+        help="Run a foreground scheduled ingestion worker.",
+    )
+    worker_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_SCHEDULE_POLL_SECONDS)
+    worker_parser.add_argument("--max-runs", type=int, default=None)
+    worker_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    disable_parser = schedule_subparsers.add_parser("disable", help="Disable one schedule.")
+    disable_parser.add_argument("--id", required=True, dest="job_id")
+    disable_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    enable_parser = schedule_subparsers.add_parser("enable", help="Enable one schedule.")
+    enable_parser.add_argument("--id", required=True, dest="job_id")
+    enable_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+
 def run_ingest_cli(args: argparse.Namespace) -> int:
     """Dispatch ingestion CLI subcommands."""
     if args.ingest_command == "agent-dry-run":
@@ -342,6 +438,8 @@ def run_ingest_cli(args: argparse.Namespace) -> int:
         return run_review_queue_cli(args)
     if args.ingest_command == "retrieval":
         return run_retrieval_cli(args)
+    if args.ingest_command == "schedule":
+        return run_schedule_cli(args)
     raise ValueError("ingest command requires a subcommand")
 
 
@@ -402,6 +500,25 @@ def run_retrieval_cli(
         return 2
 
     print(_render_retrieval_result(result, getattr(args, "format", "json")), file=stdout)
+    return 2 if result.get("status") == "error" else 0
+
+
+def run_schedule_cli(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    """Run scheduled ingestion CLI commands."""
+    try:
+        result = anyio.run(_run_schedule_command, args)
+    except KeyboardInterrupt:
+        return 130
+    except (OSError, ValueError, ValidationError, OpenAIAgentsDryRunError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    print(_render_schedule_result(result, getattr(args, "format", "json")), file=stdout)
     return 2 if result.get("status") == "error" else 0
 
 
@@ -694,6 +811,483 @@ async def _run_retrieval_command(args: argparse.Namespace) -> dict[str, Any]:
     raise ValueError("ingest retrieval command requires a subcommand")
 
 
+async def _run_schedule_command(args: argparse.Namespace) -> dict[str, Any]:
+    store = create_relation_store(load_config())
+    command = args.schedule_command
+    if command == "add":
+        job = _scheduled_job_from_args(args)
+        stored, updated = store.upsert_scheduled_ingestion_job(job)
+        _record_schedule_audit(
+            store,
+            tool_name="auto_ingest.schedule.add",
+            arguments={"job_id": stored.id, "updated": bool(updated)},
+            result_status="ok",
+            metadata=_schedule_job_audit_metadata(stored),
+        )
+        return {
+            "status": "ok",
+            "updated": bool(updated),
+            "job": _scheduled_job_dump(stored),
+        }
+    if command == "list":
+        job_filter = ScheduledIngestionJobFilter(
+            status=ScheduledIngestionJobStatus(args.status) if args.status else None
+        )
+        jobs = store.list_scheduled_ingestion_jobs(job_filter, limit=args.limit)
+        return {
+            "status": "ok",
+            "jobs": [_scheduled_job_dump(job) for job in jobs],
+        }
+    if command == "runs":
+        run_filter = ScheduledIngestionRunFilter(
+            job_id=args.job_id,
+            status=ScheduledIngestionRunStatus(args.status) if args.status else None,
+        )
+        runs = store.list_scheduled_ingestion_runs(run_filter, limit=args.limit)
+        return {
+            "status": "ok",
+            "runs": [_scheduled_run_dump(run) for run in runs],
+        }
+    if command == "run":
+        selected_job = store.get_scheduled_ingestion_job(args.job_id)
+        if selected_job is None:
+            raise ValueError(f"scheduled ingestion job not found: {args.job_id}")
+        run = await _run_scheduled_ingestion_job(
+            selected_job,
+            store,
+            trigger=ScheduledIngestionRunTrigger.MANUAL,
+        )
+        return _scheduled_run_command_result([run])
+    if command == "run-due":
+        runs = await _run_due_scheduled_jobs(
+            store,
+            trigger=ScheduledIngestionRunTrigger.DUE,
+            limit=args.limit,
+        )
+        return _scheduled_run_command_result(runs)
+    if command == "worker":
+        return await _run_schedule_worker(args, store)
+    if command == "disable":
+        job = _set_scheduled_job_enabled(store, args.job_id, enabled=False)
+        _record_schedule_audit(
+            store,
+            tool_name="auto_ingest.schedule.disable",
+            arguments={"job_id": job.id},
+            result_status="ok",
+            metadata=_schedule_job_audit_metadata(job),
+        )
+        return {"status": "ok", "job": _scheduled_job_dump(job)}
+    if command == "enable":
+        job = _set_scheduled_job_enabled(store, args.job_id, enabled=True)
+        _record_schedule_audit(
+            store,
+            tool_name="auto_ingest.schedule.enable",
+            arguments={"job_id": job.id},
+            result_status="ok",
+            metadata=_schedule_job_audit_metadata(job),
+        )
+        return {"status": "ok", "job": _scheduled_job_dump(job)}
+    raise ValueError("ingest schedule command requires a subcommand")
+
+
+async def _run_schedule_worker(args: argparse.Namespace, store: Any) -> dict[str, Any]:
+    poll_seconds = float(args.poll_seconds)
+    if poll_seconds <= 0 or poll_seconds > MAX_SCHEDULE_POLL_SECONDS:
+        raise ValueError(f"--poll-seconds must be between 0 and {MAX_SCHEDULE_POLL_SECONDS}")
+    max_runs = args.max_runs
+    if max_runs is not None and max_runs < 0:
+        raise ValueError("--max-runs must be non-negative")
+
+    runs: list[ScheduledIngestionRun] = []
+    iterations = 0
+    while max_runs is None or len(runs) < max_runs:
+        remaining = None if max_runs is None else max_runs - len(runs)
+        due_runs = await _run_due_scheduled_jobs(
+            store,
+            trigger=ScheduledIngestionRunTrigger.WORKER,
+            limit=remaining or 50,
+        )
+        runs.extend(due_runs)
+        iterations += 1
+        if max_runs is not None and len(runs) >= max_runs:
+            break
+        await anyio.sleep(poll_seconds)
+
+    result = _scheduled_run_command_result(runs)
+    result["iterations"] = iterations
+    return result
+
+
+async def _run_due_scheduled_jobs(
+    store: Any,
+    *,
+    trigger: ScheduledIngestionRunTrigger,
+    limit: int,
+) -> list[ScheduledIngestionRun]:
+    if limit < 0:
+        raise ValueError("--limit must be non-negative")
+    now = datetime.now(UTC)
+    jobs = store.list_scheduled_ingestion_jobs(
+        ScheduledIngestionJobFilter(
+            status=ScheduledIngestionJobStatus.ACTIVE,
+            due_before=now.isoformat(),
+        ),
+        limit=limit,
+    )
+    runs: list[ScheduledIngestionRun] = []
+    for job in jobs:
+        if job_due(job, now=now):
+            runs.append(await _run_scheduled_ingestion_job(job, store, trigger=trigger))
+    return runs
+
+
+async def _run_scheduled_ingestion_job(
+    job: ScheduledIngestionJob,
+    store: Any,
+    *,
+    trigger: ScheduledIngestionRunTrigger,
+) -> ScheduledIngestionRun:
+    previous_status = job.status
+    run = ScheduledIngestionRun(
+        job_id=job.id,
+        trigger=trigger,
+        attempt=job.state.retry_count + 1,
+    )
+    if previous_status == ScheduledIngestionJobStatus.RUNNING:
+        diagnostics = [
+            Diagnostic(
+                level="warning",
+                code="SCHEDULED_JOB_ALREADY_RUNNING",
+                message="scheduled ingestion job is already running",
+                related_ids=[job.id],
+            )
+        ]
+        finished = run.model_copy(
+            update={
+                "status": ScheduledIngestionRunStatus.SKIPPED,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "diagnostics": diagnostics,
+                "metadata": _scheduled_run_metadata(job, None, diagnostics),
+            }
+        )
+        store.append_scheduled_ingestion_run(finished)
+        return finished
+
+    safety_diagnostics = scheduled_write_diagnostics(job)
+    if safety_diagnostics:
+        finished = run.model_copy(
+            update={
+                "status": ScheduledIngestionRunStatus.SKIPPED,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "diagnostics": safety_diagnostics,
+                "metadata": _scheduled_run_metadata(job, None, safety_diagnostics),
+            }
+        )
+        store.append_scheduled_ingestion_run(finished)
+        state = next_state_for_skip(job, finished)
+        store.update_scheduled_ingestion_job_state(
+            job.id,
+            state=state,
+            status=ScheduledIngestionJobStatus.FAILED,
+        )
+        _record_schedule_audit(
+            store,
+            tool_name="auto_ingest.schedule.run",
+            arguments={"job_id": job.id, "run_id": finished.id, "trigger": trigger.value},
+            result_status="skipped",
+            metadata=_scheduled_run_audit_metadata(job, finished),
+        )
+        return finished
+
+    running_state = job.state.model_copy(update={"current_run_id": run.id})
+    store.append_scheduled_ingestion_run(run)
+    store.update_scheduled_ingestion_job_state(
+        job.id,
+        state=running_state,
+        status=ScheduledIngestionJobStatus.RUNNING,
+    )
+
+    try:
+        report = await _run_agent_dry_run(_scheduled_job_args(job))
+        diagnostics = report.diagnostics
+        report_payload = report.model_dump(mode="json", exclude_none=True)
+        report_path = write_scheduled_report(job, run, report_payload)
+        final_status = (
+            ScheduledIngestionRunStatus.FAILED
+            if any(diagnostic.level == "error" for diagnostic in diagnostics)
+            else ScheduledIngestionRunStatus.SUCCEEDED
+        )
+        finished = run.model_copy(
+            update={
+                "status": final_status,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "report_run_id": report.run_id,
+                "report_path": report_path,
+                "diagnostics": diagnostics,
+                "metadata": _scheduled_run_metadata(job, report_payload, diagnostics),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - failures are persisted as run diagnostics.
+        diagnostics = [
+            Diagnostic(
+                level="error",
+                code="SCHEDULED_INGESTION_RUN_FAILED",
+                message=f"scheduled ingestion run failed: {exc.__class__.__name__}",
+                related_ids=[job.id],
+            )
+        ]
+        finished = run.model_copy(
+            update={
+                "status": ScheduledIngestionRunStatus.FAILED,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "diagnostics": diagnostics,
+                "metadata": _scheduled_run_metadata(job, None, diagnostics),
+            }
+        )
+
+    store.append_scheduled_ingestion_run(finished)
+    if finished.status == ScheduledIngestionRunStatus.SUCCEEDED:
+        next_state = next_state_for_success(job, finished)
+        next_status = (
+            ScheduledIngestionJobStatus.DISABLED
+            if previous_status == ScheduledIngestionJobStatus.DISABLED
+            else ScheduledIngestionJobStatus.ACTIVE
+        )
+    else:
+        next_status, next_state = next_state_for_failure(job, finished)
+        if previous_status == ScheduledIngestionJobStatus.DISABLED:
+            next_status = ScheduledIngestionJobStatus.DISABLED
+    store.update_scheduled_ingestion_job_state(job.id, state=next_state, status=next_status)
+    _record_schedule_audit(
+        store,
+        tool_name="auto_ingest.schedule.run",
+        arguments={"job_id": job.id, "run_id": finished.id, "trigger": trigger.value},
+        result_status=finished.status.value,
+        metadata=_scheduled_run_audit_metadata(job, finished),
+    )
+    return finished
+
+
+def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
+    source_config = ScheduledIngestionSourceConfig(
+        input_path=args.input,
+        urls=getattr(args, "url", []) or [],
+        retrieval_input_path=getattr(args, "retrieval_input", None),
+        task=args.task,
+        question=args.question,
+        timeout_seconds=args.timeout_seconds,
+        max_url_bytes=args.max_url_bytes,
+        search_queries=getattr(args, "search_queries", []) or [],
+        search_provider=args.search_provider,
+        search_limit=args.search_limit,
+        search_timeout_seconds=args.search_timeout_seconds,
+        search_include_domains=getattr(args, "search_include_domains", []) or [],
+        search_exclude_domains=getattr(args, "search_exclude_domains", []) or [],
+        search_api_key_env=args.search_api_key_env,
+        crawl=bool(getattr(args, "crawl", False)),
+        crawl_max_depth=args.crawl_max_depth,
+        crawl_max_pages=args.crawl_max_pages,
+        crawl_max_page_bytes=args.crawl_max_page_bytes,
+        crawl_max_total_bytes=args.crawl_max_total_bytes,
+        crawl_timeout_seconds=args.crawl_timeout_seconds,
+        crawl_allow_domains=getattr(args, "crawl_allow_domains", []) or [],
+    )
+    provider_config = ScheduledIngestionProviderConfig(
+        model=args.model,
+        provider=args.provider,
+        base_url=args.base_url,
+        api_key_env=args.api_key_env,
+        provider_headers=getattr(args, "provider_header", []) or [],
+        disable_tracing=bool(args.disable_tracing),
+        reviewer_models=getattr(args, "reviewer_models", []) or [],
+        voting_policy=ReviewVotingPolicy(args.voting_policy),
+        high_priority_reviewer_models=getattr(args, "high_priority_reviewer_models", []) or [],
+    )
+    write_config = ScheduledIngestionWriteConfig(
+        auto_write=bool(args.auto_write),
+        allow_scheduled_writes=bool(args.allow_scheduled_writes),
+        allow_single_reviewer_write=bool(args.allow_single_reviewer_write),
+        min_write_confidence=args.min_write_confidence,
+        report_dir=args.report_dir,
+    )
+    retry_policy = ScheduledIngestionRetryPolicy(
+        max_retries=args.max_retries,
+        retry_backoff_seconds=args.retry_backoff_seconds,
+    )
+    job = ScheduledIngestionJob(
+        name=args.name,
+        cron=args.cron,
+        timezone=args.timezone,
+        source_config=source_config,
+        provider_config=provider_config,
+        write_config=write_config,
+        retry_policy=retry_policy,
+        state=ScheduledIngestionState(
+            next_run_at=next_cron_run(args.cron, args.timezone, after=datetime.now(UTC))
+        ),
+    )
+    diagnostics = scheduled_write_diagnostics(job)
+    if diagnostics:
+        raise ValueError(diagnostics[0].message)
+    return job
+
+
+def _scheduled_job_args(job: ScheduledIngestionJob) -> argparse.Namespace:
+    source = job.source_config
+    provider = job.provider_config
+    write = job.write_config
+    return argparse.Namespace(
+        input=source.input_path,
+        retrieval_input=source.retrieval_input_path,
+        url=list(source.urls),
+        task=source.task,
+        question=source.question,
+        model=provider.model,
+        reviewer_models=list(provider.reviewer_models),
+        voting_policy=provider.voting_policy.value,
+        high_priority_reviewer_models=list(provider.high_priority_reviewer_models),
+        provider=provider.provider,
+        list_providers=False,
+        base_url=provider.base_url,
+        api_key_env=provider.api_key_env,
+        provider_header=list(provider.provider_headers),
+        disable_tracing=provider.disable_tracing,
+        auto_write=write.auto_write,
+        min_write_confidence=write.min_write_confidence,
+        format="json",
+        output=None,
+        timeout_seconds=source.timeout_seconds,
+        max_url_bytes=source.max_url_bytes,
+        search_queries=list(source.search_queries),
+        search_provider=source.search_provider,
+        search_limit=source.search_limit,
+        search_timeout_seconds=source.search_timeout_seconds,
+        search_include_domains=list(source.search_include_domains),
+        search_exclude_domains=list(source.search_exclude_domains),
+        search_api_key_env=source.search_api_key_env,
+        crawl=source.crawl,
+        crawl_max_depth=source.crawl_max_depth,
+        crawl_max_pages=source.crawl_max_pages,
+        crawl_max_page_bytes=source.crawl_max_page_bytes,
+        crawl_max_total_bytes=source.crawl_max_total_bytes,
+        crawl_timeout_seconds=source.crawl_timeout_seconds,
+        crawl_allow_domains=list(source.crawl_allow_domains),
+    )
+
+
+def _set_scheduled_job_enabled(
+    store: Any,
+    job_id: str,
+    *,
+    enabled: bool,
+) -> ScheduledIngestionJob:
+    job = store.get_scheduled_ingestion_job(job_id)
+    if job is None:
+        raise ValueError(f"scheduled ingestion job not found: {job_id}")
+    status = ScheduledIngestionJobStatus.ACTIVE if enabled else ScheduledIngestionJobStatus.DISABLED
+    state = job.state
+    if enabled:
+        state = state.model_copy(
+            update={"next_run_at": next_cron_run(job.cron, job.timezone, after=datetime.now(UTC))}
+        )
+    updated = store.update_scheduled_ingestion_job_state(job.id, state=state, status=status)
+    if updated is None:
+        raise ValueError(f"scheduled ingestion job not found: {job_id}")
+    return updated
+
+
+def _scheduled_run_command_result(runs: list[ScheduledIngestionRun]) -> dict[str, Any]:
+    has_problem = any(
+        run.status in {ScheduledIngestionRunStatus.FAILED, ScheduledIngestionRunStatus.SKIPPED}
+        for run in runs
+    )
+    return {
+        "status": "warning" if has_problem else "ok",
+        "run_count": len(runs),
+        "runs": [_scheduled_run_dump(run) for run in runs],
+    }
+
+
+def _scheduled_run_metadata(
+    job: ScheduledIngestionJob,
+    report_payload: dict[str, Any] | None,
+    diagnostics: list[Diagnostic],
+) -> dict[str, Any]:
+    metadata = {
+        "job_id": job.id,
+        "job_name": job.name,
+        "auto_write": job.write_config.auto_write,
+        "reviewer_count": len(job.provider_config.reviewer_models),
+        "voting_policy": job.provider_config.voting_policy.value,
+        "allow_single_reviewer_write": job.write_config.allow_single_reviewer_write,
+        "diagnostic_count": len(diagnostics),
+    }
+    if report_payload is not None:
+        metadata.update(
+            {
+                "written_count": len(report_payload.get("written_relation_ids", [])),
+                "queued_count": sum(
+                    1
+                    for item in report_payload.get("gate_results", [])
+                    if isinstance(item, dict) and item.get("action") == "queue"
+                ),
+            }
+        )
+    return metadata
+
+
+def _scheduled_run_audit_metadata(
+    job: ScheduledIngestionJob,
+    run: ScheduledIngestionRun,
+) -> dict[str, Any]:
+    metadata = dict(run.metadata)
+    metadata.update(
+        {
+            "job_id": job.id,
+            "run_id": run.id,
+            "status": run.status.value,
+            "report_path": run.report_path,
+        }
+    )
+    return metadata
+
+
+def _schedule_job_audit_metadata(job: ScheduledIngestionJob) -> dict[str, Any]:
+    return {
+        "job_id": job.id,
+        "status": job.status.value,
+        "next_run_at": job.state.next_run_at,
+        "reviewer_count": len(job.provider_config.reviewer_models),
+        "voting_policy": job.provider_config.voting_policy.value,
+        "allow_single_reviewer_write": job.write_config.allow_single_reviewer_write,
+    }
+
+
+def _record_schedule_audit(
+    store: Any,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result_status: str,
+    metadata: dict[str, Any],
+) -> None:
+    store.record_audit(
+        event_type="scheduled_ingestion",
+        tool_name=tool_name,
+        arguments=arguments,
+        result_status=result_status,
+        metadata=metadata,
+    )
+
+
+def _scheduled_job_dump(job: ScheduledIngestionJob) -> dict[str, Any]:
+    return job.model_dump(mode="json", exclude_none=True)
+
+
+def _scheduled_run_dump(run: ScheduledIngestionRun) -> dict[str, Any]:
+    return run.model_dump(mode="json", exclude_none=True)
+
+
 def _load_external_retrieval(path: str) -> ExternalRetrievalConversion:
     input_path = Path(path)
     size = input_path.stat().st_size
@@ -965,3 +1559,33 @@ def _render_retrieval_result(result: dict[str, Any], output_format: str) -> str:
         f"queued: {result.get('queued_count', 0)}\n"
         f"rejected: {result.get('rejected_count', 0)}"
     )
+
+
+def _render_schedule_result(result: dict[str, Any], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(result, ensure_ascii=False)
+    if "job" in result and isinstance(result["job"], dict):
+        job = result["job"]
+        state = job.get("state", {})
+        return (
+            f"status: {result.get('status')}\n"
+            f"job: {job.get('id')}\n"
+            f"job_status: {job.get('status')}\n"
+            f"next_run_at: {state.get('next_run_at')}"
+        )
+    if "jobs" in result:
+        rows = [
+            f"{job.get('id')}\t{job.get('status')}\t"
+            f"{job.get('state', {}).get('next_run_at')}\t{job.get('name')}"
+            for job in result.get("jobs", [])
+            if isinstance(job, dict)
+        ]
+        return "\n".join(rows) if rows else "no scheduled ingestion jobs"
+    if "runs" in result:
+        rows = [
+            f"{run.get('id')}\t{run.get('job_id')}\t{run.get('status')}\t{run.get('started_at')}"
+            for run in result.get("runs", [])
+            if isinstance(run, dict)
+        ]
+        return "\n".join(rows) if rows else "no scheduled ingestion runs"
+    return f"status: {result.get('status')}"

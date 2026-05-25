@@ -106,6 +106,7 @@ def test_ingest_help_lists_agent_dry_run_subcommand() -> None:
     assert "agent-dry-run" in completed.stdout
     assert "queue" in completed.stdout
     assert "retrieval" in completed.stdout
+    assert "schedule" in completed.stdout
     assert completed.stderr == ""
 
 
@@ -168,6 +169,128 @@ def test_ingest_retrieval_validate_help_lists_options() -> None:
     assert "--voting-policy" in completed.stdout
     assert "--high-priority-reviewer-model" in completed.stdout
     assert completed.stderr == ""
+
+
+def test_ingest_schedule_help_lists_subcommands() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "nesy_reasoning_mcp", "ingest", "schedule", "--help"],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    assert "add" in completed.stdout
+    assert "run-due" in completed.stdout
+    assert "worker" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_schedule_add_help_lists_safe_write_flags() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "schedule",
+            "add",
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    assert "--allow-scheduled-writes" in completed.stdout
+    assert "--allow-single-reviewer-write" in completed.stdout
+    assert "--reviewer-model" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_schedule_add_and_list_persisted_job(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+
+    add_completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "schedule",
+            "add",
+            "--name",
+            "docs",
+            "--cron",
+            "*/30 * * * *",
+            "--url",
+            "https://example.com/source",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+    add_payload = json.loads(add_completed.stdout)
+
+    list_completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "schedule",
+            "list",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+    list_payload = json.loads(list_completed.stdout)
+
+    assert sqlite_path.exists()
+    assert add_payload["status"] == "ok"
+    assert list_payload["jobs"][0]["name"] == "docs"
+    assert list_payload["jobs"][0]["source_config"]["urls"] == ["https://example.com/source"]
+    assert add_completed.stderr == ""
+    assert list_completed.stderr == ""
+
+
+def test_ingest_schedule_rejects_single_reviewer_write_without_override(tmp_path: Path) -> None:
+    config_path, _sqlite_path = _write_sqlite_config(tmp_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "schedule",
+            "add",
+            "--name",
+            "unsafe",
+            "--cron",
+            "*/30 * * * *",
+            "--url",
+            "https://example.com/source",
+            "--auto-write",
+            "--allow-scheduled-writes",
+            "--reviewer-model",
+            "reviewer-a",
+        ],
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "at least two reviewer models" in completed.stderr
 
 
 def test_ingest_retrieval_validate_end_to_end(tmp_path: Path) -> None:
