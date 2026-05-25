@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     GateAction,
     IngestionReport,
+    ReviewDecision,
     ReviewQueueRecord,
 )
 from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord
@@ -20,7 +23,7 @@ def queued_records_from_report(
 ) -> list[ReviewQueueRecord]:
     """Build pending review queue records for queued gate results in a report."""
     candidates_by_id = {candidate.id: candidate for candidate in report.candidates}
-    reviews_by_id = {review.candidate_id: review for review in report.reviews}
+    reviews_by_id = _queue_reviews_by_candidate(report)
     records: list[ReviewQueueRecord] = []
     for gate_result in report.gate_results:
         if gate_result.action != GateAction.QUEUE:
@@ -53,3 +56,22 @@ def _diagnostics_for_candidate(
     candidate_id: str,
 ) -> list[Diagnostic]:
     return [diagnostic for diagnostic in diagnostics if candidate_id in diagnostic.related_ids]
+
+
+def _queue_reviews_by_candidate(report: IngestionReport) -> dict[str, ReviewDecision]:
+    aggregation = report.metadata.get("review_aggregation", {})
+    aggregate_reviews = (
+        aggregation.get("aggregate_reviews") if isinstance(aggregation, dict) else []
+    )
+    if isinstance(aggregate_reviews, list):
+        reviews: list[ReviewDecision] = []
+        for review in aggregate_reviews:
+            if not isinstance(review, dict):
+                continue
+            try:
+                reviews.append(ReviewDecision.model_validate(review))
+            except ValidationError:
+                continue
+        if reviews:
+            return {review.candidate_id: review for review in reviews}
+    return {review.candidate_id: review for review in report.reviews}

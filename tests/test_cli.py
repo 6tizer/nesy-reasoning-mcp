@@ -125,6 +125,9 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     assert "--api-key-env" in completed.stdout
     assert "--provider-header" in completed.stdout
     assert "--disable-tracing" in completed.stdout
+    assert "--reviewer-model" in completed.stdout
+    assert "--voting-policy" in completed.stdout
+    assert "--high-priority-reviewer-model" in completed.stdout
     assert completed.stderr == ""
 
 

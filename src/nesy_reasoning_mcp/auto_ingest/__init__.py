@@ -28,6 +28,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
+    ReviewVotingPolicy,
     ValidateCandidateRelationsInput,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "ReviewQueueFilter",
     "ReviewQueueRecord",
     "ReviewQueueStatus",
+    "ReviewVotingPolicy",
     "ResolveReviewQueueInput",
     "ValidateCandidateRelationsInput",
     "WRITE_MODE_TOOL_ALLOWLIST",

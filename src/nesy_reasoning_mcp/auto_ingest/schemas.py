@@ -31,6 +31,14 @@ class ReviewDecisionValue(StrEnum):
     NEEDS_HUMAN = "needs_human"
 
 
+class ReviewVotingPolicy(StrEnum):
+    """Policies for aggregating multiple reviewer decisions."""
+
+    RISK_TIERED = "risk_tiered"
+    UNANIMOUS = "unanimous"
+    MAJORITY = "majority"
+
+
 class GateAction(StrEnum):
     """Deterministic gate actions for a reviewed candidate."""
 
@@ -485,3 +493,14 @@ class ValidateCandidateRelationsInput(BaseModel):
     max_depth: int = Field(default=8, ge=1, le=20)
     min_confidence: float = Field(default=0.0, ge=0, le=1)
     include_soft: bool = False
+    voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED
+    high_priority_reviewer_models: list[str] = Field(default_factory=list)
+
+    @field_validator("high_priority_reviewer_models")
+    @classmethod
+    def strip_high_priority_reviewer_models(cls, value: list[str]) -> list[str]:
+        """Strip model names, reject empties, and de-duplicate in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("high_priority_reviewer_models must not contain empty values")
+        return list(dict.fromkeys(stripped))

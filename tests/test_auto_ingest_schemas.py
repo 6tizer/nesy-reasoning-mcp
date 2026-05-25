@@ -16,6 +16,8 @@ from nesy_reasoning_mcp.auto_ingest import (
     ReviewDecisionValue,
     ReviewQueueRecord,
     ReviewQueueStatus,
+    ReviewVotingPolicy,
+    ValidateCandidateRelationsInput,
 )
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
 from nesy_reasoning_mcp.schemas import Diagnostic
@@ -276,3 +278,21 @@ def test_ingestion_input_and_agent_batches_are_strict() -> None:
 
     with pytest.raises(ValidationError):
         IngestionInput.model_validate({"evidence": [], "unknown": True})
+
+
+def test_validate_candidate_relations_input_accepts_voting_policy() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+    payload = ValidateCandidateRelationsInput(
+        candidates=[candidate],
+        voting_policy="majority",
+        high_priority_reviewer_models=[" gpt-4.1 ", "gpt-4.1"],
+    )
+
+    assert payload.voting_policy == ReviewVotingPolicy.MAJORITY
+    assert payload.high_priority_reviewer_models == ["gpt-4.1"]

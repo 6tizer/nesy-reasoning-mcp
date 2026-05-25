@@ -185,6 +185,62 @@ async def test_openai_agents_dry_run_maps_runner_outputs_to_report(
     assert report.gate_results[0].reasons == ["dry-run approved; no persistent write performed"]
 
 
+async def test_openai_agents_dry_run_runs_multiple_reviewers_and_reports_voting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    captured_reviewers: list[str] = []
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            name=kwargs["name"],
+            model=kwargs["model"],
+            output_type=kwargs["output_type"],
+        )
+
+    async def fake_run_agent(agent: Any, prompt: str) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        captured_reviewers.append(agent.model)
+        decision = (
+            ReviewDecisionValue.NEEDS_HUMAN
+            if agent.model == "reviewer-c"
+            else ReviewDecisionValue.APPROVE
+        )
+        review = ReviewDecision(
+            candidate_id=candidate.id,
+            decision=decision,
+            final_relation_type="sufficient" if decision == ReviewDecisionValue.APPROVE else None,
+            final_confidence=0.88 if decision == ReviewDecisionValue.APPROVE else None,
+            reasons=[f"{agent.model} reviewed"],
+            reviewer_model="model-reported-by-agent",
+        )
+        return {"reviews": [review.model_dump(mode="json", exclude_none=True)]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="extractor-model",
+        reviewer_models=["reviewer-a", "reviewer-b", "reviewer-c"],
+        voting_policy=openai_agents.ReviewVotingPolicy.MAJORITY,
+        env={"OPENAI_API_KEY": "test"},
+        run_agent=fake_run_agent,
+    )
+
+    assert captured_reviewers == ["reviewer-a", "reviewer-b", "reviewer-c"]
+    assert [review.reviewer_model for review in report.reviews] == [
+        "reviewer-a",
+        "reviewer-b",
+        "reviewer-c",
+    ]
+    assert report.metadata["review_aggregation"]["policy"] == "majority"
+    assert report.metadata["review_aggregation"]["candidates"][0]["review_count"] == 3
+    assert report.gate_results[0].action == "auto_write"
+    assert report.approved_relations[0].confidence == 0.88
+
+
 async def test_openai_compatible_provider_uses_env_key_headers_and_disables_tracing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -420,6 +476,7 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence[0].url == "https://example.com/source"
         assert store.list_relations() == []
@@ -456,6 +513,62 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
     assert stderr.getvalue() == ""
 
 
+def test_cli_agent_dry_run_passes_voting_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == "extractor-model"
+        assert kwargs["reviewer_models"] == ["reviewer-a", "reviewer-b"]
+        assert kwargs["voting_policy"] == openai_agents.ReviewVotingPolicy.MAJORITY
+        assert kwargs["high_priority_reviewer_models"] == ["reviewer-a"]
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert provider_config is None
+        assert disable_tracing is False
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="extractor-model",
+        reviewer_models=["reviewer-a", "reviewer-b"],
+        voting_policy="majority",
+        high_priority_reviewer_models=["reviewer-a"],
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
 def test_cli_disable_tracing_default_openai_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -475,6 +588,7 @@ def test_cli_disable_tracing_default_openai_path(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
@@ -529,6 +643,7 @@ def test_script_wrapper_accepts_auto_write_arguments(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
@@ -577,6 +692,7 @@ def test_cli_passes_openai_compatible_provider_config(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
@@ -666,6 +782,7 @@ def test_cli_provider_shortcuts_fill_config_and_default_model(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
@@ -725,6 +842,7 @@ def test_cli_provider_explicit_flags_override_registry(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
@@ -785,6 +903,7 @@ def test_cli_openrouter_provider_accepts_headers_with_model(
         min_write_confidence: float = 0.85,
         provider_config: OpenAICompatibleProviderConfig | None = None,
         disable_tracing: bool = False,
+        **kwargs: Any,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
