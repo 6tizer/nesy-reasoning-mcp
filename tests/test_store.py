@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
@@ -10,12 +12,86 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     RelationType,
 )
+from nesy_reasoning_mcp.storage.common import _apply_assert_relations_mode
 from nesy_reasoning_mcp.store import (
     JsonRelationStore,
     RelationStore,
     SqliteRelationStore,
     create_relation_store,
 )
+
+
+def test_apply_assert_relations_mode_preserves_append_order() -> None:
+    current = [
+        RelationRecord(id="rel_a", source="A", target="B", relation_type=RelationType.SUFFICIENT)
+    ]
+    incoming = [
+        RelationRecord(id="rel_b", source="C", target="D", relation_type=RelationType.NECESSARY)
+    ]
+
+    merged, updated = _apply_assert_relations_mode(current, incoming, "append")
+
+    assert [record.id for record in merged] == ["rel_a", "rel_b"]
+    assert updated == 0
+
+
+def test_apply_assert_relations_mode_upserts_by_id() -> None:
+    current = [
+        RelationRecord(id="rel_a", source="A", target="B", relation_type=RelationType.SUFFICIENT)
+    ]
+    incoming = [
+        RelationRecord(id="rel_a", source="A", target="C", relation_type=RelationType.NECESSARY),
+        RelationRecord(id="rel_b", source="D", target="E", relation_type=RelationType.SUFFICIENT),
+    ]
+
+    merged, updated = _apply_assert_relations_mode(current, incoming, "upsert")
+
+    assert [(record.id, record.target) for record in merged] == [("rel_a", "C"), ("rel_b", "E")]
+    assert updated == 1
+
+
+def test_apply_assert_relations_mode_replaces_same_canonical_pair() -> None:
+    current = [
+        RelationRecord(
+            id="rel_a",
+            source="Label A",
+            source_id="node_a",
+            target="Label B",
+            target_id="node_b",
+            relation_type=RelationType.SUFFICIENT,
+            context_id="ctx",
+        ),
+        RelationRecord(
+            id="rel_keep",
+            source="Label A",
+            source_id="node_a",
+            target="Label B",
+            target_id="node_b",
+            relation_type=RelationType.SUFFICIENT,
+            context_id="other",
+        ),
+    ]
+    incoming = [
+        RelationRecord(
+            id="rel_new",
+            source="Renamed A",
+            source_id="node_a",
+            target="Renamed B",
+            target_id="node_b",
+            relation_type=RelationType.NECESSARY,
+            context_id="ctx",
+        )
+    ]
+
+    merged, updated = _apply_assert_relations_mode(current, incoming, "replace_same_pair")
+
+    assert [record.id for record in merged] == ["rel_keep", "rel_new"]
+    assert updated == 1
+
+
+def test_apply_assert_relations_mode_rejects_unsupported_mode() -> None:
+    with pytest.raises(ValueError, match="unsupported assert mode"):
+        _apply_assert_relations_mode([], [], "invalid")
 
 
 def test_defaults_and_sufficient_edge() -> None:
@@ -311,6 +387,36 @@ def test_replace_same_pair_uses_canonical_ids() -> None:
     assert listed[0].relation_type == RelationType.NECESSARY
 
 
+def test_replace_same_pair_dry_run_does_not_change_memory_store() -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    _records, updated = store.assert_relations(
+        [
+            RelationInput(
+                source="A",
+                target="B",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="replace_same_pair",
+        dry_run=True,
+    )
+
+    listed = store.list_relations()
+    assert updated == 1
+    assert len(listed) == 1
+    assert listed[0].relation_type == RelationType.SUFFICIENT
+
+
 def test_sqlite_store_persists_relations_and_exclusive_groups(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
@@ -378,6 +484,86 @@ def test_sqlite_upsert_persists_updated_relation(tmp_path) -> None:
     assert len(reloaded.list_relations()) == 1
     assert reloaded.list_relations()[0].target == "C"
     assert reloaded.list_relations()[0].relation_type == RelationType.NECESSARY
+
+
+def test_sqlite_replace_same_pair_persists_updated_relation(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_old",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            ),
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+                context_id="other",
+            ),
+        ]
+    )
+
+    records, updated = store.assert_relations(
+        [
+            RelationInput(
+                id="rel_new",
+                source="A",
+                target="B",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="replace_same_pair",
+    )
+    reloaded = SqliteRelationStore(config)
+
+    assert [record.id for record in records] == ["rel_new"]
+    assert updated == 1
+    assert {(record.id, record.relation_type) for record in reloaded.list_relations()} == {
+        ("rel_keep", RelationType.SUFFICIENT),
+        ("rel_new", RelationType.NECESSARY),
+    }
+
+
+def test_sqlite_replace_same_pair_dry_run_does_not_change_store(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_old",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            )
+        ]
+    )
+
+    _records, updated = store.assert_relations(
+        [
+            RelationInput(
+                id="rel_new",
+                source="A",
+                target="B",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        mode="replace_same_pair",
+        dry_run=True,
+    )
+    reloaded = SqliteRelationStore(config)
+
+    assert updated == 1
+    assert [(record.id, record.relation_type) for record in reloaded.list_relations()] == [
+        ("rel_old", RelationType.SUFFICIENT)
+    ]
 
 
 def test_sqlite_list_relations_supports_offset(tmp_path) -> None:

@@ -252,6 +252,43 @@ def _upsert_relations(
     return relations, updated
 
 
+def _relation_assert_key(record: RelationRecord) -> tuple[str, str, str, str]:
+    return (
+        record.canonical_source,
+        record.canonical_target,
+        record.context_id,
+        record.store_id,
+    )
+
+
+def _replace_same_pair_relations(
+    current_relations: Iterable[RelationRecord],
+    incoming_relations: Iterable[RelationRecord],
+) -> tuple[list[RelationRecord], int]:
+    current = list(current_relations)
+    incoming = list(incoming_relations)
+    replace_keys = {_relation_assert_key(relation) for relation in incoming}
+    updated = sum(1 for relation in current if _relation_assert_key(relation) in replace_keys)
+    merged = [
+        relation for relation in current if _relation_assert_key(relation) not in replace_keys
+    ] + incoming
+    return merged, updated
+
+
+def _apply_assert_relations_mode(
+    current_relations: Iterable[RelationRecord],
+    incoming_relations: Iterable[RelationRecord],
+    mode: str,
+) -> tuple[list[RelationRecord], int]:
+    if mode == "append":
+        return [*current_relations, *incoming_relations], 0
+    if mode == "upsert":
+        return _upsert_relations(current_relations, incoming_relations)
+    if mode == "replace_same_pair":
+        return _replace_same_pair_relations(current_relations, incoming_relations)
+    raise ValueError(f"unsupported assert mode: {mode}")
+
+
 def _merge_groups(
     current_groups: Iterable[ExclusiveGroupRecord],
     incoming_groups: Iterable[ExclusiveGroupRecord],
