@@ -201,7 +201,7 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--provider-thinking",
         choices=["enabled", "disabled"],
         default=None,
-        help="Override JSON Object provider thinking mode, for example DeepSeek.",
+        help="Override JSON Object provider thinking mode, for example DeepSeek or Kimi.",
     )
     parser.add_argument(
         "--provider-reasoning-effort",

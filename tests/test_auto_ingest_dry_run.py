@@ -359,6 +359,61 @@ async def test_deepseek_json_object_provider_uses_chat_completions_json_mode(
     }
 
 
+async def test_kimi_json_object_provider_uses_chat_completions_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    captured: list[dict[str, Any]] = []
+
+    def fail_build_agent(**kwargs: Any) -> None:
+        raise AssertionError("Kimi JSON Object mode must bypass AgentOutputSchema")
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        captured.append(kwargs)
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+        assert kwargs["provider_config"].api_key_env == "MOONSHOT_API_KEY"
+        assert "secret" not in json.dumps(kwargs, default=str)
+        assert "JSON object" in kwargs["messages"][0]["content"]
+        if len(captured) == 1:
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fail_build_agent)
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="kimi-k2.6",
+        reviewer_models=["kimi-k2.6"],
+        env={"MOONSHOT_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.moonshot.cn/v1",
+            api_key_env="MOONSHOT_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert [request["model"] for request in captured] == [
+        "kimi-k2.6",
+        "kimi-k2.6",
+    ]
+    assert report.candidates == [candidate]
+    assert report.reviews == [review.model_copy(update={"reviewer_model": "kimi-k2.6"})]
+    assert report.gate_results[0].action == "auto_write"
+    assert report.metadata["provider"] == {
+        "type": "openai_compatible",
+        "header_keys": [],
+        "tracing_disabled": True,
+        "structured_output_mode": "json_object",
+        "thinking": {"type": "enabled"},
+    }
+
+
 async def test_deepseek_json_object_provider_runs_multiple_reviewers() -> None:
     candidate = _candidate()
     captured_models: list[str] = []
