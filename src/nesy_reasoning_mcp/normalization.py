@@ -2,7 +2,35 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 from nesy_reasoning_mcp.schemas import CanonicalImplicationEdge, RelationRecord, RelationType
+
+
+class NormalizedImplicationPreview(TypedDict):
+    """Human-readable preview of a relation's canonical implication edge."""
+
+    antecedent: str
+    consequent: str
+
+
+def normalized_implication_preview(
+    source: str,
+    target: str,
+    relation_type: RelationType | str,
+) -> list[NormalizedImplicationPreview]:
+    """Return canonical implication direction(s) for a relation shape."""
+    resolved_type = RelationType(relation_type)
+    if resolved_type == RelationType.SUFFICIENT:
+        return [{"antecedent": source, "consequent": target}]
+    if resolved_type == RelationType.NECESSARY:
+        return [{"antecedent": target, "consequent": source}]
+    if resolved_type == RelationType.EQUIVALENT:
+        return [
+            {"antecedent": source, "consequent": target},
+            {"antecedent": target, "consequent": source},
+        ]
+    return []
 
 
 def _edge(
@@ -27,13 +55,16 @@ def _edge(
 
 def normalize_relation_edges(relation: RelationRecord) -> list[CanonicalImplicationEdge]:
     """Derive canonical implication edges for one stored relation."""
-    if relation.relation_type == RelationType.SUFFICIENT:
-        return [_edge(relation, relation.canonical_source, relation.canonical_target, "a")]
-    if relation.relation_type == RelationType.NECESSARY:
-        return [_edge(relation, relation.canonical_target, relation.canonical_source, "a")]
-    if relation.relation_type == RelationType.EQUIVALENT:
-        return [
-            _edge(relation, relation.canonical_source, relation.canonical_target, "a"),
-            _edge(relation, relation.canonical_target, relation.canonical_source, "b"),
-        ]
-    return []
+    suffixes = ("a", "b")
+    return [
+        _edge(relation, preview["antecedent"], preview["consequent"], suffix)
+        for preview, suffix in zip(
+            normalized_implication_preview(
+                relation.canonical_source,
+                relation.canonical_target,
+                relation.relation_type,
+            ),
+            suffixes,
+            strict=False,
+        )
+    ]

@@ -48,6 +48,7 @@ def _review(
     if decision in {"approve", "downgrade"}:
         review["final_relation_type"] = relation_type
         review["final_confidence"] = confidence
+        review["normalized_implication_supported"] = True
     return review
 
 
@@ -76,6 +77,30 @@ async def test_validate_candidate_relations_approves_without_persisting() -> Non
     assert result.structuredContent["approved_relations"][0]["source"] == "A"
     assert listed.structuredContent["relations"] == []
     assert json.loads(result.content[0].text) == result.structuredContent
+
+
+@pytest.mark.asyncio
+async def test_validate_queues_legacy_approval_without_direction_check() -> None:
+    store = RelationStore()
+    legacy_review = _review()
+    legacy_review.pop("normalized_implication_supported")
+
+    result = await call_tool(
+        VALIDATE_CANDIDATE_RELATIONS,
+        {
+            "candidates": [_candidate()],
+            "reviews": [legacy_review],
+        },
+        store,
+    )
+
+    assert result.structuredContent["status"] == "warning"
+    assert result.structuredContent["approved_count"] == 0
+    assert result.structuredContent["queued_count"] == 1
+    assert result.structuredContent["gate_results"][0]["reasons"] == [
+        "normalized implication support was not confirmed"
+    ]
+    assert store.list_relations() == []
 
 
 @pytest.mark.asyncio

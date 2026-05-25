@@ -282,6 +282,19 @@ def test_reject_review_does_not_require_final_relation_info() -> None:
     assert review.final_confidence is None
 
 
+def test_review_decision_normalized_implication_support_is_optional_for_compatibility() -> None:
+    legacy = ReviewDecision(
+        candidate_id="candidate-1",
+        decision=ReviewDecisionValue.APPROVE,
+        final_relation_type="sufficient",
+        final_confidence=0.9,
+    )
+    confirmed = legacy.model_copy(update={"normalized_implication_supported": True})
+
+    assert legacy.normalized_implication_supported is None
+    assert confirmed.model_dump(mode="json")["normalized_implication_supported"] is True
+
+
 def test_tool_allowlists_keep_write_tools_out_of_dry_run() -> None:
     assert REASON_OVER_RELATIONS in DRY_RUN_TOOL_ALLOWLIST
     assert ASSERT_RELATIONS not in DRY_RUN_TOOL_ALLOWLIST

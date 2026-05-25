@@ -189,6 +189,7 @@ class ReviewDecision(BaseModel):
     decision: ReviewDecisionValue
     final_relation_type: RelationType | None = None
     final_confidence: float | None = Field(default=None, ge=0, le=1)
+    normalized_implication_supported: bool | None = None
     reasons: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
     reviewer_model: str | None = None

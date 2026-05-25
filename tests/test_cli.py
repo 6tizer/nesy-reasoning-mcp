@@ -57,6 +57,7 @@ def _review_queue_record(record_id: str = "queue-1") -> ReviewQueueRecord:
             decision=ReviewDecisionValue.APPROVE,
             final_relation_type="sufficient",
             final_confidence=0.9,
+            normalized_implication_supported=True,
             reasons=["Evidence directly supports the relation."],
         ),
         gate_result=GateResult(candidate_id=candidate.id, action=GateAction.QUEUE),
@@ -313,6 +314,7 @@ def test_ingest_retrieval_validate_end_to_end(tmp_path: Path) -> None:
         decision=ReviewDecisionValue.APPROVE,
         final_relation_type="sufficient",
         final_confidence=0.9,
+        normalized_implication_supported=True,
         reasons=["Evidence directly supports the relation."],
     )
     retrieval_path = tmp_path / "retrieval.json"
