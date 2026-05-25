@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
@@ -21,6 +22,16 @@ from nesy_reasoning_mcp.store import RelationStoreProtocol
 AgentRunner = Callable[[Any, str], Awaitable[Any]]
 
 
+@dataclass(frozen=True)
+class OpenAICompatibleProviderConfig:
+    """Configuration for OpenAI-compatible Chat Completions providers."""
+
+    base_url: str
+    api_key_env: str
+    default_headers: dict[str, str] = field(default_factory=dict)
+    disable_tracing: bool = True
+
+
 class OpenAIAgentsDryRunError(ValueError):
     """Raised when a live Agent SDK dry-run cannot start safely."""
 
@@ -32,6 +43,8 @@ async def run_openai_agents_dry_run(
     model: str | None = None,
     env: Mapping[str, str] | None = None,
     run_agent: AgentRunner | None = None,
+    provider_config: OpenAICompatibleProviderConfig | None = None,
+    disable_tracing: bool = False,
 ) -> IngestionReport:
     """Extract, review, and gate candidate relations without persistent writes."""
     return await run_openai_agents_ingestion(
@@ -40,6 +53,8 @@ async def run_openai_agents_dry_run(
         model=model,
         env=env,
         run_agent=run_agent,
+        provider_config=provider_config,
+        disable_tracing=disable_tracing,
         auto_write=False,
     )
 
@@ -53,12 +68,22 @@ async def run_openai_agents_ingestion(
     run_agent: AgentRunner | None = None,
     auto_write: bool = False,
     min_write_confidence: float = 0.85,
+    provider_config: OpenAICompatibleProviderConfig | None = None,
+    disable_tracing: bool = False,
 ) -> IngestionReport:
     """Extract, review, gate, and optionally write approved candidate relations."""
     if not 0 <= min_write_confidence <= 1:
         raise OpenAIAgentsDryRunError("min_write_confidence must be between 0 and 1")
     runtime_env = env if env is not None else os.environ
-    if run_agent is None and not runtime_env.get("OPENAI_API_KEY"):
+    agent_model = _agent_model(
+        model or runtime_env.get("OPENAI_DEFAULT_MODEL"),
+        provider_config,
+        runtime_env,
+    )
+    tracing_disabled = disable_tracing or (
+        provider_config is not None and provider_config.disable_tracing
+    )
+    if run_agent is None and provider_config is None and not runtime_env.get("OPENAI_API_KEY"):
         raise OpenAIAgentsDryRunError(
             "OPENAI_API_KEY is required for live OpenAI Agents SDK ingestion"
         )
@@ -67,11 +92,13 @@ async def run_openai_agents_ingestion(
         name="NeSy relation extractor",
         instructions=_EXTRACTOR_INSTRUCTIONS,
         output_type=CandidateRelationBatch,
-        model=model or runtime_env.get("OPENAI_DEFAULT_MODEL"),
+        model=agent_model,
     )
-    extraction_output = await (run_agent or _run_agent)(
+    extraction_output = await _run_agent_with_optional_runner(
+        run_agent,
         extractor,
         _extraction_prompt(ingestion_input),
+        tracing_disabled=tracing_disabled,
     )
     candidate_batch = _coerce_candidate_batch(extraction_output)
 
@@ -79,11 +106,13 @@ async def run_openai_agents_ingestion(
         name="NeSy relation reviewer",
         instructions=_REVIEWER_INSTRUCTIONS,
         output_type=ReviewDecisionBatch,
-        model=model or runtime_env.get("OPENAI_DEFAULT_MODEL"),
+        model=agent_model,
     )
-    review_output = await (run_agent or _run_agent)(
+    review_output = await _run_agent_with_optional_runner(
+        run_agent,
         reviewer,
         _review_prompt(ingestion_input, candidate_batch),
+        tracing_disabled=tracing_disabled,
     )
     review_batch = _coerce_review_batch(review_output)
 
@@ -119,6 +148,7 @@ async def run_openai_agents_ingestion(
             "url_count": len(ingestion_input.urls),
             "reasoning": reasoning,
             "write_result": write_result,
+            "provider": _provider_metadata(provider_config, tracing_disabled),
         },
     )
 
@@ -128,7 +158,7 @@ def _build_agent(
     name: str,
     instructions: str,
     output_type: type[Any],
-    model: str | None,
+    model: Any,
 ) -> Any:
     from agents import Agent, AgentOutputSchema
 
@@ -142,10 +172,73 @@ def _build_agent(
     return Agent(**kwargs)
 
 
-async def _run_agent(agent: Any, prompt: str) -> Any:
-    from agents import Runner
+def _agent_model(
+    model: str | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    env: Mapping[str, str],
+) -> Any:
+    if provider_config is None:
+        return model
+    if not model:
+        raise OpenAIAgentsDryRunError(
+            "--model or OPENAI_DEFAULT_MODEL is required when --base-url is set"
+        )
+    api_key = env.get(provider_config.api_key_env)
+    if not api_key:
+        raise OpenAIAgentsDryRunError(
+            f"{provider_config.api_key_env} is required for OpenAI-compatible provider"
+        )
+    return _openai_compatible_model(model, api_key, provider_config)
 
-    result = await Runner.run(agent, prompt)
+
+def _openai_compatible_model(
+    model: str,
+    api_key: str,
+    provider_config: OpenAICompatibleProviderConfig,
+) -> Any:
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=provider_config.base_url,
+        default_headers=provider_config.default_headers or None,
+    )
+    return OpenAIChatCompletionsModel(model=model, openai_client=client)
+
+
+async def _run_agent_with_optional_runner(
+    run_agent: AgentRunner | None,
+    agent: Any,
+    prompt: str,
+    *,
+    tracing_disabled: bool,
+) -> Any:
+    if run_agent is not None:
+        return await run_agent(agent, prompt)
+    return await _run_agent(agent, prompt, tracing_disabled=tracing_disabled)
+
+
+def _provider_metadata(
+    provider_config: OpenAICompatibleProviderConfig | None,
+    disable_tracing: bool,
+) -> dict[str, Any]:
+    if provider_config is None:
+        return {"type": "openai", "tracing_disabled": disable_tracing}
+    return {
+        "type": "openai_compatible",
+        "base_url": provider_config.base_url,
+        "api_key_env": provider_config.api_key_env,
+        "header_keys": sorted(provider_config.default_headers),
+        "tracing_disabled": disable_tracing or provider_config.disable_tracing,
+    }
+
+
+async def _run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+    from agents import RunConfig, Runner
+
+    run_config = RunConfig(tracing_disabled=True) if tracing_disabled else None
+    result = await Runner.run(agent, prompt, run_config=run_config)
     return result.final_output
 
 

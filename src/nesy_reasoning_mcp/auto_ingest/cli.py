@@ -18,6 +18,7 @@ from nesy_reasoning_mcp.auto_ingest.fetcher import (
 )
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
+    OpenAICompatibleProviderConfig,
     run_openai_agents_ingestion,
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import IngestionInput, IngestionReport
@@ -46,6 +47,27 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=None, help="Optional extraction task.")
     parser.add_argument("--question", default=None, help="Optional question to answer.")
     parser.add_argument("--model", default=None, help="OpenAI Agents SDK model override.")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible Chat Completions base URL.",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        help="Environment variable containing the provider API key.",
+    )
+    parser.add_argument(
+        "--provider-header",
+        action="append",
+        default=[],
+        help="Provider header in KEY=VALUE form. May be repeated.",
+    )
+    parser.add_argument(
+        "--disable-tracing",
+        action="store_true",
+        help="Disable OpenAI Agents SDK tracing for this run.",
+    )
     parser.add_argument(
         "--auto-write",
         action="store_true",
@@ -112,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
 async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     if not 0 <= args.min_write_confidence <= 1:
         raise ValueError("--min-write-confidence must be between 0 and 1")
+    provider_config = _provider_config_from_args(args)
     ingestion_input = _load_ingestion_input(args)
     if not ingestion_input.evidence and not ingestion_input.urls:
         raise ValueError("agent-dry-run requires --input evidence or at least one --url")
@@ -133,7 +156,45 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         model=args.model,
         auto_write=args.auto_write,
         min_write_confidence=args.min_write_confidence,
+        provider_config=provider_config,
+        disable_tracing=bool(getattr(args, "disable_tracing", False)),
     )
+
+
+def _provider_config_from_args(
+    args: argparse.Namespace,
+) -> OpenAICompatibleProviderConfig | None:
+    base_url = getattr(args, "base_url", None)
+    api_key_env = getattr(args, "api_key_env", None)
+    headers = getattr(args, "provider_header", []) or []
+    if not base_url:
+        if api_key_env:
+            raise ValueError("--api-key-env requires --base-url")
+        if headers:
+            raise ValueError("--provider-header requires --base-url")
+        return None
+    if not api_key_env:
+        raise ValueError("--api-key-env is required when --base-url is set")
+    return OpenAICompatibleProviderConfig(
+        base_url=base_url,
+        api_key_env=api_key_env,
+        default_headers=_parse_provider_headers(headers),
+        disable_tracing=True,
+    )
+
+
+def _parse_provider_headers(values: list[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError("--provider-header must use KEY=VALUE")
+        key, header_value = value.split("=", 1)
+        key = key.strip()
+        header_value = header_value.strip()
+        if not key or not header_value:
+            raise ValueError("--provider-header must use non-empty KEY=VALUE")
+        headers[key] = header_value
+    return headers
 
 
 def _load_ingestion_input(args: argparse.Namespace) -> IngestionInput:

@@ -210,6 +210,21 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
   --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
+OpenAI-compatible Chat Completions providers can use the same ingestion path
+with an explicit base URL and API-key environment variable:
+
+```bash
+DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input evidence.json \
+  --model deepseek-v4-pro \
+  --base-url https://api.deepseek.com \
+  --api-key-env DEEPSEEK_API_KEY \
+  --format json
+```
+
+Provider shortcuts such as `--provider deepseek` are future work; use the
+generic flags for now.
+
 External orchestrators can call `nesy.validate_candidate_relations` before any
 write path to reuse NeSy's deterministic gate and contradiction checks without
 mutating the graph.
