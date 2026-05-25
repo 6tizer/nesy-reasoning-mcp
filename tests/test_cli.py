@@ -130,8 +130,10 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     assert "--provider-reasoning-effort" in completed.stdout
     assert "--disable-tracing" in completed.stdout
     assert "--reviewer-model" in completed.stdout
+    assert "--reviewer" in completed.stdout
     assert "--voting-policy" in completed.stdout
     assert "--high-priority-reviewer-model" in completed.stdout
+    assert "--high-priority-reviewer" in completed.stdout
     assert "--search-query" in completed.stdout
     assert "--search-provider" in completed.stdout
     assert "--search-limit" in completed.stdout
@@ -208,6 +210,8 @@ def test_ingest_schedule_add_help_lists_safe_write_flags() -> None:
     assert "--allow-scheduled-writes" in completed.stdout
     assert "--allow-single-reviewer-write" in completed.stdout
     assert "--reviewer-model" in completed.stdout
+    assert "--reviewer" in completed.stdout
+    assert "--high-priority-reviewer" in completed.stdout
     assert completed.stderr == ""
 
 

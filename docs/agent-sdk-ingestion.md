@@ -252,6 +252,28 @@ review decisions stay in `IngestionReport.reviews`; the selected aggregate
 review is passed to the deterministic gate, and audit details are stored under
 `metadata.review_aggregation`.
 
+Reviewers can also be provider-qualified while the extractor keeps the run-level
+provider and model:
+
+```bash
+DEEPSEEK_API_KEY=... MOONSHOT_API_KEY=... OPENROUTER_API_KEY=... \
+uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --provider deepseek \
+  --model deepseek-v4-pro \
+  --reviewer deepseek:deepseek-v4-pro \
+  --reviewer kimi:kimi-k2.6 \
+  --reviewer openrouter:qwen/qwen3.7-max \
+  --reviewer openrouter:x-ai/grok-build-0.1 \
+  --voting-policy risk_tiered \
+  --high-priority-reviewer deepseek:deepseek-v4-pro
+```
+
+Provider-qualified reviewers use each provider's registry defaults and stable
+reviewer IDs such as `kimi:kimi-k2.6`. They do not support per-reviewer custom
+headers, thinking, or reasoning flags in this version. Existing
+`--reviewer-model` values still use the run-level provider configuration.
+
 Known OpenAI-compatible Chat Completions providers can use registry shortcuts.
 API keys are read only from environment variables, not CLI plaintext arguments:
 
@@ -459,7 +481,7 @@ location. Reports are written by default under
 
 Scheduled write mode has two extra safeguards beyond normal `--auto-write`.
 Creation and runtime both require `--allow-scheduled-writes`, and scheduled
-auto-write requires at least two `--reviewer-model` values by default:
+auto-write requires at least two reviewers by default:
 
 ```bash
 uv run --no-editable nesy-reasoning-mcp ingest schedule add \
@@ -472,6 +494,10 @@ uv run --no-editable nesy-reasoning-mcp ingest schedule add \
   --reviewer-model gpt-4.1-mini \
   --voting-policy risk_tiered
 ```
+
+Scheduled jobs also persist provider-qualified `--reviewer` and
+`--high-priority-reviewer` values and replay them during `run`, `run-due`, and
+`worker` execution.
 
 Single-reviewer scheduled writes must opt in with
 `--allow-single-reviewer-write`. Dry-run schedules have no multi-reviewer

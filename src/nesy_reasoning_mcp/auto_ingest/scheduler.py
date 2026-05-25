@@ -157,8 +157,10 @@ class ScheduledIngestionProviderConfig(BaseModel):
     provider_reasoning_effort: str | None = None
     disable_tracing: bool = False
     reviewer_models: list[str] = Field(default_factory=list)
+    reviewers: list[str] = Field(default_factory=list)
     voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED
     high_priority_reviewer_models: list[str] = Field(default_factory=list)
+    high_priority_reviewers: list[str] = Field(default_factory=list)
 
     @field_validator(
         "model",
@@ -178,7 +180,13 @@ class ScheduledIngestionProviderConfig(BaseModel):
             raise ValueError("must not be empty")
         return stripped
 
-    @field_validator("provider_headers", "reviewer_models", "high_priority_reviewer_models")
+    @field_validator(
+        "provider_headers",
+        "reviewer_models",
+        "reviewers",
+        "high_priority_reviewer_models",
+        "high_priority_reviewers",
+    )
     @classmethod
     def strip_string_lists(cls, value: list[str]) -> list[str]:
         """Strip string list values and reject empty entries."""
@@ -509,7 +517,7 @@ def scheduled_write_diagnostics(job: ScheduledIngestionJob) -> list[Diagnostic]:
                 related_ids=[job.id],
             )
         )
-    reviewer_count = len(job.provider_config.reviewer_models)
+    reviewer_count = scheduled_reviewer_count(job.provider_config)
     if reviewer_count < 2 and not job.write_config.allow_single_reviewer_write:
         diagnostics.append(
             Diagnostic(
@@ -523,6 +531,11 @@ def scheduled_write_diagnostics(job: ScheduledIngestionJob) -> list[Diagnostic]:
             )
         )
     return diagnostics
+
+
+def scheduled_reviewer_count(provider_config: ScheduledIngestionProviderConfig) -> int:
+    """Return the number of distinct scheduled reviewers."""
+    return len(dict.fromkeys([*provider_config.reviewer_models, *provider_config.reviewers]))
 
 
 def job_due(job: ScheduledIngestionJob, *, now: datetime | None = None) -> bool:
