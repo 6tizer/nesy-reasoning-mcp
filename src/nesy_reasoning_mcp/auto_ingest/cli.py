@@ -1534,6 +1534,14 @@ def _provider_config_from_args(
             "--provider-thinking and --provider-reasoning-effort require a JSON Object "
             "provider such as --provider deepseek"
         )
+    if (
+        provider_reasoning_effort is not None
+        and provider_entry is not None
+        and provider_entry.reasoning_effort is None
+    ):
+        raise ValueError(
+            f"--provider-reasoning-effort is not supported by provider '{provider_entry.name}'"
+        )
     extra_body = dict(provider_entry.extra_body) if provider_entry is not None else {}
     if provider_thinking is not None:
         extra_body["thinking"] = {"type": provider_thinking}

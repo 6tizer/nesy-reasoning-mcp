@@ -517,9 +517,11 @@ def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
     assert get_provider_entry("deepseek").extra_body == {"thinking": {"type": "enabled"}}
     assert (
         get_provider_entry("kimi").structured_output_mode
-        is ProviderStructuredOutputMode.AGENT_SCHEMA
+        is ProviderStructuredOutputMode.JSON_OBJECT
     )
     assert get_provider_entry("kimi").api_key_env == "MOONSHOT_API_KEY"
+    assert get_provider_entry("kimi").reasoning_effort is None
+    assert get_provider_entry("kimi").extra_body == {"thinking": {"type": "enabled"}}
     assert get_provider_entry("openrouter").default_model is None
     assert get_provider_entry("openrouter").notes
     rendered = ingest_cli._render_provider_list()
@@ -1545,7 +1547,7 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
         "\tjson_object\tdeepseek-v4-pro,deepseek-v4-flash\thigh"
     ) in rendered
     assert (
-        "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6\tagent_schema\t-\t-"
+        "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6\tjson_object\t-\t-"
     ) in rendered
     assert (
         "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-\tagent_schema\t-\t-"
@@ -1579,9 +1581,9 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
             "https://api.moonshot.cn/v1",
             "MOONSHOT_API_KEY",
             "kimi-k2.6",
-            ProviderStructuredOutputMode.AGENT_SCHEMA,
+            ProviderStructuredOutputMode.JSON_OBJECT,
             None,
-            {},
+            {"thinking": {"type": "enabled"}},
         ),
     ],
 )
@@ -1767,6 +1769,63 @@ def test_cli_deepseek_provider_thinking_overrides_registry(
         provider_header=[],
         provider_thinking="disabled",
         provider_reasoning_effort="max",
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_kimi_provider_thinking_overrides_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert model == "kimi-k2.6"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://api.moonshot.cn/v1",
+            api_key_env="MOONSHOT_API_KEY",
+            disable_tracing=True,
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        provider="kimi",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking="disabled",
+        provider_reasoning_effort=None,
         disable_tracing=False,
         auto_write=False,
         min_write_confidence=0.85,
@@ -2011,7 +2070,7 @@ def test_cli_openrouter_provider_requires_explicit_model(
             "must not contain newlines",
         ),
         ({"provider": "openrouter", "provider_thinking": "disabled"}, "JSON Object provider"),
-        ({"provider": "kimi", "provider_reasoning_effort": "max"}, "JSON Object provider"),
+        ({"provider": "kimi", "provider_reasoning_effort": "max"}, "not supported"),
     ],
 )
 def test_cli_rejects_invalid_provider_config(

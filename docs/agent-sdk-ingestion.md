@@ -298,6 +298,13 @@ MOONSHOT_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-ru
   --format json
 ```
 
+The `kimi` shortcut defaults to `kimi-k2.6` and uses the same direct Chat
+Completions JSON Object path as DeepSeek. The runtime sends
+`response_format={"type":"json_object"}`, includes JSON schema guidance in the
+prompt, and enables Kimi thinking with `extra_body={"thinking":{"type":"enabled"}}`.
+Kimi thinking can be disabled explicitly with `--provider-thinking disabled`;
+`--provider-reasoning-effort` is not supported for Kimi.
+
 ```bash
 OPENROUTER_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
   --input examples/research-evidence.json \
@@ -326,9 +333,9 @@ DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-ru
 When `--provider` or `--base-url` is set, tracing is disabled by default for
 that run because third-party provider calls should not be sent to OpenAI
 tracing. Most provider shortcuts use `OpenAIChatCompletionsModel` with an
-`AsyncOpenAI` client; DeepSeek uses a direct Chat Completions JSON Object path
-because its API currently supports `text` and `json_object` response formats,
-not OpenAI JSON Schema response formats. Provider metadata in the report
+`AsyncOpenAI` client; DeepSeek and Kimi use a direct Chat Completions JSON
+Object path because their APIs are more reliable with JSON Object response
+formats for this ingestion schema. Provider metadata in the report
 intentionally omits API-key environment names and base URLs. LiteLLM, Ollama,
 and Claude Agent SDK adapters are separate future work.
 
