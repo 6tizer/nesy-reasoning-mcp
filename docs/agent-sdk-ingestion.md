@@ -128,7 +128,8 @@ OPENAI_API_KEY=... uv run python scripts/agent_ingest_openai.py \
 ```
 
 OpenAI-compatible Chat Completions providers use the generic provider flags.
-API keys are read only from environment variables, not CLI plaintext arguments:
+API keys are read only from environment variables, not CLI plaintext arguments.
+Provider base URLs must be HTTPS:
 
 ```bash
 DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
@@ -159,10 +160,12 @@ OPENROUTER_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-
   --format json
 ```
 
-When `--base-url` is set, tracing is disabled by default for that run and the
-runtime uses `OpenAIChatCompletionsModel` with an `AsyncOpenAI` client. Provider
-shortcuts such as `--provider deepseek` are intentionally left to a later
-provider-registry PR.
+When `--base-url` is set, tracing is disabled by default for that run because
+third-party provider calls should not be sent to OpenAI tracing. The runtime
+uses `OpenAIChatCompletionsModel` with an `AsyncOpenAI` client. Provider
+metadata in the report intentionally omits API-key environment names and base
+URLs. Provider shortcuts such as `--provider deepseek` are intentionally left to
+a later provider-registry PR.
 
 JSON input accepts:
 

@@ -211,7 +211,7 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
 ```
 
 OpenAI-compatible Chat Completions providers can use the same ingestion path
-with an explicit base URL and API-key environment variable:
+with an explicit HTTPS base URL and API-key environment variable:
 
 ```bash
 DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \

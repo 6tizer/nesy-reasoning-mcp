@@ -186,7 +186,7 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
 ```
 
 OpenAI-compatible Chat Completions provider 可以走同一条 ingestion 路径，但要显式传
-base URL 和 API key 环境变量名：
+HTTPS base URL 和 API key 环境变量名：
 
 ```bash
 DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \

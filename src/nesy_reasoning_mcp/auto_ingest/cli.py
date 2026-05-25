@@ -6,7 +6,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from re import fullmatch
 from typing import Any, TextIO
+from urllib.parse import urlparse
 
 import anyio
 from pydantic import ValidationError
@@ -24,6 +26,8 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
 from nesy_reasoning_mcp.auto_ingest.schemas import IngestionInput, IngestionReport
 from nesy_reasoning_mcp.config import load_config
 from nesy_reasoning_mcp.store import create_relation_store
+
+_HTTP_HEADER_KEY_PATTERN = r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+"
 
 
 def add_ingest_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -175,12 +179,21 @@ def _provider_config_from_args(
         return None
     if not api_key_env:
         raise ValueError("--api-key-env is required when --base-url is set")
+    _validate_provider_base_url(base_url)
     return OpenAICompatibleProviderConfig(
         base_url=base_url,
         api_key_env=api_key_env,
         default_headers=_parse_provider_headers(headers),
+        # OpenAI-compatible providers do not participate in OpenAI tracing.
+        # Keep this disabled by default to avoid sending third-party runs to tracing.
         disable_tracing=True,
     )
+
+
+def _validate_provider_base_url(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("--base-url must be an https URL")
 
 
 def _parse_provider_headers(values: list[str]) -> dict[str, str]:
@@ -193,6 +206,10 @@ def _parse_provider_headers(values: list[str]) -> dict[str, str]:
         header_value = header_value.strip()
         if not key or not header_value:
             raise ValueError("--provider-header must use non-empty KEY=VALUE")
+        if fullmatch(_HTTP_HEADER_KEY_PATTERN, key) is None:
+            raise ValueError("--provider-header key must be a valid HTTP header token")
+        if "\r" in header_value or "\n" in header_value:
+            raise ValueError("--provider-header value must not contain newlines")
         headers[key] = header_value
     return headers
 

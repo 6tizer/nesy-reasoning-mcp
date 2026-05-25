@@ -6,6 +6,8 @@ import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from inspect import Parameter, signature
+from types import MappingProxyType
 from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
@@ -19,7 +21,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
-AgentRunner = Callable[[Any, str], Awaitable[Any]]
+AgentRunner = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)
@@ -28,8 +30,15 @@ class OpenAICompatibleProviderConfig:
 
     base_url: str
     api_key_env: str
-    default_headers: dict[str, str] = field(default_factory=dict)
+    default_headers: Mapping[str, str] = field(default_factory=dict)
     disable_tracing: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "default_headers",
+            MappingProxyType(dict(self.default_headers)),
+        )
 
 
 class OpenAIAgentsDryRunError(ValueError):
@@ -215,8 +224,21 @@ async def _run_agent_with_optional_runner(
     tracing_disabled: bool,
 ) -> Any:
     if run_agent is not None:
+        if _runner_accepts_tracing_disabled(run_agent):
+            return await run_agent(agent, prompt, tracing_disabled=tracing_disabled)
         return await run_agent(agent, prompt)
     return await _run_agent(agent, prompt, tracing_disabled=tracing_disabled)
+
+
+def _runner_accepts_tracing_disabled(run_agent: AgentRunner) -> bool:
+    try:
+        parameters = signature(run_agent).parameters
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind is Parameter.VAR_KEYWORD or name == "tracing_disabled"
+        for name, parameter in parameters.items()
+    )
 
 
 def _provider_metadata(
@@ -227,8 +249,6 @@ def _provider_metadata(
         return {"type": "openai", "tracing_disabled": disable_tracing}
     return {
         "type": "openai_compatible",
-        "base_url": provider_config.base_url,
-        "api_key_env": provider_config.api_key_env,
         "header_keys": sorted(provider_config.default_headers),
         "tracing_disabled": disable_tracing or provider_config.disable_tracing,
     }
