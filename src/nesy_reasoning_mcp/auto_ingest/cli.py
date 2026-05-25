@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from re import fullmatch
@@ -156,8 +157,13 @@ def main(argv: list[str] | None = None) -> int:
 async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     if not 0 <= args.min_write_confidence <= 1:
         raise ValueError("--min-write-confidence must be between 0 and 1")
-    provider_config = _provider_config_from_args(args)
-    model = _model_from_args(args)
+    provider_entry = _provider_entry_from_args(args)
+    provider_config = _provider_config_from_args(args, provider_entry)
+    model = _model_from_args(args, provider_entry)
+    if provider_entry is not None and model is None and not os.environ.get("OPENAI_DEFAULT_MODEL"):
+        raise ValueError(
+            f"provider '{provider_entry.name}' requires --model or OPENAI_DEFAULT_MODEL"
+        )
     ingestion_input = _load_ingestion_input(args)
     if not ingestion_input.evidence and not ingestion_input.urls:
         raise ValueError("agent-dry-run requires --input evidence or at least one --url")
@@ -186,8 +192,9 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
 
 def _provider_config_from_args(
     args: argparse.Namespace,
+    provider_entry: ProviderRegistryEntry | None = None,
 ) -> OpenAICompatibleProviderConfig | None:
-    provider_entry = _provider_entry_from_args(args)
+    provider_entry = provider_entry or _provider_entry_from_args(args)
     base_url = getattr(args, "base_url", None) or (
         provider_entry.base_url if provider_entry is not None else None
     )
@@ -221,11 +228,14 @@ def _provider_entry_from_args(args: argparse.Namespace) -> ProviderRegistryEntry
     return get_provider_entry(provider_name)
 
 
-def _model_from_args(args: argparse.Namespace) -> str | None:
+def _model_from_args(
+    args: argparse.Namespace,
+    provider_entry: ProviderRegistryEntry | None = None,
+) -> str | None:
     model = getattr(args, "model", None)
     if model is not None:
         return model
-    provider_entry = _provider_entry_from_args(args)
+    provider_entry = provider_entry or _provider_entry_from_args(args)
     if provider_entry is None:
         return None
     return provider_entry.default_model
@@ -257,7 +267,7 @@ def _parse_provider_headers(values: list[str]) -> dict[str, str]:
 
 def _render_provider_list() -> str:
     rows = [
-        "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url",
+        "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url\tnotes",
         *[
             "\t".join(
                 [
@@ -266,6 +276,7 @@ def _render_provider_list() -> str:
                     entry.api_key_env,
                     entry.default_model or "-",
                     entry.docs_url,
+                    entry.notes,
                 ]
             )
             for entry in list_provider_entries()

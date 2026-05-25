@@ -53,12 +53,15 @@ PROVIDER_REGISTRY: Mapping[str, ProviderRegistryEntry] = MappingProxyType(
 
 
 def get_provider_entry(name: str) -> ProviderRegistryEntry:
-    """Return a provider registry entry by lowercase exact name."""
+    """Return a provider registry entry by name."""
+    normalized = name.strip().lower()
     try:
-        return PROVIDER_REGISTRY[name]
+        return PROVIDER_REGISTRY[normalized]
     except KeyError as exc:
+        supported = ", ".join(sorted(PROVIDER_REGISTRY))
         raise ValueError(
-            f"unknown provider '{name}'; use --list-providers to see supported providers"
+            f"unknown provider '{name}'; supported providers: {supported}; "
+            "use --list-providers to see details"
         ) from exc
 
 

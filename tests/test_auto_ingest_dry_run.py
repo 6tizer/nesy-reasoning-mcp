@@ -289,18 +289,22 @@ def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
     entries = list_provider_entries()
     assert [entry.name for entry in entries] == ["deepseek", "kimi", "openrouter"]
     assert get_provider_entry("deepseek").base_url == "https://api.deepseek.com"
+    assert get_provider_entry("DeepSeek").base_url == "https://api.deepseek.com"
     assert get_provider_entry("kimi").api_key_env == "MOONSHOT_API_KEY"
     assert get_provider_entry("openrouter").default_model is None
+    assert get_provider_entry("openrouter").notes
     rendered = ingest_cli._render_provider_list()
+    assert "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url\tnotes" in rendered
     assert "DEEPSEEK_API_KEY" in rendered
     assert "MOONSHOT_API_KEY" in rendered
     assert "OPENROUTER_API_KEY" in rendered
+    assert "OpenRouter requires an explicit model" in rendered
     assert "secret" not in rendered.lower()
 
 
-def test_provider_registry_lookup_is_lowercase_exact() -> None:
-    with pytest.raises(ValueError, match="unknown provider 'DeepSeek'"):
-        get_provider_entry("DeepSeek")
+def test_provider_registry_lookup_error_lists_supported_providers() -> None:
+    with pytest.raises(ValueError, match="supported providers: deepseek, kimi, openrouter"):
+        get_provider_entry("unknown")
 
 
 async def test_openai_compatible_provider_requires_model_and_env_key() -> None:
@@ -628,6 +632,7 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
     assert "deepseek\thttps://api.deepseek.com\tDEEPSEEK_API_KEY\tdeepseek-v4-pro" in rendered
     assert "kimi\thttps://api.moonshot.cn/v1\tMOONSHOT_API_KEY\tkimi-k2.6" in rendered
     assert "openrouter\thttps://openrouter.ai/api/v1\tOPENROUTER_API_KEY\t-" in rendered
+    assert "OpenRouter requires an explicit model" in rendered
     assert "secret" not in rendered.lower()
 
 
@@ -761,6 +766,72 @@ def test_cli_provider_explicit_flags_override_registry(
     assert exit_code == 0
 
 
+def test_cli_openrouter_provider_accepts_headers_with_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == "openai/gpt-latest"
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+            default_headers={
+                "HTTP-Referer": "https://github.com/6tizer/nesy-reasoning-mcp",
+                "X-OpenRouter-Title": "NeSy Reasoning MCP",
+            },
+            disable_tracing=True,
+        )
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert disable_tracing is False
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="openai/gpt-latest",
+        provider="openrouter",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[
+            "HTTP-Referer=https://github.com/6tizer/nesy-reasoning-mcp",
+            "X-OpenRouter-Title=NeSy Reasoning MCP",
+        ],
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
 def test_cli_provider_unknown_returns_clear_error(tmp_path: Path) -> None:
     input_path = tmp_path / "input.json"
     input_path.write_text(
@@ -795,10 +866,15 @@ def test_cli_provider_unknown_returns_clear_error(tmp_path: Path) -> None:
 
     assert exit_code == 2
     assert "unknown provider 'unknown'" in stderr.getvalue()
+    assert "deepseek, kimi, openrouter" in stderr.getvalue()
     assert "--list-providers" in stderr.getvalue()
 
 
-def test_cli_openrouter_provider_requires_explicit_model(tmp_path: Path) -> None:
+def test_cli_openrouter_provider_requires_explicit_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_DEFAULT_MODEL", raising=False)
     input_path = tmp_path / "input.json"
     input_path.write_text(
         json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
@@ -831,7 +907,7 @@ def test_cli_openrouter_provider_requires_explicit_model(tmp_path: Path) -> None
     )
 
     assert exit_code == 2
-    assert "--model or OPENAI_DEFAULT_MODEL" in stderr.getvalue()
+    assert "provider 'openrouter' requires --model or OPENAI_DEFAULT_MODEL" in stderr.getvalue()
 
 
 @pytest.mark.parametrize(
