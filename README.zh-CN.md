@@ -185,6 +185,20 @@ OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run 
   --input evidence.json --auto-write --min-write-confidence 0.85 --format json
 ```
 
+OpenAI-compatible Chat Completions provider 可以走同一条 ingestion 路径，但要显式传
+HTTPS base URL 和 API key 环境变量名：
+
+```bash
+DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input evidence.json \
+  --model deepseek-v4-pro \
+  --base-url https://api.deepseek.com \
+  --api-key-env DEEPSEEK_API_KEY \
+  --format json
+```
+
+`--provider deepseek` 这类 provider shortcut 是后续任务；当前先使用 generic flags。
+
 外部 orchestrator 可以在任何写入路径前调用
 `nesy.validate_candidate_relations`，复用 NeSy 的确定性 gate 和矛盾检查，但不改图。
 

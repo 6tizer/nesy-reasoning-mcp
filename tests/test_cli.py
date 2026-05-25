@@ -74,6 +74,10 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
 
     assert "--auto-write" in completed.stdout
     assert "--min-write-confidence" in completed.stdout
+    assert "--base-url" in completed.stdout
+    assert "--api-key-env" in completed.stdout
+    assert "--provider-header" in completed.stdout
+    assert "--disable-tracing" in completed.stdout
     assert completed.stderr == ""
 
 

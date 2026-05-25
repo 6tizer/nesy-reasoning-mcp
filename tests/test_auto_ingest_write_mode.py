@@ -70,7 +70,8 @@ def _mock_agents(
     def fake_agent(**kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(output_type=kwargs["output_type"])
 
-    async def fake_run_agent(agent: Any, prompt: str) -> Any:
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        assert tracing_disabled is False
         if agent.output_type is openai_agents.CandidateRelationBatch:
             return {"candidates": [candidate.model_dump(mode="json") for candidate, _ in pairs]}
         return {"reviews": [review.model_dump(mode="json") for _, review in pairs]}

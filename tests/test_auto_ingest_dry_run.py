@@ -2,7 +2,7 @@ import argparse
 import json
 from io import StringIO
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +23,7 @@ from nesy_reasoning_mcp.auto_ingest.fetcher import fetch_url_evidence
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
+    OpenAICompatibleProviderConfig,
     run_openai_agents_dry_run,
 )
 from nesy_reasoning_mcp.store import RelationStore
@@ -179,6 +180,126 @@ async def test_openai_agents_dry_run_maps_runner_outputs_to_report(
     assert report.gate_results[0].reasons == ["dry-run approved; no persistent write performed"]
 
 
+async def test_openai_compatible_provider_uses_env_key_headers_and_disables_tracing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    captured: dict[str, Any] = {}
+
+    def fake_model(
+        model: str,
+        api_key: str,
+        provider_config: OpenAICompatibleProviderConfig,
+    ) -> str:
+        captured["model"] = model
+        captured["api_key"] = api_key
+        captured["base_url"] = provider_config.base_url
+        captured["headers"] = provider_config.default_headers
+        return "provider-model"
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        captured.setdefault("agent_models", []).append(kwargs["model"])
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        captured.setdefault("tracing_disabled", []).append(tracing_disabled)
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        return {"reviews": [review.model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_openai_compatible_model", fake_model)
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="deepseek-v4-pro",
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            default_headers={"X-Test": "yes"},
+        ),
+    )
+
+    assert captured["model"] == "deepseek-v4-pro"
+    assert captured["api_key"] == "secret"
+    assert captured["base_url"] == "https://api.deepseek.com"
+    assert captured["headers"] == {"X-Test": "yes"}
+    assert captured["tracing_disabled"] == [True, True]
+    assert captured["agent_models"] == ["provider-model", "provider-model"]
+    assert report.metadata["provider"] == {
+        "type": "openai_compatible",
+        "header_keys": ["X-Test"],
+        "tracing_disabled": True,
+    }
+
+
+async def test_custom_runner_can_receive_tracing_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    captured: list[bool] = []
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool) -> Any:
+        captured.append(tracing_disabled)
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        return {"reviews": [review.model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+
+    await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        env={"OPENAI_API_KEY": "test"},
+        run_agent=fake_run_agent,
+        disable_tracing=True,
+    )
+
+    assert captured == [True, True]
+
+
+def test_openai_compatible_provider_config_headers_are_read_only() -> None:
+    config = OpenAICompatibleProviderConfig(
+        base_url="https://api.deepseek.com",
+        api_key_env="DEEPSEEK_API_KEY",
+        default_headers={"X-Test": "yes"},
+    )
+
+    assert isinstance(config.default_headers, MappingProxyType)
+    with pytest.raises(TypeError):
+        config.default_headers["X-Test"] = "no"  # type: ignore[index]
+
+
+async def test_openai_compatible_provider_requires_model_and_env_key() -> None:
+    provider_config = OpenAICompatibleProviderConfig(
+        base_url="https://api.deepseek.com",
+        api_key_env="DEEPSEEK_API_KEY",
+    )
+    with pytest.raises(OpenAIAgentsDryRunError, match="--model or OPENAI_DEFAULT_MODEL"):
+        await run_openai_agents_dry_run(
+            IngestionInput(evidence=[_evidence()]),
+            store=RelationStore(),
+            env={"DEEPSEEK_API_KEY": "secret"},
+            provider_config=provider_config,
+        )
+    with pytest.raises(OpenAIAgentsDryRunError, match="DEEPSEEK_API_KEY is required"):
+        await run_openai_agents_dry_run(
+            IngestionInput(evidence=[_evidence()]),
+            store=RelationStore(),
+            model="deepseek-v4-pro",
+            env={},
+            provider_config=provider_config,
+        )
+
+
 async def test_dry_run_gate_never_writes_and_queues_hard_contradictions() -> None:
     store = RelationStore()
     first = _candidate(candidate_id="candidate-1", source="A", target="B")
@@ -268,12 +389,16 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
         model: str | None = None,
         auto_write: bool = False,
         min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
     ) -> IngestionReport:
         assert ingestion_input.evidence[0].url == "https://example.com/source"
         assert store.list_relations() == []
         assert model == "gpt-test"
         assert auto_write is False
         assert min_write_confidence == 0.85
+        assert provider_config is None
+        assert disable_tracing is False
         return IngestionReport(candidates=[_candidate()])
 
     monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
@@ -302,6 +427,59 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
     assert stderr.getvalue() == ""
 
 
+def test_cli_disable_tracing_default_openai_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model is None
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert provider_config is None
+        assert disable_tracing is True
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        disable_tracing=True,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
 def test_script_wrapper_accepts_auto_write_arguments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -320,12 +498,16 @@ def test_script_wrapper_accepts_auto_write_arguments(
         model: str | None = None,
         auto_write: bool = False,
         min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
     ) -> IngestionReport:
         assert ingestion_input.evidence
         assert store.list_relations() == []
         assert model is None
         assert auto_write is True
         assert min_write_confidence == 0.91
+        assert provider_config is None
+        assert disable_tracing is False
         return IngestionReport(written_relation_ids=["rel-1"])
 
     monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
@@ -345,6 +527,129 @@ def test_script_wrapper_accepts_auto_write_arguments(
 
     assert exit_code == 0
     assert payload["written_relation_ids"] == ["rel-1"]
+
+
+def test_cli_passes_openai_compatible_provider_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        model: str | None = None,
+        auto_write: bool = False,
+        min_write_confidence: float = 0.85,
+        provider_config: OpenAICompatibleProviderConfig | None = None,
+        disable_tracing: bool = False,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert model == "deepseek-v4-pro"
+        assert auto_write is False
+        assert min_write_confidence == 0.85
+        assert provider_config == OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            default_headers={"X-Test": "yes"},
+            disable_tracing=True,
+        )
+        assert disable_tracing is False
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    stdout = StringIO()
+    stderr = StringIO()
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="deepseek-v4-pro",
+        base_url="https://api.deepseek.com",
+        api_key_env="DEEPSEEK_API_KEY",
+        provider_header=["X-Test=yes"],
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=stderr)
+
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+
+
+@pytest.mark.parametrize(
+    ("args_update", "message"),
+    [
+        ({"base_url": "https://api.deepseek.com", "api_key_env": None}, "--api-key-env"),
+        ({"base_url": None, "api_key_env": "DEEPSEEK_API_KEY"}, "--api-key-env requires"),
+        (
+            {"base_url": None, "api_key_env": None, "provider_header": ["X-Test=yes"]},
+            "--provider-header requires",
+        ),
+        ({"base_url": "https://api.deepseek.com", "provider_header": ["bad"]}, "KEY=VALUE"),
+        ({"base_url": "https://api.deepseek.com", "provider_header": ["X-Test="]}, "non-empty"),
+        ({"base_url": "http://api.deepseek.com"}, "https URL"),
+        (
+            {"base_url": "https://api.deepseek.com", "provider_header": ["Bad Header=yes"]},
+            "HTTP header token",
+        ),
+        (
+            {"base_url": "https://api.deepseek.com", "provider_header": ["X-Test=bad\nvalue"]},
+            "must not contain newlines",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_provider_config(
+    tmp_path: Path,
+    args_update: dict[str, Any],
+    message: str,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    values = {
+        "input": str(input_path),
+        "url": [],
+        "task": None,
+        "question": None,
+        "model": "provider-model",
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "provider_header": [],
+        "disable_tracing": False,
+        "auto_write": False,
+        "min_write_confidence": 0.85,
+        "format": "json",
+        "output": None,
+        "timeout_seconds": 1.0,
+        "max_url_bytes": 1000,
+    }
+    values.update(args_update)
+    stderr = StringIO()
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(
+        argparse.Namespace(**values),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert message in stderr.getvalue()
 
 
 def test_cli_agent_dry_run_invalid_input_returns_nonzero(tmp_path: Path) -> None:
