@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from nesy_reasoning_mcp.config import NesyConfig, load_config
+from nesy_reasoning_mcp.normalization import normalize_relation_edges
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
     ExclusiveGroupInput,
@@ -32,7 +33,6 @@ from nesy_reasoning_mcp.storage.common import (
     _relation_for_store,
     _upsert_relations,
     graph_stats_for,
-    normalize_relation_edges,
 )
 
 

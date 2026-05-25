@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -11,6 +12,7 @@ from threading import RLock
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
 from nesy_reasoning_mcp.config import NesyConfig
+from nesy_reasoning_mcp.normalization import normalize_relation_edges
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
     ExclusiveGroupInput,
@@ -40,11 +42,23 @@ from nesy_reasoning_mcp.storage.common import (
     _relation_from_row,
     _upsert_relations,
     graph_stats_for,
-    normalize_relation_edges,
 )
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_SINGLE_KEY_SYNC_COLUMNS = {
+    "relations": {"id"},
+    "independence_records": {"id"},
+    "context_metadata": {"context_id"},
+    "propositions": {"id"},
+}
+_SYNC_TEMP_TABLES = {
+    "desired_relation_ids",
+    "desired_independence_ids",
+    "desired_context_ids",
+    "desired_proposition_ids",
+}
 
 
 def _locked(
@@ -92,6 +106,12 @@ def _require_unique(values: Iterable[str], label: str) -> None:
         if value in seen:
             raise ValueError(f"duplicate {label}: {value}")
         seen.add(value)
+
+
+def _checked_identifier(value: str, allowed: set[str], label: str) -> str:
+    if value not in allowed:
+        raise ValueError(f"unsupported SQL {label}: {value}")
+    return value
 
 
 class SqliteRelationStore:
@@ -629,6 +649,8 @@ class SqliteRelationStore:
               ON relations (source, target);
             CREATE INDEX IF NOT EXISTS idx_relations_created_id
               ON relations (created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_relations_domain
+              ON relations (json_extract(metadata_json, '$.domain'));
             """
         )
         self._ensure_relation_identity_columns()
@@ -824,58 +846,76 @@ class SqliteRelationStore:
         desired_keys: list[str],
         temp_table: str,
     ) -> None:
-        self._conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {temp_table} (value TEXT PRIMARY KEY)")
-        self._conn.execute(f"DELETE FROM {temp_table}")
-        self._conn.executemany(
-            f"INSERT INTO {temp_table} (value) VALUES (?)",
-            [(key,) for key in desired_keys],
+        table = _checked_identifier(table, set(_SINGLE_KEY_SYNC_COLUMNS), "table")
+        key_column = _checked_identifier(
+            key_column,
+            _SINGLE_KEY_SYNC_COLUMNS[table],
+            "column",
         )
-        self._conn.execute(
-            f"""
-            DELETE FROM {table}
-            WHERE NOT EXISTS (
-              SELECT 1 FROM {temp_table}
-              WHERE {temp_table}.value = {table}.{key_column}
+        temp_table = _checked_identifier(temp_table, _SYNC_TEMP_TABLES, "temp table")
+        try:
+            self._conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            self._conn.execute(f"CREATE TEMP TABLE {temp_table} (value TEXT PRIMARY KEY)")
+            self._conn.executemany(
+                f"INSERT INTO {temp_table} (value) VALUES (?)",
+                [(key,) for key in desired_keys],
             )
-            """
-        )
+            self._conn.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM {temp_table}
+                  WHERE {temp_table}.value = {table}.{key_column}
+                )
+                """
+            )
+        finally:
+            with suppress(sqlite3.Error):
+                self._conn.execute(f"DROP TABLE {temp_table}")
 
     def _sync_exclusive_groups(self, records: list[ExclusiveGroupRecord]) -> None:
-        self._conn.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS desired_exclusive_group_rows (
-              group_id TEXT NOT NULL,
-              member TEXT NOT NULL,
-              context_id TEXT NOT NULL,
-              store_id TEXT NOT NULL,
-              PRIMARY KEY (group_id, member, context_id, store_id)
+        temp_table = "desired_exclusive_group_rows"
+        try:
+            self._conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            self._conn.execute(
+                """
+                CREATE TEMP TABLE desired_exclusive_group_rows (
+                  group_id TEXT NOT NULL,
+                  member TEXT NOT NULL,
+                  context_id TEXT NOT NULL,
+                  store_id TEXT NOT NULL,
+                  PRIMARY KEY (group_id, member, context_id, store_id)
+                )
+                """
             )
-            """
-        )
-        self._conn.execute("DELETE FROM desired_exclusive_group_rows")
-        self._conn.executemany(
-            """
-            INSERT INTO desired_exclusive_group_rows (group_id, member, context_id, store_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            [
-                (record.group_id, member, record.context_id, record.store_id)
-                for record in records
-                for member in record.members
-            ],
-        )
-        self._conn.execute(
-            """
-            DELETE FROM exclusive_groups
-            WHERE NOT EXISTS (
-              SELECT 1 FROM desired_exclusive_group_rows desired
-              WHERE desired.group_id = exclusive_groups.group_id
-                AND desired.member = exclusive_groups.member
-                AND desired.context_id = exclusive_groups.context_id
-                AND desired.store_id = exclusive_groups.store_id
+            self._conn.executemany(
+                """
+                INSERT INTO desired_exclusive_group_rows (
+                    group_id, member, context_id, store_id
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (record.group_id, member, record.context_id, record.store_id)
+                    for record in records
+                    for member in record.members
+                ],
             )
-            """
-        )
+            self._conn.execute(
+                """
+                DELETE FROM exclusive_groups
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM desired_exclusive_group_rows desired
+                  WHERE desired.group_id = exclusive_groups.group_id
+                    AND desired.member = exclusive_groups.member
+                    AND desired.context_id = exclusive_groups.context_id
+                    AND desired.store_id = exclusive_groups.store_id
+                )
+                """
+            )
+        finally:
+            with suppress(sqlite3.Error):
+                self._conn.execute(f"DROP TABLE {temp_table}")
 
     def _upsert_relation_records(self, records: Iterable[RelationRecord]) -> None:
         self._conn.executemany(

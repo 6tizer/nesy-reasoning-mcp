@@ -9,6 +9,7 @@ from typing import Any
 
 import networkx as nx
 
+from nesy_reasoning_mcp.normalization import normalize_relation_edges
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
     Classification,
@@ -22,7 +23,6 @@ from nesy_reasoning_mcp.schemas import (
     RelationRecord,
     RelationType,
 )
-from nesy_reasoning_mcp.storage.common import normalize_relation_edges
 from nesy_reasoning_mcp.store import graph_stats_for
 from nesy_reasoning_mcp.time_utils import parse_datetime_value
 

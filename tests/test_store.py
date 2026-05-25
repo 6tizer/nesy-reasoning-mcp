@@ -451,6 +451,97 @@ def test_sqlite_list_relations_filters_in_sql(tmp_path) -> None:
     assert "LIMIT 1 OFFSET 0" in select_sql
 
 
+def test_sqlite_domain_filter_uses_expression_index(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    plan = store._conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT id FROM relations
+        WHERE json_extract(metadata_json, '$.domain') = ?
+        """,
+        ("finance",),
+    ).fetchall()
+
+    assert any("idx_relations_domain" in row["detail"] for row in plan)
+
+
+def test_sqlite_sync_rejects_unapproved_identifiers(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    try:
+        store._sync_single_key_table(
+            "relations; DROP TABLE relations", "id", [], "desired_relation_ids"
+        )
+    except ValueError as exc:
+        assert "unsupported SQL table" in str(exc)
+    else:
+        raise AssertionError("expected unsafe identifier to be rejected")
+
+
+def test_sqlite_replace_store_differential_sync_deletes_missing_rows_and_cleans_temp(
+    tmp_path,
+) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.assert_relations(
+        [
+            RelationInput(
+                id="rel_keep",
+                source="A",
+                target="B",
+                relation_type=RelationType.SUFFICIENT,
+            ),
+            RelationInput(
+                id="rel_remove",
+                source="C",
+                target="D",
+                relation_type=RelationType.SUFFICIENT,
+            ),
+            RelationInput(
+                id="rel_other_store",
+                source="E",
+                target="F",
+                relation_type=RelationType.SUFFICIENT,
+                store_id="other",
+            ),
+        ]
+    )
+
+    store.import_records(
+        [
+            RelationRecord(
+                id="rel_keep",
+                source="A",
+                target="Updated B",
+                relation_type=RelationType.NECESSARY,
+            )
+        ],
+        [],
+        mode="replace_store",
+        store_id="default",
+    )
+
+    listed = store.list_relations()
+    temp_tables = store._conn.execute(
+        "SELECT name FROM sqlite_temp_master WHERE type = 'table'"
+    ).fetchall()
+
+    assert sorted((relation.id, relation.target, relation.store_id) for relation in listed) == [
+        ("rel_keep", "Updated B", "default"),
+        ("rel_other_store", "F", "other"),
+    ]
+    assert temp_tables == []
+
+
 def test_sqlite_store_allows_concurrent_assert_and_list(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))

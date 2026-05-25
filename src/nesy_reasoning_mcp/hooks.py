@@ -243,6 +243,11 @@ def _run_hook_with_timeout(
 
 
 def _run_with_signal_timeout(action, timeout_seconds: float) -> None:
+    """Run a hook action with Unix SIGALRM timeout when available.
+
+    On platforms without SIGALRM/setitimer, run without a hard timeout rather than
+    using threads that cannot safely stop stdout writes from a stuck hook.
+    """
     if not _supports_signal_timeout():
         action()
         return
