@@ -35,14 +35,18 @@ def _review(
     *,
     decision: str = "approve",
     confidence: float = 0.9,
+    reviewer_model: str | None = None,
+    relation_type: str = "sufficient",
 ) -> dict[str, Any]:
     review: dict[str, Any] = {
         "candidate_id": candidate_id,
         "decision": decision,
         "reasons": ["Evidence directly supports the relation."],
     }
+    if reviewer_model is not None:
+        review["reviewer_model"] = reviewer_model
     if decision in {"approve", "downgrade"}:
-        review["final_relation_type"] = "sufficient"
+        review["final_relation_type"] = relation_type
         review["final_confidence"] = confidence
     return review
 
@@ -263,3 +267,68 @@ async def test_validate_candidate_relations_uses_ephemeral_proposition_overlay()
         "targets"
     ] == ["profit_up", "profit_not_up"]
     assert store.list_propositions() == []
+
+
+@pytest.mark.asyncio
+async def test_validate_candidate_relations_majority_votes_and_reports_aggregation() -> None:
+    result = await call_tool(
+        VALIDATE_CANDIDATE_RELATIONS,
+        {
+            "candidates": [_candidate()],
+            "reviews": [
+                _review(reviewer_model="reviewer-a", confidence=0.91),
+                _review(reviewer_model="reviewer-b", confidence=0.87),
+                _review(reviewer_model="reviewer-c", decision="needs_human"),
+            ],
+            "voting_policy": "majority",
+        },
+        RelationStore(),
+    )
+
+    assert result.structuredContent["approved_count"] == 1
+    assert result.structuredContent["gate_results"][0]["action"] == "auto_write"
+    aggregation = result.structuredContent["review_aggregation"]
+    assert aggregation["policy"] == "majority"
+    assert aggregation["candidates"][0]["review_count"] == 3
+    assert aggregation["candidates"][0]["agreement"] is False
+
+
+@pytest.mark.asyncio
+async def test_validate_candidate_relations_disagreement_queues_candidate() -> None:
+    result = await call_tool(
+        VALIDATE_CANDIDATE_RELATIONS,
+        {
+            "candidates": [_candidate()],
+            "reviews": [
+                _review(reviewer_model="reviewer-a"),
+                _review(reviewer_model="reviewer-b", relation_type="necessary"),
+            ],
+            "voting_policy": "unanimous",
+        },
+        RelationStore(),
+    )
+
+    assert result.structuredContent["approved_count"] == 0
+    assert result.structuredContent["queued_count"] == 1
+    assert result.structuredContent["gate_results"][0]["action"] == "queue"
+
+
+@pytest.mark.asyncio
+async def test_validate_candidate_relations_high_priority_reject_blocks_candidate() -> None:
+    result = await call_tool(
+        VALIDATE_CANDIDATE_RELATIONS,
+        {
+            "candidates": [_candidate()],
+            "reviews": [
+                _review(reviewer_model="senior", decision="reject"),
+                _review(reviewer_model="reviewer-a"),
+                _review(reviewer_model="reviewer-b"),
+            ],
+            "high_priority_reviewer_models": ["senior"],
+        },
+        RelationStore(),
+    )
+
+    assert result.structuredContent["approved_count"] == 0
+    assert result.structuredContent["rejected_count"] == 1
+    assert result.structuredContent["gate_results"][0]["action"] == "reject"

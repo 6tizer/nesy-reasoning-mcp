@@ -29,7 +29,11 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
     get_provider_entry,
     list_provider_entries,
 )
-from nesy_reasoning_mcp.auto_ingest.schemas import IngestionInput, IngestionReport
+from nesy_reasoning_mcp.auto_ingest.schemas import (
+    IngestionInput,
+    IngestionReport,
+    ReviewVotingPolicy,
+)
 from nesy_reasoning_mcp.config import load_config
 from nesy_reasoning_mcp.store import create_relation_store
 from nesy_reasoning_mcp.tool_names import (
@@ -68,6 +72,26 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=None, help="Optional extraction task.")
     parser.add_argument("--question", default=None, help="Optional question to answer.")
     parser.add_argument("--model", default=None, help="OpenAI Agents SDK model override.")
+    parser.add_argument(
+        "--reviewer-model",
+        action="append",
+        default=[],
+        dest="reviewer_models",
+        help="Reviewer model override. May be repeated for multi-reviewer voting.",
+    )
+    parser.add_argument(
+        "--voting-policy",
+        choices=[policy.value for policy in ReviewVotingPolicy],
+        default=ReviewVotingPolicy.RISK_TIERED.value,
+        help="Policy for aggregating multiple reviewer decisions.",
+    )
+    parser.add_argument(
+        "--high-priority-reviewer-model",
+        action="append",
+        default=[],
+        dest="high_priority_reviewer_models",
+        help="Reviewer model whose reject or needs_human/downgrade vote has priority.",
+    )
     parser.add_argument(
         "--provider",
         default=None,
@@ -245,6 +269,11 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         effective_input,
         store=store,
         model=model,
+        reviewer_models=getattr(args, "reviewer_models", []),
+        voting_policy=ReviewVotingPolicy(
+            getattr(args, "voting_policy", ReviewVotingPolicy.RISK_TIERED.value)
+        ),
+        high_priority_reviewer_models=getattr(args, "high_priority_reviewer_models", []),
         auto_write=args.auto_write,
         min_write_confidence=args.min_write_confidence,
         provider_config=provider_config,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
+from nesy_reasoning_mcp.auto_ingest.review_voting import aggregate_review_decisions
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     GateAction,
     GateResult,
@@ -21,9 +22,15 @@ async def validate_candidate_relations(
 ) -> dict[str, Any]:
     """Validate reviewed candidate relations without writing durable graph state."""
     payload = ValidateCandidateRelationsInput.model_validate(arguments)
-    gate_results, approved_relations, diagnostics, candidate_reasoning = await run_dry_run_gate(
+    aggregation = aggregate_review_decisions(
         candidates=payload.candidates,
         reviews=payload.reviews,
+        policy=payload.voting_policy,
+        high_priority_reviewer_models=payload.high_priority_reviewer_models,
+    )
+    gate_results, approved_relations, diagnostics, candidate_reasoning = await run_dry_run_gate(
+        candidates=payload.candidates,
+        reviews=aggregation.gate_reviews,
         store=store,
         min_write_confidence=payload.min_write_confidence,
         write_enabled=True,
@@ -32,6 +39,7 @@ async def validate_candidate_relations(
         max_depth=payload.max_depth,
         min_confidence=payload.min_confidence,
     )
+    diagnostics = [*aggregation.diagnostics, *diagnostics]
 
     combined_reasoning: dict[str, Any] = {}
     if approved_relations:
@@ -78,6 +86,7 @@ async def validate_candidate_relations(
         "approved_relations": [
             relation.model_dump(mode="json", exclude_none=True) for relation in approved_relations
         ],
+        "review_aggregation": aggregation.metadata,
         "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
         "reasoning": reasoning,
         "graph_stats": _graph_stats(reasoning, store),

@@ -56,6 +56,8 @@ The shared schema module is `nesy_reasoning_mcp.auto_ingest`.
   evidence.
 - `ReviewDecision`: reviewer decision, final relation type, confidence, reasons,
   and risk flags.
+- `ReviewVotingPolicy`: multi-reviewer aggregation policy: `risk_tiered`,
+  `unanimous`, or `majority`.
 - `GateResult`: deterministic gate action: `auto_write`, `queue`, or `reject`.
 - `IngestionReport`: run-level report with candidates, reviews, gate results,
   approved relation inputs, diagnostics, and metadata.
@@ -84,10 +86,11 @@ nesy.validate_candidate_relations
 ```
 
 This helper accepts reviewed `CandidateRelation` records, optional
-`ReviewDecision` records, and optional one-call proposition overlays. It runs
-the deterministic gate, checks the candidate set for contradictions, then checks
-the approved candidates against the current graph in combined mode. It always
-returns `persisted=false`.
+`ReviewDecision` records, optional one-call proposition overlays, and optional
+multi-reviewer voting policy fields. It aggregates multiple reviews by
+candidate ID, runs the deterministic gate, checks the candidate set for
+contradictions, then checks the approved candidates against the current graph in
+combined mode. It always returns `persisted=false`.
 
 Safe write mode may additionally use:
 
@@ -104,8 +107,8 @@ The ingestion runtime does not call `nesy.load_relations`.
 `nesy.validate_candidate_relations` is not an ingestion runtime. It does not call
 the Agent SDK, fetch URLs, store a review queue, or write graph memory. Its
 output is a validation report with candidate counts, `gate_results`,
-`approved_relations`, diagnostics, reasoning details, graph stats, and trace
-metadata.
+`approved_relations`, `review_aggregation`, diagnostics, reasoning details,
+graph stats, and trace metadata.
 
 ## Dry-Run CLI Prototype
 
@@ -131,6 +134,24 @@ The script wrapper calls the same implementation:
 OPENAI_API_KEY=... uv run python scripts/agent_ingest_openai.py \
   --input examples/research-evidence.json
 ```
+
+Reviewer voting is enabled by repeating `--reviewer-model`:
+
+```bash
+OPENAI_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --model gpt-4.1-mini \
+  --reviewer-model gpt-4.1 \
+  --reviewer-model gpt-4.1-mini \
+  --voting-policy risk_tiered \
+  --high-priority-reviewer-model gpt-4.1
+```
+
+If no reviewer model is provided, the runtime uses one reviewer with the
+extractor model and preserves the previous single-reviewer behavior. Individual
+review decisions stay in `IngestionReport.reviews`; the selected aggregate
+review is passed to the deterministic gate, and audit details are stored under
+`metadata.review_aggregation`.
 
 Known OpenAI-compatible Chat Completions providers can use registry shortcuts.
 API keys are read only from environment variables, not CLI plaintext arguments:
@@ -203,10 +224,11 @@ URLs are fetched, each with timeout and max-byte limits. Local URLs such as
 `file://`, `localhost`, and loopback/private IPs are rejected. The command does
 not search, crawl links, build embeddings, or write durable graph memory.
 
-The prototype runs extractor and reviewer agents, then runs the deterministic
-dry-run gate through NeSy read-only tools. The output is always an
-`IngestionReport`. Approved relations appear in the report only; they are not
-stored. CI tests mock the Agent SDK runner and do not call external APIs.
+The prototype runs extractor and reviewer agents, aggregates reviewer votes
+when needed, then runs the deterministic dry-run gate through NeSy read-only
+tools. The output is always an `IngestionReport`. Approved relations appear in
+the report only; they are not stored. CI tests mock the Agent SDK runner and do
+not call external APIs.
 
 ## Safe Write Mode
 

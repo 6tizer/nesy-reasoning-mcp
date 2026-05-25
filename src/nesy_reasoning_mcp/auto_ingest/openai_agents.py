@@ -12,13 +12,17 @@ from typing import Any
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
+from nesy_reasoning_mcp.auto_ingest.review_voting import aggregate_review_decisions
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelationBatch,
     IngestionInput,
     IngestionMode,
     IngestionReport,
+    ReviewDecision,
     ReviewDecisionBatch,
+    ReviewVotingPolicy,
 )
+from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
@@ -51,6 +55,9 @@ async def run_openai_agents_dry_run(
     *,
     store: RelationStoreProtocol,
     model: str | None = None,
+    reviewer_models: list[str] | None = None,
+    voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED,
+    high_priority_reviewer_models: list[str] | None = None,
     env: Mapping[str, str] | None = None,
     run_agent: AgentRunner | None = None,
     provider_config: OpenAICompatibleProviderConfig | None = None,
@@ -61,6 +68,9 @@ async def run_openai_agents_dry_run(
         ingestion_input,
         store=store,
         model=model,
+        reviewer_models=reviewer_models,
+        voting_policy=voting_policy,
+        high_priority_reviewer_models=high_priority_reviewer_models,
         env=env,
         run_agent=run_agent,
         provider_config=provider_config,
@@ -74,6 +84,9 @@ async def run_openai_agents_ingestion(
     *,
     store: RelationStoreProtocol,
     model: str | None = None,
+    reviewer_models: list[str] | None = None,
+    voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED,
+    high_priority_reviewer_models: list[str] | None = None,
     env: Mapping[str, str] | None = None,
     run_agent: AgentRunner | None = None,
     auto_write: bool = False,
@@ -85,8 +98,12 @@ async def run_openai_agents_ingestion(
     if not 0 <= min_write_confidence <= 1:
         raise OpenAIAgentsDryRunError("min_write_confidence must be between 0 and 1")
     runtime_env = env if env is not None else os.environ
+    base_model_name = model or runtime_env.get("OPENAI_DEFAULT_MODEL")
+    voting_policy = ReviewVotingPolicy(voting_policy)
+    reviewer_model_names = _reviewer_model_names(reviewer_models, base_model_name)
+    high_priority_models = _dedupe_model_names(high_priority_reviewer_models or [])
     agent_model = _agent_model(
-        model or runtime_env.get("OPENAI_DEFAULT_MODEL"),
+        base_model_name,
         provider_config,
         runtime_env,
     )
@@ -112,27 +129,48 @@ async def run_openai_agents_ingestion(
     )
     candidate_batch = _coerce_candidate_batch(extraction_output)
 
-    reviewer = _build_agent(
-        name="NeSy relation reviewer",
-        instructions=_REVIEWER_INSTRUCTIONS,
-        output_type=ReviewDecisionBatch,
-        model=agent_model,
+    reviews: list[ReviewDecision] = []
+    for reviewer_model_name in reviewer_model_names:
+        reviewer_agent_model = (
+            agent_model
+            if reviewer_model_name == base_model_name
+            else _agent_model(reviewer_model_name, provider_config, runtime_env)
+        )
+        reviewer = _build_agent(
+            name=_reviewer_agent_name(reviewer_model_name),
+            instructions=_REVIEWER_INSTRUCTIONS,
+            output_type=ReviewDecisionBatch,
+            model=reviewer_agent_model,
+        )
+        review_output = await _run_agent_with_optional_runner(
+            run_agent,
+            reviewer,
+            _review_prompt(ingestion_input, candidate_batch),
+            tracing_disabled=tracing_disabled,
+        )
+        review_batch = _coerce_review_batch(review_output)
+        reviews.extend(_reviews_with_model(review_batch.reviews, reviewer_model_name))
+
+    aggregation = aggregate_review_decisions(
+        candidates=candidate_batch.candidates,
+        reviews=reviews,
+        policy=voting_policy,
+        high_priority_reviewer_models=high_priority_models,
+        expected_reviewer_models=[
+            reviewer_model_name
+            for reviewer_model_name in reviewer_model_names
+            if reviewer_model_name is not None
+        ],
     )
-    review_output = await _run_agent_with_optional_runner(
-        run_agent,
-        reviewer,
-        _review_prompt(ingestion_input, candidate_batch),
-        tracing_disabled=tracing_disabled,
-    )
-    review_batch = _coerce_review_batch(review_output)
 
     gate_results, approved_relations, diagnostics, reasoning = await run_dry_run_gate(
         candidates=candidate_batch.candidates,
-        reviews=review_batch.reviews,
+        reviews=aggregation.gate_reviews,
         store=store,
         min_write_confidence=min_write_confidence if auto_write else 0.0,
         write_enabled=auto_write,
     )
+    diagnostics = [*aggregation.diagnostics, *diagnostics]
     written_relation_ids: list[str] = []
     write_result: dict[str, Any] = {}
     if auto_write and approved_relations:
@@ -145,7 +183,7 @@ async def run_openai_agents_ingestion(
     report = IngestionReport(
         mode=IngestionMode.WRITE if auto_write else IngestionMode.DRY_RUN,
         candidates=candidate_batch.candidates,
-        reviews=review_batch.reviews,
+        reviews=aggregation.audit_reviews,
         gate_results=gate_results,
         approved_relations=approved_relations,
         written_relation_ids=written_relation_ids,
@@ -157,6 +195,13 @@ async def run_openai_agents_ingestion(
             "evidence_count": len(ingestion_input.evidence),
             "url_count": len(ingestion_input.urls),
             "reasoning": reasoning,
+            "review_aggregation": {
+                **aggregation.metadata,
+                "aggregate_reviews": [
+                    review.model_dump(mode="json", exclude_none=True)
+                    for review in aggregation.gate_reviews
+                ],
+            },
             "write_result": write_result,
             "provider": _provider_metadata(provider_config, tracing_disabled),
         },
@@ -278,6 +323,49 @@ def _provider_metadata(
         "header_keys": sorted(provider_config.default_headers),
         "tracing_disabled": disable_tracing or provider_config.disable_tracing,
     }
+
+
+def _reviewer_model_names(
+    reviewer_models: list[str] | None,
+    default_model: str | None,
+) -> list[str | None]:
+    normalized = _dedupe_model_names(reviewer_models or [])
+    if normalized:
+        reviewer_names: list[str | None] = [*normalized]
+        return reviewer_names
+    return [default_model]
+
+
+def _dedupe_model_names(values: list[str]) -> list[str]:
+    return dedupe_non_empty_text(values)
+
+
+def _reviewer_agent_name(reviewer_model_name: str | None) -> str:
+    if reviewer_model_name is None:
+        return "NeSy relation reviewer"
+    return f"NeSy relation reviewer ({reviewer_model_name})"
+
+
+def _reviews_with_model(
+    reviews: list[ReviewDecision],
+    reviewer_model_name: str | None,
+) -> list[ReviewDecision]:
+    if reviewer_model_name is None:
+        return reviews
+    normalized: list[ReviewDecision] = []
+    for review in reviews:
+        metadata = dict(review.metadata)
+        if review.reviewer_model and review.reviewer_model != reviewer_model_name:
+            metadata["reported_reviewer_model"] = review.reviewer_model
+        normalized.append(
+            review.model_copy(
+                update={
+                    "reviewer_model": reviewer_model_name,
+                    "metadata": metadata,
+                }
+            )
+        )
+    return normalized
 
 
 async def _run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:

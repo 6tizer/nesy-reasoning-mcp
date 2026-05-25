@@ -148,6 +148,48 @@ async def test_auto_write_queues_low_confidence_without_writing(
     assert store.list_relations() == []
 
 
+async def test_auto_write_queues_voting_disagreement_with_audit_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"], model=kwargs["model"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        decision = (
+            ReviewDecisionValue.APPROVE
+            if agent.model == "reviewer-a"
+            else ReviewDecisionValue.NEEDS_HUMAN
+        )
+        review = _review(candidate, decision=decision)
+        return {"reviews": [review.model_dump(mode="json", exclude_none=True)]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+    store = RelationStore()
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="extractor-model",
+        reviewer_models=["reviewer-a", "reviewer-b"],
+        voting_policy=openai_agents.ReviewVotingPolicy.MAJORITY,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    queued = store.list_review_queue()
+    assert report.gate_results[0].action == "queue"
+    assert len(queued) == 1
+    assert queued[0].review is not None
+    assert queued[0].review.reviewer_model == "aggregate:majority"
+    assert queued[0].run_metadata["metadata"]["review_aggregation"]["policy"] == "majority"
+    assert store.list_relations() == []
+
+
 async def test_ingestion_rejects_invalid_write_threshold() -> None:
     with pytest.raises(OpenAIAgentsDryRunError, match="min_write_confidence"):
         await run_openai_agents_ingestion(

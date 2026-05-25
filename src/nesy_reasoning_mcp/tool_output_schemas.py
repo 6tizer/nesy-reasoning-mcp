@@ -293,6 +293,7 @@ def _validate_candidate_relations_output_schema() -> dict[str, Any]:
             "rejected_count": {"type": "integer"},
             "gate_results": {"type": "array"},
             "approved_relations": {"type": "array"},
+            "review_aggregation": {"type": "object"},
             "reasoning": {"type": "object"},
         }
     )
@@ -308,6 +309,7 @@ def _validate_candidate_relations_output_schema() -> dict[str, Any]:
             "rejected_count",
             "gate_results",
             "approved_relations",
+            "review_aggregation",
             "diagnostics",
             "reasoning",
             "graph_stats",
