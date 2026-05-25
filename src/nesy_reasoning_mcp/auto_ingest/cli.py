@@ -23,6 +23,11 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAICompatibleProviderConfig,
     run_openai_agents_ingestion,
 )
+from nesy_reasoning_mcp.auto_ingest.providers import (
+    ProviderRegistryEntry,
+    get_provider_entry,
+    list_provider_entries,
+)
 from nesy_reasoning_mcp.auto_ingest.schemas import IngestionInput, IngestionReport
 from nesy_reasoning_mcp.config import load_config
 from nesy_reasoning_mcp.store import create_relation_store
@@ -51,6 +56,16 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=None, help="Optional extraction task.")
     parser.add_argument("--question", default=None, help="Optional question to answer.")
     parser.add_argument("--model", default=None, help="OpenAI Agents SDK model override.")
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Known provider shortcut: deepseek, kimi, or openrouter.",
+    )
+    parser.add_argument(
+        "--list-providers",
+        action="store_true",
+        help="List known provider shortcuts and exit.",
+    )
     parser.add_argument(
         "--base-url",
         default=None,
@@ -114,6 +129,9 @@ def run_agent_dry_run_cli(
 ) -> int:
     """Run the OpenAI Agents SDK dry-run CLI command."""
     try:
+        if getattr(args, "list_providers", False):
+            print(_render_provider_list(), file=stdout)
+            return 0
         report = anyio.run(_run_agent_dry_run, args)
     except (OSError, ValueError, ValidationError, OpenAIAgentsDryRunError) as exc:
         print(str(exc), file=stderr)
@@ -139,6 +157,7 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     if not 0 <= args.min_write_confidence <= 1:
         raise ValueError("--min-write-confidence must be between 0 and 1")
     provider_config = _provider_config_from_args(args)
+    model = _model_from_args(args)
     ingestion_input = _load_ingestion_input(args)
     if not ingestion_input.evidence and not ingestion_input.urls:
         raise ValueError("agent-dry-run requires --input evidence or at least one --url")
@@ -157,7 +176,7 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     return await run_openai_agents_ingestion(
         effective_input,
         store=store,
-        model=args.model,
+        model=model,
         auto_write=args.auto_write,
         min_write_confidence=args.min_write_confidence,
         provider_config=provider_config,
@@ -168,14 +187,19 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
 def _provider_config_from_args(
     args: argparse.Namespace,
 ) -> OpenAICompatibleProviderConfig | None:
-    base_url = getattr(args, "base_url", None)
-    api_key_env = getattr(args, "api_key_env", None)
+    provider_entry = _provider_entry_from_args(args)
+    base_url = getattr(args, "base_url", None) or (
+        provider_entry.base_url if provider_entry is not None else None
+    )
+    api_key_env = getattr(args, "api_key_env", None) or (
+        provider_entry.api_key_env if provider_entry is not None else None
+    )
     headers = getattr(args, "provider_header", []) or []
     if not base_url:
         if api_key_env:
             raise ValueError("--api-key-env requires --base-url")
         if headers:
-            raise ValueError("--provider-header requires --base-url")
+            raise ValueError("--provider-header requires --base-url or --provider")
         return None
     if not api_key_env:
         raise ValueError("--api-key-env is required when --base-url is set")
@@ -186,8 +210,25 @@ def _provider_config_from_args(
         default_headers=_parse_provider_headers(headers),
         # OpenAI-compatible providers do not participate in OpenAI tracing.
         # Keep this disabled by default to avoid sending third-party runs to tracing.
-        disable_tracing=True,
+        disable_tracing=provider_entry.tracing_disabled if provider_entry is not None else True,
     )
+
+
+def _provider_entry_from_args(args: argparse.Namespace) -> ProviderRegistryEntry | None:
+    provider_name = getattr(args, "provider", None)
+    if provider_name is None:
+        return None
+    return get_provider_entry(provider_name)
+
+
+def _model_from_args(args: argparse.Namespace) -> str | None:
+    model = getattr(args, "model", None)
+    if model is not None:
+        return model
+    provider_entry = _provider_entry_from_args(args)
+    if provider_entry is None:
+        return None
+    return provider_entry.default_model
 
 
 def _validate_provider_base_url(base_url: str) -> None:
@@ -212,6 +253,25 @@ def _parse_provider_headers(values: list[str]) -> dict[str, str]:
             raise ValueError("--provider-header value must not contain newlines")
         headers[key] = header_value
     return headers
+
+
+def _render_provider_list() -> str:
+    rows = [
+        "provider\tbase_url\tapi_key_env\tdefault_model\tdocs_url",
+        *[
+            "\t".join(
+                [
+                    entry.name,
+                    entry.base_url,
+                    entry.api_key_env,
+                    entry.default_model or "-",
+                    entry.docs_url,
+                ]
+            )
+            for entry in list_provider_entries()
+        ],
+    ]
+    return "\n".join(rows)
 
 
 def _load_ingestion_input(args: argparse.Namespace) -> IngestionInput:

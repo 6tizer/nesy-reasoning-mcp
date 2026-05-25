@@ -127,9 +127,38 @@ OPENAI_API_KEY=... uv run python scripts/agent_ingest_openai.py \
   --input examples/research-evidence.json
 ```
 
-OpenAI-compatible Chat Completions providers use the generic provider flags.
-API keys are read only from environment variables, not CLI plaintext arguments.
-Provider base URLs must be HTTPS:
+Known OpenAI-compatible Chat Completions providers can use registry shortcuts.
+API keys are read only from environment variables, not CLI plaintext arguments:
+
+```bash
+DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --provider deepseek \
+  --format json
+```
+
+```bash
+MOONSHOT_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --provider kimi \
+  --format json
+```
+
+```bash
+OPENROUTER_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
+  --input examples/research-evidence.json \
+  --provider openrouter \
+  --model openai/gpt-latest \
+  --provider-header 'HTTP-Referer=https://github.com/6tizer/nesy-reasoning-mcp' \
+  --provider-header 'X-OpenRouter-Title=NeSy Reasoning MCP' \
+  --format json
+```
+
+Use `--list-providers` to inspect built-in shortcuts. The registry is static
+code and documentation, not a writable provider database.
+
+Advanced integrations can still pass explicit generic flags. Provider base URLs
+must be HTTPS:
 
 ```bash
 DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
@@ -140,32 +169,12 @@ DEEPSEEK_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-ru
   --format json
 ```
 
-```bash
-MOONSHOT_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
-  --input examples/research-evidence.json \
-  --model kimi-k2.6 \
-  --base-url https://api.moonshot.cn/v1 \
-  --api-key-env MOONSHOT_API_KEY \
-  --format json
-```
-
-```bash
-OPENROUTER_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-run \
-  --input examples/research-evidence.json \
-  --model openai/gpt-latest \
-  --base-url https://openrouter.ai/api/v1 \
-  --api-key-env OPENROUTER_API_KEY \
-  --provider-header 'HTTP-Referer=https://github.com/6tizer/nesy-reasoning-mcp' \
-  --provider-header 'X-OpenRouter-Title=NeSy Reasoning MCP' \
-  --format json
-```
-
-When `--base-url` is set, tracing is disabled by default for that run because
-third-party provider calls should not be sent to OpenAI tracing. The runtime
-uses `OpenAIChatCompletionsModel` with an `AsyncOpenAI` client. Provider
-metadata in the report intentionally omits API-key environment names and base
-URLs. Provider shortcuts such as `--provider deepseek` are intentionally left to
-a later provider-registry PR.
+When `--provider` or `--base-url` is set, tracing is disabled by default for
+that run because third-party provider calls should not be sent to OpenAI
+tracing. The runtime uses `OpenAIChatCompletionsModel` with an `AsyncOpenAI`
+client. Provider metadata in the report intentionally omits API-key environment
+names and base URLs. LiteLLM, Ollama, and Claude Agent SDK adapters are separate
+future work.
 
 JSON input accepts:
 
