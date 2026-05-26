@@ -12,6 +12,10 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewDecision,
     ReviewDecisionValue,
 )
+from nesy_reasoning_mcp.auto_ingest.semantic_dedupe import (
+    SemanticDuplicateConcern,
+    semantic_duplicate_concerns,
+)
 from nesy_reasoning_mcp.normalization import normalized_implication_preview
 from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord, RelationInput, RelationType
 from nesy_reasoning_mcp.store import RelationStoreProtocol
@@ -112,9 +116,11 @@ async def run_dry_run_gate(
             continue
         approved_candidates.append((candidate, review))
 
-    approved_relations = [
-        _relation_from_review(candidate, review) for candidate, review in approved_candidates
+    approved_relation_items = [
+        (candidate, review, _relation_from_review(candidate, review))
+        for candidate, review in approved_candidates
     ]
+    approved_relations = [relation for _candidate, _review, relation in approved_relation_items]
     diagnostics: list[Diagnostic] = []
     reasoning: dict[str, Any] = {}
     hard_contradiction = False
@@ -133,7 +139,17 @@ async def run_dry_run_gate(
     else:
         reasoning_failed = False
 
-    for candidate, review in approved_candidates:
+    semantic_duplicates = _semantic_duplicate_concerns_by_candidate(
+        approved_relation_items,
+        store=store,
+        propositions=propositions or [],
+        enabled=write_enabled and not reasoning_failed and not hard_contradiction,
+    )
+    diagnostics.extend(
+        _semantic_duplicate_diagnostics(semantic_duplicates, approved_relation_items)
+    )
+
+    for candidate, review, _relation in approved_relation_items:
         if reasoning_failed:
             gate_results.append(
                 GateResult(
@@ -154,6 +170,20 @@ async def run_dry_run_gate(
                 )
             )
             continue
+        semantic_duplicate = semantic_duplicates.get(candidate.id)
+        if semantic_duplicate is not None:
+            gate_results.append(
+                GateResult(
+                    candidate_id=candidate.id,
+                    action=GateAction.QUEUE,
+                    reasons=["likely semantic duplicate relation requires human review"],
+                    metadata={
+                        "review_reasons": review.reasons,
+                        "semantic_duplicate": semantic_duplicate.to_metadata(),
+                    },
+                )
+            )
+            continue
         gate_results.append(
             GateResult(
                 candidate_id=candidate.id,
@@ -167,8 +197,62 @@ async def run_dry_run_gate(
             )
         )
 
-    durable_approved = [] if hard_contradiction or reasoning_failed else approved_relations
+    durable_approved = (
+        []
+        if hard_contradiction or reasoning_failed
+        else [
+            relation
+            for candidate, _review, relation in approved_relation_items
+            if candidate.id not in semantic_duplicates
+        ]
+    )
     return gate_results, durable_approved, diagnostics, reasoning
+
+
+def _semantic_duplicate_concerns_by_candidate(
+    approved_relation_items: list[tuple[CandidateRelation, ReviewDecision, RelationInput]],
+    *,
+    store: RelationStoreProtocol,
+    propositions: list[PropositionRecord],
+    enabled: bool,
+) -> dict[str, SemanticDuplicateConcern]:
+    if not enabled or not approved_relation_items:
+        return {}
+    concerns = semantic_duplicate_concerns(
+        relations=[relation for _candidate, _review, relation in approved_relation_items],
+        existing_relations=store.list_relations(),
+        propositions=[*store.list_propositions(), *propositions],
+    )
+    return {
+        candidate.id: concern
+        for (candidate, _review, _relation), concern in zip(
+            approved_relation_items,
+            concerns,
+            strict=True,
+        )
+        if concern is not None
+    }
+
+
+def _semantic_duplicate_diagnostics(
+    semantic_duplicates: dict[str, SemanticDuplicateConcern],
+    approved_relation_items: list[tuple[CandidateRelation, ReviewDecision, RelationInput]],
+) -> list[Diagnostic]:
+    candidates = {
+        candidate.id: candidate for candidate, _review, _relation in approved_relation_items
+    }
+    diagnostics: list[Diagnostic] = []
+    for candidate_id, concern in semantic_duplicates.items():
+        candidate = candidates[candidate_id]
+        diagnostics.append(
+            Diagnostic(
+                level="warning",
+                code="SEMANTIC_DUPLICATE_CANDIDATE",
+                message="Candidate is likely a semantic duplicate of existing relation(s).",
+                related_ids=[candidate.id, *concern.existing_relation_ids],
+            )
+        )
+    return diagnostics
 
 
 def _relation_from_review(candidate: CandidateRelation, review: ReviewDecision) -> RelationInput:

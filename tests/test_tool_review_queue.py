@@ -13,6 +13,7 @@ from nesy_reasoning_mcp.auto_ingest import (
     ReviewQueueRecord,
     ReviewQueueStatus,
 )
+from nesy_reasoning_mcp.schemas import RelationInput
 from nesy_reasoning_mcp.store import RelationStore
 from nesy_reasoning_mcp.tools import (
     COMMIT_REVIEWED_RELATIONS,
@@ -154,6 +155,52 @@ async def test_commit_reviewed_relations_reuses_existing_duplicate_relation() ->
     assert len(store.list_relations()) == 1
     assert listed[0].status == ReviewQueueStatus.COMMITTED
     assert listed[0].committed_relation_ids == [existing[0].id]
+
+
+@pytest.mark.asyncio
+async def test_commit_reviewed_relations_blocks_semantic_duplicate() -> None:
+    store = RelationStore()
+    existing, _updated = store.assert_relations(
+        [
+            RelationInput(
+                source="integration tests pass",
+                target="release auto deploys",
+                relation_type="sufficient",
+            )
+        ],
+        mode="append",
+    )
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="integration test passes",
+        target="release is auto-deployed",
+        relation_type="sufficient",
+        confidence=0.9,
+        evidence=[EvidenceRecord(url="https://example.com/source", span="A enables B.")],
+    )
+    store.enqueue_review_queue(
+        [
+            ReviewQueueRecord(
+                id="queue-1",
+                run_id="run-1",
+                candidate=candidate,
+                review=_review(candidate.id),
+                gate_result=GateResult(candidate_id=candidate.id, action=GateAction.QUEUE),
+            )
+        ]
+    )
+
+    result = await call_tool(COMMIT_REVIEWED_RELATIONS, {"ids": ["queue-1"]}, store)
+
+    gate_result = result.structuredContent["validation"]["gate_results"][0]
+    assert result.isError is False
+    assert result.structuredContent["status"] == "warning"
+    assert result.structuredContent["committed_count"] == 0
+    assert gate_result["metadata"]["semantic_duplicate"]["existing_relation_ids"] == [
+        existing[0].id
+    ]
+    assert len(store.list_relations()) == 1
+    assert store.list_review_queue()[0].status == ReviewQueueStatus.PENDING
 
 
 @pytest.mark.asyncio
