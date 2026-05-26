@@ -8,7 +8,6 @@ import os
 import signal
 import sys
 from datetime import UTC, datetime
-from inspect import Parameter, signature
 from pathlib import Path
 from re import fullmatch
 from typing import Any, TextIO
@@ -737,20 +736,7 @@ async def _run_agent_dry_run_with_optional_progress(
     args: argparse.Namespace,
     progress_callback: ProgressCallback,
 ) -> IngestionReport:
-    if _callable_accepts_keyword(_run_agent_dry_run, "progress_callback"):
-        return await _run_agent_dry_run(args, progress_callback=progress_callback)
-    return await _run_agent_dry_run(args)
-
-
-def _callable_accepts_keyword(func: Any, name: str) -> bool:
-    try:
-        parameters = signature(func).parameters
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.kind is Parameter.VAR_KEYWORD or parameter_name == name
-        for parameter_name, parameter in parameters.items()
-    )
+    return await _run_agent_dry_run(args, progress_callback=progress_callback)
 
 
 def _external_retrieval_from_args(args: argparse.Namespace) -> ExternalRetrievalConversion | None:
