@@ -22,8 +22,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - name: Check out repository without GitHub token
+        run: |
+          git init .
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          git fetch --no-tags --depth=1 origin "+${{ github.ref }}:refs/ci-target"
+          git checkout --detach refs/ci-target
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -56,8 +60,12 @@ jobs:
         python-version: ["3.11", "3.13"]
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - name: Check out repository without GitHub token
+        run: |
+          git init .
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          git fetch --no-tags --depth=1 origin "+${{ github.ref }}:refs/ci-target"
+          git checkout --detach refs/ci-target
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -80,8 +88,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - name: Check out repository without GitHub token
+        run: |
+          git init .
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          git fetch --no-tags --depth=1 origin "+${{ github.ref }}:refs/ci-target"
+          git checkout --detach refs/ci-target
 
       - name: Set up Python
         uses: actions/setup-python@v6
