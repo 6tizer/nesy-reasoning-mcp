@@ -409,6 +409,11 @@ tools. The output is always an `IngestionReport`. Approved relations appear in
 the report only; they are not stored. CI tests mock the Agent SDK runner and do
 not call external APIs.
 
+Dry-run skips proposition canonicalization by default to avoid an extra LLM
+call. Pass `--canonicalize-preview` to preview the same proposition
+canonicalization that safe write mode uses; the command still does not write
+graph memory.
+
 ## Safe Write Mode
 
 Safe write mode uses the same command with an explicit flag:

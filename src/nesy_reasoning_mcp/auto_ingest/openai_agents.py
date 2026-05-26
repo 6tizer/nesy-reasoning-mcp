@@ -15,6 +15,12 @@ from typing import Any, TypeVar
 import anyio
 from pydantic import BaseModel, ValidationError
 
+from nesy_reasoning_mcp.auto_ingest.canonicalization import (
+    PropositionCanonicalizationBatch,
+    PropositionCanonicalizationResult,
+    canonicalization_prompt,
+    canonicalize_candidate_relations,
+)
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.providers import ProviderStructuredOutputMode
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
@@ -32,7 +38,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
 from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.normalization import normalized_implication_preview
-from nesy_reasoning_mcp.schemas import Diagnostic
+from nesy_reasoning_mcp.schemas import DEFAULT_STORE_ID, Diagnostic, PropositionRecord
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
 AgentRunner = Callable[..., Awaitable[Any]]
@@ -150,6 +156,7 @@ async def run_openai_agents_dry_run(
     disable_tracing: bool = False,
     runtime_options: LLMRuntimeOptions | None = None,
     progress_callback: ProgressCallback | None = None,
+    canonicalize_preview: bool = False,
 ) -> IngestionReport:
     """Extract, review, and gate candidate relations without persistent writes."""
     return await run_openai_agents_ingestion(
@@ -167,6 +174,7 @@ async def run_openai_agents_dry_run(
         disable_tracing=disable_tracing,
         runtime_options=runtime_options,
         progress_callback=progress_callback,
+        canonicalize_preview=canonicalize_preview,
         auto_write=False,
     )
 
@@ -189,6 +197,7 @@ async def run_openai_agents_ingestion(
     disable_tracing: bool = False,
     runtime_options: LLMRuntimeOptions | None = None,
     progress_callback: ProgressCallback | None = None,
+    canonicalize_preview: bool = False,
 ) -> IngestionReport:
     """Extract, review, gate, and optionally write approved candidate relations."""
     if not 0 <= min_write_confidence <= 1:
@@ -280,6 +289,81 @@ async def run_openai_agents_ingestion(
             diagnostic=_diagnostic_from_stage_error(exc),
         )
 
+    canonicalization_result: PropositionCanonicalizationResult | None = None
+    run_propositions = [*ingestion_input.propositions]
+    if (auto_write or canonicalize_preview) and candidate_batch.candidates:
+        try:
+            canonicalization_result = await _run_auto_write_canonicalization(
+                ingestion_input=ingestion_input,
+                candidate_batch=candidate_batch,
+                store=store,
+                use_json_object_provider=use_json_object_provider,
+                run_chat_completion=run_chat_completion,
+                run_agent=run_agent,
+                provider_config=provider_config,
+                runtime_env=runtime_env,
+                base_model_name=base_model_name,
+                agent_model=agent_model,
+                tracing_disabled=tracing_disabled,
+                runtime_options=runtime_options,
+                runtime_trace=runtime_trace,
+                progress_callback=effective_progress_callback,
+            )
+        except _LLMRuntimeStageError as exc:
+            return _runtime_error_report(
+                ingestion_input=ingestion_input,
+                auto_write=auto_write,
+                provider_config=provider_config,
+                tracing_disabled=tracing_disabled,
+                runtime_trace=runtime_trace,
+                diagnostic=_diagnostic_from_stage_error(exc),
+            )
+        if any(diagnostic.level == "error" for diagnostic in canonicalization_result.diagnostics):
+            return _canonicalization_error_report(
+                ingestion_input=ingestion_input,
+                candidate_batch=candidate_batch,
+                auto_write=auto_write,
+                provider_config=provider_config,
+                tracing_disabled=tracing_disabled,
+                runtime_trace=runtime_trace,
+                canonicalization_result=canonicalization_result,
+            )
+        if auto_write:
+            proposition_import_diagnostics = _validate_canonical_proposition_import(
+                canonicalization_result.propositions,
+                store,
+            )
+            if proposition_import_diagnostics:
+                canonicalization_result = PropositionCanonicalizationResult(
+                    candidates=canonicalization_result.candidates,
+                    propositions=canonicalization_result.propositions,
+                    diagnostics=[
+                        *canonicalization_result.diagnostics,
+                        *proposition_import_diagnostics,
+                    ],
+                    metadata={
+                        **canonicalization_result.metadata,
+                        "diagnostic_count": (
+                            canonicalization_result.metadata.get("diagnostic_count", 0)
+                            + len(proposition_import_diagnostics)
+                        ),
+                    },
+                )
+                return _canonicalization_error_report(
+                    ingestion_input=ingestion_input,
+                    candidate_batch=candidate_batch,
+                    auto_write=auto_write,
+                    provider_config=provider_config,
+                    tracing_disabled=tracing_disabled,
+                    runtime_trace=runtime_trace,
+                    canonicalization_result=canonicalization_result,
+                )
+        candidate_batch = CandidateRelationBatch(candidates=canonicalization_result.candidates)
+        run_propositions = [
+            *run_propositions,
+            *canonicalization_result.propositions,
+        ]
+
     reviewer_results = await _run_reviewer_calls(
         ingestion_input=ingestion_input,
         candidate_batch=candidate_batch,
@@ -330,6 +414,7 @@ async def run_openai_agents_ingestion(
         store=store,
         min_write_confidence=min_write_confidence if auto_write else 0.0,
         write_enabled=auto_write,
+        propositions=run_propositions,
     )
     queued_count = sum(1 for result in gate_results if result.action.value == "queue")
     _emit_progress(
@@ -351,6 +436,18 @@ async def run_openai_agents_ingestion(
             store=store,
         )
         diagnostics = [*diagnostics, *write_diagnostics]
+        if (
+            canonicalization_result is not None
+            and canonicalization_result.propositions
+            and _structured_write_succeeded(write_result)
+        ):
+            store.import_records(
+                [],
+                [],
+                propositions=canonicalization_result.propositions,
+                mode="append",
+                store_id=DEFAULT_STORE_ID,
+            )
 
     report = IngestionReport(
         mode=IngestionMode.WRITE if auto_write else IngestionMode.DRY_RUN,
@@ -375,6 +472,9 @@ async def run_openai_agents_ingestion(
                 ],
             },
             "write_result": write_result,
+            "proposition_canonicalization": (
+                canonicalization_result.metadata if canonicalization_result else {}
+            ),
             "provider": _provider_metadata(provider_config, tracing_disabled),
             "reviewer_providers": _reviewer_provider_metadata(resolved_reviewers),
             "runtime_trace": runtime_trace,
@@ -383,7 +483,7 @@ async def run_openai_agents_ingestion(
     if auto_write:
         queued_records = queued_records_from_report(
             report,
-            propositions=ingestion_input.propositions,
+            propositions=run_propositions,
             context_metadata=ingestion_input.context_metadata,
         )
         if queued_records:
@@ -433,6 +533,83 @@ def _json_stage_runner(
         )
 
     return run
+
+
+async def _run_auto_write_canonicalization(
+    *,
+    ingestion_input: IngestionInput,
+    candidate_batch: CandidateRelationBatch,
+    store: RelationStoreProtocol,
+    use_json_object_provider: bool,
+    run_chat_completion: ChatCompletionRunner | None,
+    run_agent: AgentRunner | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    runtime_env: Mapping[str, str],
+    base_model_name: str | None,
+    agent_model: Any,
+    tracing_disabled: bool,
+    runtime_options: LLMRuntimeOptions,
+    runtime_trace: list[dict[str, Any]],
+    progress_callback: ProgressCallback | None,
+) -> PropositionCanonicalizationResult:
+    known_propositions = _canonicalization_known_propositions(ingestion_input, store)
+    if not known_propositions:
+        return canonicalize_candidate_relations(
+            candidates=candidate_batch.candidates,
+            known_propositions=[],
+        )
+    prompt = canonicalization_prompt(ingestion_input, candidate_batch, known_propositions)
+    if use_json_object_provider:
+        canonicalization_batch = await _run_stage_with_trace(
+            _json_stage_runner(
+                run_chat_completion=run_chat_completion,
+                model=base_model_name,
+                provider_config=provider_config,
+                env=runtime_env,
+                instructions=_CANONICALIZER_INSTRUCTIONS,
+                prompt=prompt,
+                output_type=PropositionCanonicalizationBatch,
+                label="canonicalizer",
+                max_tokens=runtime_options.reviewer_max_tokens,
+            ),
+            stage="canonicalizer",
+            label=_runtime_label("canonicalizer", None, base_model_name),
+            provider=_provider_name(provider_config),
+            model=base_model_name,
+            reviewer_id=None,
+            timeout_seconds=runtime_options.reviewer_timeout_seconds,
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+        )
+    else:
+        canonicalizer = _build_agent(
+            name="NeSy proposition canonicalizer",
+            instructions=_CANONICALIZER_INSTRUCTIONS,
+            output_type=PropositionCanonicalizationBatch,
+            model=agent_model,
+        )
+        canonicalization_output = await _run_stage_with_trace(
+            lambda: _run_agent_with_optional_runner(
+                run_agent,
+                canonicalizer,
+                prompt,
+                tracing_disabled=tracing_disabled,
+            ),
+            stage="canonicalizer",
+            label=_runtime_label("canonicalizer", None, base_model_name),
+            provider=_provider_name(provider_config),
+            model=base_model_name,
+            reviewer_id=None,
+            timeout_seconds=runtime_options.reviewer_timeout_seconds,
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+        )
+        canonicalization_batch = _coerce_canonicalization_batch(canonicalization_output)
+    return canonicalize_candidate_relations(
+        candidates=candidate_batch.candidates,
+        known_propositions=known_propositions,
+        canonicalization=canonicalization_batch,
+    )
 
 
 async def _run_reviewer_calls(
@@ -914,6 +1091,33 @@ def _runtime_error_report(
     )
 
 
+def _canonicalization_error_report(
+    *,
+    ingestion_input: IngestionInput,
+    candidate_batch: CandidateRelationBatch,
+    auto_write: bool,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    tracing_disabled: bool,
+    runtime_trace: list[dict[str, Any]],
+    canonicalization_result: PropositionCanonicalizationResult,
+) -> IngestionReport:
+    return IngestionReport(
+        mode=IngestionMode.WRITE if auto_write else IngestionMode.DRY_RUN,
+        candidates=candidate_batch.candidates,
+        diagnostics=canonicalization_result.diagnostics,
+        metadata={
+            "task": ingestion_input.task,
+            "question": ingestion_input.question,
+            "input_metadata": ingestion_input.metadata,
+            "evidence_count": len(ingestion_input.evidence),
+            "url_count": len(ingestion_input.urls),
+            "provider": _provider_metadata(provider_config, tracing_disabled),
+            "runtime_trace": runtime_trace,
+            "proposition_canonicalization": canonicalization_result.metadata,
+        },
+    )
+
+
 def _runtime_guard_reviews(candidates: list[Any]) -> list[ReviewDecision]:
     return [
         ReviewDecision(
@@ -976,6 +1180,8 @@ def _output_counts(output: Any) -> dict[str, int]:
         return {"candidate_count": len(output.candidates)}
     if isinstance(output, ReviewDecisionBatch):
         return {"review_count": len(output.reviews)}
+    if isinstance(output, PropositionCanonicalizationBatch):
+        return {"proposition_count": len(output.propositions)}
     return {}
 
 
@@ -1139,6 +1345,8 @@ def _json_object_system_prompt(
 def _json_object_example(output_type: type[BaseModel]) -> dict[str, object]:
     if output_type is CandidateRelationBatch:
         return {"candidates": []}
+    if output_type is PropositionCanonicalizationBatch:
+        return {"propositions": []}
     if output_type is ReviewDecisionBatch:
         return {"reviews": []}
     return {}
@@ -1413,6 +1621,65 @@ def _coerce_review_batch(output: Any) -> ReviewDecisionBatch:
     return ReviewDecisionBatch.model_validate(output)
 
 
+def _coerce_canonicalization_batch(output: Any) -> PropositionCanonicalizationBatch:
+    if isinstance(output, PropositionCanonicalizationBatch):
+        return output
+    if isinstance(output, list):
+        return PropositionCanonicalizationBatch(propositions=output)
+    return PropositionCanonicalizationBatch.model_validate(output)
+
+
+def _canonicalization_known_propositions(
+    ingestion_input: IngestionInput,
+    store: RelationStoreProtocol,
+) -> list[PropositionRecord]:
+    merged: dict[str, PropositionRecord] = {}
+    for proposition in [*store.list_propositions(), *ingestion_input.propositions]:
+        current = merged.get(proposition.id)
+        if current is None:
+            merged[proposition.id] = proposition
+            continue
+        aliases = dedupe_non_empty_text([*current.aliases, proposition.label, *proposition.aliases])
+        aliases = [alias for alias in aliases if alias not in {current.id, current.label}]
+        merged[proposition.id] = current.model_copy(
+            update={
+                "aliases": aliases,
+                "metadata": {**current.metadata, **proposition.metadata},
+            }
+        )
+    return list(merged.values())
+
+
+def _structured_write_succeeded(write_result: dict[str, Any]) -> bool:
+    return write_result.get("status") in {"ok", "warning"}
+
+
+def _validate_canonical_proposition_import(
+    propositions: list[PropositionRecord],
+    store: RelationStoreProtocol,
+) -> list[Diagnostic]:
+    if not propositions:
+        return []
+    try:
+        store.import_records(
+            [],
+            [],
+            propositions=propositions,
+            mode="append",
+            store_id=DEFAULT_STORE_ID,
+            dry_run=True,
+        )
+    except ValueError as exc:
+        return [
+            Diagnostic(
+                level="error",
+                code="PROPOSITION_CANONICALIZATION_IMPORT_INVALID",
+                message=str(exc),
+            )
+        ]
+    return []
+
+
 def _extraction_prompt(ingestion_input: IngestionInput) -> str:
     return (
         "Extract only evidence-supported logical relations.\n"
@@ -1481,6 +1748,13 @@ For approve or downgrade, set normalized_implication_supported=true only when ev
 supports every normalized implication edge for the final relation type.
 Prefer reject or needs_human when evidence is weak, ambiguous, or missing.
 Do not approve claims that would require external knowledge not present in the evidence.
+"""
+
+_CANONICALIZER_INSTRUCTIONS = """\
+You canonicalize candidate proposition labels into stable graph nodes.
+Return one proposition group per real proposition and cover every endpoint_ref exactly once.
+Reuse known proposition ids only when the endpoint means the same proposition.
+Do not merge eligibility, possibility, permission, readiness, or capability with the actual event.
 """
 
 _RELATION_DIRECTION_RULES = (

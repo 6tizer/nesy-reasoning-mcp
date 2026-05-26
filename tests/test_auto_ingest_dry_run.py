@@ -35,7 +35,7 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
     get_provider_entry,
     list_provider_entries,
 )
-from nesy_reasoning_mcp.schemas import Diagnostic
+from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord
 from nesy_reasoning_mcp.store import RelationStore
 
 
@@ -812,6 +812,75 @@ async def test_json_object_provider_failure_happens_before_write() -> None:
     assert store.list_review_queue() == []
 
 
+async def test_json_object_auto_write_runs_canonicalizer_before_reviewer() -> None:
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="auto_deploy", label="auto-deploy")],
+        mode="append",
+        store_id="default",
+    )
+    candidate = _candidate(target="release is auto-deployed")
+    calls: list[str] = []
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        assert kwargs["response_format"] == {"type": "json_object"}
+        if len(calls) == 0:
+            calls.append("extractor")
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        if len(calls) == 1:
+            calls.append("canonicalizer")
+            assert "Canonicalization payload JSON" in kwargs["messages"][1]["content"]
+            return json.dumps(
+                {
+                    "propositions": [
+                        {
+                            "endpoint_refs": [f"{candidate.id}:source"],
+                            "canonical_label": candidate.source,
+                        },
+                        {
+                            "endpoint_refs": [f"{candidate.id}:target"],
+                            "canonical_label": "auto-deploy",
+                            "canonical_id": "auto_deploy",
+                            "aliases": ["release is auto-deployed"],
+                        },
+                    ]
+                }
+            )
+        calls.append("reviewer")
+        review = ReviewDecision(
+            candidate_id=candidate.id,
+            decision=ReviewDecisionValue.APPROVE,
+            final_relation_type="sufficient",
+            final_confidence=0.9,
+            normalized_implication_supported=True,
+            reasons=["approved"],
+        )
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    report = await openai_agents.run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="deepseek-v4-pro",
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+        auto_write=True,
+    )
+
+    assert calls == ["extractor", "canonicalizer", "reviewer"]
+    assert report.metadata["runtime_trace"][1]["stage"] == "canonicalizer"
+    assert store.list_relations()[0].target_id == "auto_deploy"
+    assert "release is auto-deployed" in store.list_propositions()[0].aliases
+
+
 async def test_json_object_provider_rejects_mapping_without_choices_before_write() -> None:
     store = RelationStore()
 
@@ -1167,6 +1236,49 @@ def test_cli_agent_dry_run_json_output_uses_same_runtime(
     assert payload["mode"] == "dry_run"
     assert payload["candidates"][0]["source"] == "A"
     assert stderr.getvalue() == ""
+
+
+def test_cli_agent_dry_run_passes_canonicalize_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        canonicalize_preview: bool = False,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        assert canonicalize_preview is True
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model="gpt-test",
+        auto_write=False,
+        canonicalize_preview=True,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
 
 
 def test_cli_agent_dry_run_passes_voting_options(
