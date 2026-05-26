@@ -412,6 +412,82 @@ async def test_write_approved_relations_deduplicates_legacy_label_match() -> Non
     assert result["deduplicated_count"] == 1
 
 
+async def test_auto_write_queues_semantic_duplicate_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    existing, _updated = store.assert_relations(
+        [
+            RelationInput(
+                source="integration tests pass",
+                target="release auto deploys",
+                relation_type="sufficient",
+            )
+        ],
+        mode="append",
+    )
+    candidate = _candidate(
+        source="integration test passes",
+        target="release is auto-deployed",
+    )
+    _mock_agents(monkeypatch, (candidate, _review(candidate)))
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    queued = store.list_review_queue()
+    semantic_duplicate = report.gate_results[0].metadata["semantic_duplicate"]
+    assert report.gate_results[0].action == "queue"
+    assert "semantic duplicate" in report.gate_results[0].reasons[0]
+    assert semantic_duplicate["existing_relation_ids"] == [existing[0].id]
+    assert report.diagnostics[0].code == "SEMANTIC_DUPLICATE_CANDIDATE"
+    assert report.approved_relations == []
+    assert report.written_relation_ids == []
+    assert len(store.list_relations()) == 1
+    assert len(queued) == 1
+    assert queued[0].gate_result.metadata["semantic_duplicate"] == semantic_duplicate
+
+
+async def test_auto_write_keeps_eligibility_separate_from_actual_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    store.assert_relations(
+        [
+            RelationInput(
+                source="integration tests pass",
+                target="auto-deploy",
+                relation_type="sufficient",
+            )
+        ],
+        mode="append",
+    )
+    candidate = _candidate(
+        source="integration tests pass",
+        target="eligible for auto-deploy",
+    )
+    _mock_agents(monkeypatch, (candidate, _review(candidate)))
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    assert report.gate_results[0].action == "auto_write"
+    assert report.written_relation_ids
+    assert len(store.list_relations()) == 2
+    assert {relation.target for relation in store.list_relations()} == {
+        "auto-deploy",
+        "eligible for auto-deploy",
+    }
+
+
 async def test_auto_write_canonicalizes_semantic_duplicate_to_existing_proposition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
