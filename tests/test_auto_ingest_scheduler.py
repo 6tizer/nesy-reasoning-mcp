@@ -304,7 +304,10 @@ async def test_scheduled_dry_run_writes_report_without_graph_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         assert args.auto_write is False
         return IngestionReport(metadata={"scheduled": True})
 
@@ -361,7 +364,10 @@ async def test_scheduled_write_warning_does_not_block_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         return IngestionReport()
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
@@ -390,7 +396,10 @@ async def test_run_due_runs_only_due_active_jobs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         return IngestionReport()
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
@@ -420,7 +429,10 @@ async def test_failed_scheduled_run_records_retry_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         return IngestionReport(
             diagnostics=[Diagnostic(level="error", code="INGESTION_ERROR", message="failed")]
         )
@@ -447,7 +459,10 @@ async def test_scheduled_run_skips_when_job_claim_conflicts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         pytest.fail("stale scheduled job should not run")
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
@@ -476,7 +491,10 @@ async def test_cancelled_scheduled_run_persists_failure_state(
 ) -> None:
     cancelled_exc_class = anyio.get_cancelled_exc_class()
 
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         raise cancelled_exc_class()
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
