@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from nesy_reasoning_mcp.auto_ingest.providers import ProviderStructuredOutputMod
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
 from nesy_reasoning_mcp.auto_ingest.review_voting import aggregate_review_decisions
 from nesy_reasoning_mcp.auto_ingest.schemas import (
+    CandidateRelation,
     CandidateRelationBatch,
     IngestionInput,
     IngestionMode,
@@ -45,6 +47,29 @@ AgentRunner = Callable[..., Awaitable[Any]]
 ChatCompletionRunner = Callable[..., Awaitable[Any]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 OutputBatch = TypeVar("OutputBatch", bound=BaseModel)
+
+_CANONICALIZATION_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_CANONICALIZATION_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -554,9 +579,42 @@ async def _run_auto_write_canonicalization(
 ) -> PropositionCanonicalizationResult:
     known_propositions = _canonicalization_known_propositions(ingestion_input, store)
     if not known_propositions:
-        return canonicalize_candidate_relations(
+        result = canonicalize_candidate_relations(
             candidates=candidate_batch.candidates,
             known_propositions=[],
+        )
+        _record_canonicalizer_skip(
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+            provider_config=provider_config,
+            model=base_model_name,
+            reason="no_known_propositions",
+        )
+        return _canonicalization_result_with_llm_status(
+            result,
+            status="skipped",
+            reason="no_known_propositions",
+        )
+    llm_required, prefilter_reason = _canonicalization_llm_prefilter(
+        candidate_batch.candidates,
+        known_propositions,
+    )
+    if not llm_required:
+        result = canonicalize_candidate_relations(
+            candidates=candidate_batch.candidates,
+            known_propositions=known_propositions,
+        )
+        _record_canonicalizer_skip(
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+            provider_config=provider_config,
+            model=base_model_name,
+            reason=prefilter_reason,
+        )
+        return _canonicalization_result_with_llm_status(
+            result,
+            status="skipped",
+            reason=prefilter_reason,
         )
     prompt = canonicalization_prompt(ingestion_input, candidate_batch, known_propositions)
     if use_json_object_provider:
@@ -605,10 +663,115 @@ async def _run_auto_write_canonicalization(
             progress_callback=progress_callback,
         )
         canonicalization_batch = _coerce_canonicalization_batch(canonicalization_output)
-    return canonicalize_candidate_relations(
+    result = canonicalize_candidate_relations(
         candidates=candidate_batch.candidates,
         known_propositions=known_propositions,
         canonicalization=canonicalization_batch,
+    )
+    return _canonicalization_result_with_llm_status(
+        result,
+        status="executed",
+        reason=prefilter_reason,
+    )
+
+
+def _canonicalization_llm_prefilter(
+    candidates: list[CandidateRelation],
+    known_propositions: list[PropositionRecord],
+) -> tuple[bool, str]:
+    exact_terms = {
+        term
+        for proposition in known_propositions
+        for term in (proposition.id, proposition.label, *proposition.aliases)
+        if term
+    }
+    known_token_sets = []
+    for term in exact_terms:
+        tokens = _canonicalization_tokens(term)
+        if tokens:
+            known_token_sets.append(tokens)
+    exact_match_seen = False
+    for candidate in candidates:
+        for text in (candidate.source, candidate.target):
+            if text in exact_terms:
+                exact_match_seen = True
+                continue
+            endpoint_tokens = _canonicalization_tokens(text)
+            if any(endpoint_tokens & known_tokens for known_tokens in known_token_sets):
+                return True, "likely_overlap"
+    return False, "exact_match_only" if exact_match_seen else "no_likely_overlap"
+
+
+def _canonicalization_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in _CANONICALIZATION_TOKEN_RE.findall(text.casefold()):
+        if len(token) < 3 or token in _CANONICALIZATION_STOPWORDS:
+            continue
+        tokens.add(token)
+        tokens.update(_canonicalization_stems(token))
+    return tokens
+
+
+def _canonicalization_stems(token: str) -> set[str]:
+    stems: set[str] = set()
+    for suffix in ("ing", "ed", "es", "s"):
+        if token.endswith(suffix) and len(token) > len(suffix) + 3:
+            stems.add(token[: -len(suffix)])
+    return stems
+
+
+def _record_canonicalizer_skip(
+    *,
+    runtime_trace: list[dict[str, Any]],
+    progress_callback: ProgressCallback | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    model: str | None,
+    reason: str,
+) -> None:
+    error_code = f"CANONICALIZER_PREFILTER_{reason.upper()}"
+    label = _runtime_label("canonicalizer", None, model)
+    _record_runtime_trace(
+        runtime_trace,
+        stage="canonicalizer",
+        label=label,
+        provider=_provider_name(provider_config),
+        model=model,
+        reviewer_id=None,
+        started_at=_utc_now(),
+        duration_ms=0,
+        status="skipped",
+        error_code=error_code,
+    )
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "skipped",
+            "stage": "canonicalizer",
+            "label": label,
+            "status": "skipped",
+            "reason": reason,
+            "error_code": error_code,
+        },
+    )
+
+
+def _canonicalization_result_with_llm_status(
+    result: PropositionCanonicalizationResult,
+    *,
+    status: str,
+    reason: str,
+) -> PropositionCanonicalizationResult:
+    return PropositionCanonicalizationResult(
+        candidates=result.candidates,
+        propositions=result.propositions,
+        diagnostics=result.diagnostics,
+        metadata={
+            **result.metadata,
+            "llm_canonicalizer": {
+                "status": status,
+                "reason": reason,
+            },
+        },
     )
 
 

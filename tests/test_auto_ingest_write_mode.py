@@ -213,8 +213,110 @@ async def test_dry_run_canonicalize_preview_runs_without_writing(
     assert report.mode == "dry_run"
     assert report.candidates[0].target_id == "auto_deploy"
     assert report.metadata["proposition_canonicalization"]["mode"] == "llm_assisted"
+    assert report.metadata["proposition_canonicalization"]["llm_canonicalizer"] == {
+        "status": "executed",
+        "reason": "likely_overlap",
+    }
     assert report.written_relation_ids == []
     assert store.list_relations() == []
+
+
+async def test_auto_write_skips_canonicalizer_without_likely_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(source="schema validates", target="cache warms")
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="auto_deploy", label="auto-deploy")],
+        mode="append",
+        store_id="default",
+    )
+    progress_events: list[dict[str, Any]] = []
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            raise AssertionError("canonicalizer should be skipped when there is no overlap")
+        return {"reviews": [_review(candidate).model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+        progress_callback=progress_events.append,
+    )
+
+    assert report.mode == "write"
+    assert report.metadata["proposition_canonicalization"]["mode"] == "deterministic"
+    assert report.metadata["proposition_canonicalization"]["llm_canonicalizer"] == {
+        "status": "skipped",
+        "reason": "no_likely_overlap",
+    }
+    assert any(
+        item["stage"] == "canonicalizer" and item["status"] == "skipped"
+        for item in report.metadata["runtime_trace"]
+    )
+    assert any(
+        item["stage"] == "canonicalizer" and item["event"] == "skipped" for item in progress_events
+    )
+    assert len(store.list_relations()) == 1
+
+
+async def test_auto_write_exact_known_alias_canonicalizes_without_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(source="CI passes", target="release is auto-deployed")
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[
+            PropositionRecord(
+                id="auto_deploy",
+                label="auto-deploy",
+                aliases=["release is auto-deployed"],
+            )
+        ],
+        mode="append",
+        store_id="default",
+    )
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            raise AssertionError("canonicalizer should be skipped for exact alias match")
+        return {"reviews": [_review(candidate).model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    assert report.candidates[0].target_id == "auto_deploy"
+    assert report.metadata["proposition_canonicalization"]["mode"] == "deterministic"
+    assert report.metadata["proposition_canonicalization"]["llm_canonicalizer"] == {
+        "status": "skipped",
+        "reason": "exact_match_only",
+    }
 
 
 async def test_auto_write_persists_gate_approved_relations(
@@ -458,7 +560,7 @@ async def test_auto_write_canonicalizer_import_conflict_does_not_write(
         mode="append",
         store_id="default",
     )
-    candidate = _candidate()
+    candidate = _candidate(source="source proposition", target="target proposition")
 
     def fake_agent(**kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(output_type=kwargs["output_type"])
@@ -471,12 +573,12 @@ async def test_auto_write_canonicalizer_import_conflict_does_not_write(
                 "propositions": [
                     {
                         "endpoint_refs": [f"{candidate.id}:source"],
-                        "canonical_label": "A",
+                        "canonical_label": "source proposition",
                         "aliases": ["shared alias"],
                     },
                     {
                         "endpoint_refs": [f"{candidate.id}:target"],
-                        "canonical_label": "B",
+                        "canonical_label": "target proposition",
                         "aliases": ["shared alias"],
                     },
                 ]
