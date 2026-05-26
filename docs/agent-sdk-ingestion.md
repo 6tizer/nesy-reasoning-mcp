@@ -273,6 +273,17 @@ Provider-qualified reviewers use each provider's registry defaults and stable
 reviewer IDs such as `kimi:kimi-k2.6`. They do not support per-reviewer custom
 headers, thinking, or reasoning flags in this version. Existing
 `--reviewer-model` values still use the run-level provider configuration.
+With `risk_tiered`, high-priority reviewers run first; if they reject, queue,
+time out, or fail to confirm normalized implication direction, lower-priority
+reviewers are skipped and the candidate stays queued.
+
+LLM runtime controls are explicit. By default the extractor and high-priority
+reviewers get 180 seconds, normal reviewers get 120 seconds, and JSON Object
+calls use `--extractor-max-tokens 4096` / `--reviewer-max-tokens 2048`.
+Reviewer calls run in parallel after extraction. CLI progress is printed to
+stderr by default; use `--progress off` for silent runs. Final reports include
+`metadata.runtime_trace` with stage, provider/model, duration, status, and
+candidate/review counts, but not API keys, header values, or base URLs.
 
 Known OpenAI-compatible Chat Completions providers can use registry shortcuts.
 API keys are read only from environment variables, not CLI plaintext arguments:
@@ -340,9 +351,9 @@ OPENROUTER_API_KEY=... uv run --no-editable nesy-reasoning-mcp ingest agent-dry-
 The `openrouter` shortcut uses the direct Chat Completions JSON Object path by
 default because OpenRouter routes to heterogeneous model backends. The runtime
 sends `response_format={"type":"json_object"}` and keeps model selection
-explicit with `--model` or `OPENAI_DEFAULT_MODEL`. It does not set provider-wide
-thinking or reasoning defaults because those capabilities vary by OpenRouter
-model.
+explicit with `--model` or `OPENAI_DEFAULT_MODEL`. It sets OpenRouter reasoning
+to medium and excludes reasoning text from responses:
+`extra_body={"reasoning":{"effort":"medium","exclude":true}}`.
 
 Use `--list-providers` to inspect built-in shortcuts. The registry is static
 code and documentation, not a writable provider database.
@@ -497,7 +508,9 @@ uv run --no-editable nesy-reasoning-mcp ingest schedule add \
 
 Scheduled jobs also persist provider-qualified `--reviewer` and
 `--high-priority-reviewer` values and replay them during `run`, `run-due`, and
-`worker` execution.
+`worker` execution. They also persist LLM runtime timeout/token/progress
+settings. While a scheduled run is active, the run metadata is updated with the
+current runtime stage; completed reports keep the full `runtime_trace`.
 
 Single-reviewer scheduled writes must opt in with
 `--allow-single-reviewer-write`. Dry-run schedules have no multi-reviewer

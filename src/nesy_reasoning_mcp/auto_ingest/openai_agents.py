@@ -6,10 +6,13 @@ import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from inspect import Parameter, signature
+from time import perf_counter
 from types import MappingProxyType
 from typing import Any, TypeVar
 
+import anyio
 from pydantic import BaseModel, ValidationError
 
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
@@ -23,16 +26,45 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     IngestionReport,
     ReviewDecision,
     ReviewDecisionBatch,
+    ReviewDecisionValue,
     ReviewVotingPolicy,
 )
 from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.normalization import normalized_implication_preview
+from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
 AgentRunner = Callable[..., Awaitable[Any]]
 ChatCompletionRunner = Callable[..., Awaitable[Any]]
+ProgressCallback = Callable[[dict[str, Any]], None]
 OutputBatch = TypeVar("OutputBatch", bound=BaseModel)
+
+
+@dataclass(frozen=True)
+class LLMRuntimeOptions:
+    """Timeout, token, and progress controls for ingestion LLM calls."""
+
+    extractor_timeout_seconds: float = 180
+    high_priority_reviewer_timeout_seconds: float = 180
+    reviewer_timeout_seconds: float = 120
+    extractor_max_tokens: int = 4096
+    reviewer_max_tokens: int = 2048
+    progress_mode: str = "auto"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "extractor_timeout_seconds",
+            "high_priority_reviewer_timeout_seconds",
+            "reviewer_timeout_seconds",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be greater than 0")
+        for name in ("extractor_max_tokens", "reviewer_max_tokens"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be greater than 0")
+        if self.progress_mode not in {"auto", "off"}:
+            raise ValueError("progress_mode must be auto or off")
 
 
 @dataclass(frozen=True)
@@ -75,6 +107,33 @@ class OpenAIAgentsDryRunError(ValueError):
     """Raised when a live Agent SDK dry-run cannot start safely."""
 
 
+class _LLMRuntimeStageError(OpenAIAgentsDryRunError):
+    """Raised when one traced LLM stage fails before producing structured output."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        status: str,
+        stage: str,
+        label: str,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.stage = stage
+        self.label = label
+
+
+@dataclass(frozen=True)
+class _ReviewerCallResult:
+    config: ReviewerModelConfig
+    reviews: list[ReviewDecision]
+    diagnostics: list[Diagnostic]
+    failed: bool = False
+
+
 async def run_openai_agents_dry_run(
     ingestion_input: IngestionInput,
     *,
@@ -89,6 +148,8 @@ async def run_openai_agents_dry_run(
     run_chat_completion: ChatCompletionRunner | None = None,
     provider_config: OpenAICompatibleProviderConfig | None = None,
     disable_tracing: bool = False,
+    runtime_options: LLMRuntimeOptions | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> IngestionReport:
     """Extract, review, and gate candidate relations without persistent writes."""
     return await run_openai_agents_ingestion(
@@ -104,6 +165,8 @@ async def run_openai_agents_dry_run(
         run_chat_completion=run_chat_completion,
         provider_config=provider_config,
         disable_tracing=disable_tracing,
+        runtime_options=runtime_options,
+        progress_callback=progress_callback,
         auto_write=False,
     )
 
@@ -124,10 +187,17 @@ async def run_openai_agents_ingestion(
     min_write_confidence: float = 0.85,
     provider_config: OpenAICompatibleProviderConfig | None = None,
     disable_tracing: bool = False,
+    runtime_options: LLMRuntimeOptions | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> IngestionReport:
     """Extract, review, gate, and optionally write approved candidate relations."""
     if not 0 <= min_write_confidence <= 1:
         raise OpenAIAgentsDryRunError("min_write_confidence must be between 0 and 1")
+    runtime_options = runtime_options or LLMRuntimeOptions()
+    effective_progress_callback = (
+        progress_callback if runtime_options.progress_mode != "off" else None
+    )
+    runtime_trace: list[dict[str, Any]] = []
     runtime_env = env if env is not None else os.environ
     base_model_name = model or runtime_env.get("OPENAI_DEFAULT_MODEL")
     voting_policy = ReviewVotingPolicy(voting_policy)
@@ -147,75 +217,95 @@ async def run_openai_agents_ingestion(
             "OPENAI_API_KEY is required for live OpenAI Agents SDK ingestion"
         )
 
-    if use_json_object_provider:
-        candidate_batch = await _run_json_object_completion(
-            run_chat_completion,
-            model=base_model_name,
-            provider_config=provider_config,
-            env=runtime_env,
-            instructions=_EXTRACTOR_INSTRUCTIONS,
-            prompt=_extraction_prompt(ingestion_input),
-            output_type=CandidateRelationBatch,
-            label="extractor",
-        )
-        agent_model = None
-    else:
-        agent_model = _agent_model(
-            base_model_name,
-            provider_config,
-            runtime_env,
-        )
-        extractor = _build_agent(
-            name="NeSy relation extractor",
-            instructions=_EXTRACTOR_INSTRUCTIONS,
-            output_type=CandidateRelationBatch,
-            model=agent_model,
-        )
-        extraction_output = await _run_agent_with_optional_runner(
-            run_agent,
-            extractor,
-            _extraction_prompt(ingestion_input),
-            tracing_disabled=tracing_disabled,
-        )
-        candidate_batch = _coerce_candidate_batch(extraction_output)
-
-    reviews: list[ReviewDecision] = []
-    for reviewer_config in resolved_reviewers:
-        reviewer_provider_config = reviewer_config.provider_config
-        if _uses_json_object_provider(reviewer_provider_config):
-            review_batch = await _run_json_object_completion(
-                run_chat_completion,
-                model=reviewer_config.model,
-                provider_config=reviewer_provider_config,
-                env=runtime_env,
-                instructions=_REVIEWER_INSTRUCTIONS,
-                prompt=_review_prompt(ingestion_input, candidate_batch),
-                output_type=ReviewDecisionBatch,
-                label=_reviewer_agent_name(reviewer_config.reviewer_id),
+    try:
+        if use_json_object_provider:
+            candidate_batch = await _run_stage_with_trace(
+                _json_stage_runner(
+                    run_chat_completion=run_chat_completion,
+                    model=base_model_name,
+                    provider_config=provider_config,
+                    env=runtime_env,
+                    instructions=_EXTRACTOR_INSTRUCTIONS,
+                    prompt=_extraction_prompt(ingestion_input),
+                    output_type=CandidateRelationBatch,
+                    label="extractor",
+                    max_tokens=runtime_options.extractor_max_tokens,
+                ),
+                stage="extractor",
+                label=_runtime_label("extractor", None, base_model_name),
+                provider=_provider_name(provider_config),
+                model=base_model_name,
+                reviewer_id=None,
+                timeout_seconds=runtime_options.extractor_timeout_seconds,
+                runtime_trace=runtime_trace,
+                progress_callback=effective_progress_callback,
             )
+            agent_model = None
         else:
-            reviewer_agent_model = (
-                agent_model
-                if (
-                    reviewer_provider_config == provider_config
-                    and reviewer_config.model == base_model_name
-                )
-                else _agent_model(reviewer_config.model, reviewer_provider_config, runtime_env)
+            agent_model = _agent_model(
+                base_model_name,
+                provider_config,
+                runtime_env,
             )
-            reviewer = _build_agent(
-                name=_reviewer_agent_name(reviewer_config.reviewer_id),
-                instructions=_REVIEWER_INSTRUCTIONS,
-                output_type=ReviewDecisionBatch,
-                model=reviewer_agent_model,
+            extractor = _build_agent(
+                name="NeSy relation extractor",
+                instructions=_EXTRACTOR_INSTRUCTIONS,
+                output_type=CandidateRelationBatch,
+                model=agent_model,
             )
-            review_output = await _run_agent_with_optional_runner(
-                run_agent,
-                reviewer,
-                _review_prompt(ingestion_input, candidate_batch),
-                tracing_disabled=tracing_disabled,
+            extraction_output = await _run_stage_with_trace(
+                lambda: _run_agent_with_optional_runner(
+                    run_agent,
+                    extractor,
+                    _extraction_prompt(ingestion_input),
+                    tracing_disabled=tracing_disabled,
+                ),
+                stage="extractor",
+                label=_runtime_label("extractor", None, base_model_name),
+                provider=_provider_name(provider_config),
+                model=base_model_name,
+                reviewer_id=None,
+                timeout_seconds=runtime_options.extractor_timeout_seconds,
+                runtime_trace=runtime_trace,
+                progress_callback=effective_progress_callback,
             )
-            review_batch = _coerce_review_batch(review_output)
-        reviews.extend(_reviews_with_model(review_batch.reviews, reviewer_config.reviewer_id))
+            candidate_batch = _coerce_candidate_batch(extraction_output)
+    except _LLMRuntimeStageError as exc:
+        return _runtime_error_report(
+            ingestion_input=ingestion_input,
+            auto_write=auto_write,
+            provider_config=provider_config,
+            tracing_disabled=tracing_disabled,
+            runtime_trace=runtime_trace,
+            diagnostic=_diagnostic_from_stage_error(exc),
+        )
+
+    reviewer_results = await _run_reviewer_calls(
+        ingestion_input=ingestion_input,
+        candidate_batch=candidate_batch,
+        reviewers=resolved_reviewers,
+        high_priority_models=high_priority_models,
+        voting_policy=voting_policy,
+        runtime_options=runtime_options,
+        runtime_env=runtime_env,
+        run_agent=run_agent,
+        run_chat_completion=run_chat_completion,
+        provider_config=provider_config,
+        base_model_name=base_model_name,
+        agent_model=agent_model,
+        tracing_disabled=tracing_disabled,
+        runtime_trace=runtime_trace,
+        progress_callback=effective_progress_callback,
+    )
+    reviews = [
+        review
+        for result in reviewer_results
+        for review in _reviews_with_model(result.reviews, result.config.reviewer_id)
+    ]
+    runtime_diagnostics = [
+        diagnostic for result in reviewer_results for diagnostic in result.diagnostics
+    ]
+    reviewer_runtime_failed = any(result.failed for result in reviewer_results)
 
     aggregation = aggregate_review_decisions(
         candidates=candidate_batch.candidates,
@@ -229,14 +319,30 @@ async def run_openai_agents_ingestion(
         ],
     )
 
+    gate_reviews = aggregation.gate_reviews
+    if auto_write and reviewer_runtime_failed:
+        gate_reviews = _runtime_guard_reviews(candidate_batch.candidates)
+
+    _emit_progress(effective_progress_callback, {"event": "started", "stage": "gate"})
     gate_results, approved_relations, diagnostics, reasoning = await run_dry_run_gate(
         candidates=candidate_batch.candidates,
-        reviews=aggregation.gate_reviews,
+        reviews=gate_reviews,
         store=store,
         min_write_confidence=min_write_confidence if auto_write else 0.0,
         write_enabled=auto_write,
     )
-    diagnostics = [*aggregation.diagnostics, *diagnostics]
+    queued_count = sum(1 for result in gate_results if result.action.value == "queue")
+    _emit_progress(
+        effective_progress_callback,
+        {
+            "event": "done",
+            "stage": "gate",
+            "status": "ok",
+            "queued_count": queued_count,
+            "approved_count": len(approved_relations),
+        },
+    )
+    diagnostics = [*runtime_diagnostics, *aggregation.diagnostics, *diagnostics]
     written_relation_ids: list[str] = []
     write_result: dict[str, Any] = {}
     if auto_write and approved_relations:
@@ -271,6 +377,7 @@ async def run_openai_agents_ingestion(
             "write_result": write_result,
             "provider": _provider_metadata(provider_config, tracing_disabled),
             "reviewer_providers": _reviewer_provider_metadata(resolved_reviewers),
+            "runtime_trace": runtime_trace,
         },
     )
     if auto_write:
@@ -298,6 +405,606 @@ async def run_openai_agents_ingestion(
                 }
             )
     return report
+
+
+def _json_stage_runner(
+    *,
+    run_chat_completion: ChatCompletionRunner | None,
+    model: str | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    env: Mapping[str, str],
+    instructions: str,
+    prompt: str,
+    output_type: type[OutputBatch],
+    label: str,
+    max_tokens: int,
+) -> Callable[[], Awaitable[OutputBatch]]:
+    async def run() -> OutputBatch:
+        return await _run_json_object_completion(
+            run_chat_completion,
+            model=model,
+            provider_config=provider_config,
+            env=env,
+            instructions=instructions,
+            prompt=prompt,
+            output_type=output_type,
+            label=label,
+            max_tokens=max_tokens,
+        )
+
+    return run
+
+
+async def _run_reviewer_calls(
+    *,
+    ingestion_input: IngestionInput,
+    candidate_batch: CandidateRelationBatch,
+    reviewers: list[ReviewerModelConfig],
+    high_priority_models: list[str],
+    voting_policy: ReviewVotingPolicy,
+    runtime_options: LLMRuntimeOptions,
+    runtime_env: Mapping[str, str],
+    run_agent: AgentRunner | None,
+    run_chat_completion: ChatCompletionRunner | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    base_model_name: str | None,
+    agent_model: Any,
+    tracing_disabled: bool,
+    runtime_trace: list[dict[str, Any]],
+    progress_callback: ProgressCallback | None,
+) -> list[_ReviewerCallResult]:
+    high_priority_reviewers = [
+        reviewer for reviewer in reviewers if reviewer.reviewer_id in high_priority_models
+    ]
+    normal_reviewers = [
+        reviewer for reviewer in reviewers if reviewer.reviewer_id not in high_priority_models
+    ]
+    if voting_policy == ReviewVotingPolicy.RISK_TIERED and high_priority_reviewers:
+        high_priority_results = await _run_reviewers_parallel(
+            ingestion_input=ingestion_input,
+            candidate_batch=candidate_batch,
+            reviewers=high_priority_reviewers,
+            timeout_seconds=runtime_options.high_priority_reviewer_timeout_seconds,
+            runtime_options=runtime_options,
+            runtime_env=runtime_env,
+            run_agent=run_agent,
+            run_chat_completion=run_chat_completion,
+            provider_config=provider_config,
+            base_model_name=base_model_name,
+            agent_model=agent_model,
+            tracing_disabled=tracing_disabled,
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+        )
+        if _high_priority_should_short_circuit(
+            candidate_batch=candidate_batch,
+            high_priority_results=high_priority_results,
+            high_priority_models=high_priority_models,
+        ):
+            skipped_results = [
+                _skipped_reviewer_result(reviewer, candidate_batch) for reviewer in normal_reviewers
+            ]
+            for result in skipped_results:
+                _record_runtime_trace(
+                    runtime_trace,
+                    stage="reviewer",
+                    label=_reviewer_agent_name(result.config.reviewer_id),
+                    provider=_provider_name(result.config.provider_config),
+                    model=result.config.model,
+                    reviewer_id=result.config.reviewer_id,
+                    started_at=_utc_now(),
+                    duration_ms=0,
+                    status="skipped",
+                    error_code="HIGH_PRIORITY_REVIEWER_SHORT_CIRCUIT",
+                    review_count=0,
+                )
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "event": "skipped",
+                        "stage": "reviewer",
+                        "label": _reviewer_agent_name(result.config.reviewer_id),
+                        "reviewer_id": result.config.reviewer_id,
+                        "status": "skipped",
+                        "error_code": "HIGH_PRIORITY_REVIEWER_SHORT_CIRCUIT",
+                    },
+                )
+            return [*high_priority_results, *skipped_results]
+        normal_results = await _run_reviewers_parallel(
+            ingestion_input=ingestion_input,
+            candidate_batch=candidate_batch,
+            reviewers=normal_reviewers,
+            timeout_seconds=runtime_options.reviewer_timeout_seconds,
+            runtime_options=runtime_options,
+            runtime_env=runtime_env,
+            run_agent=run_agent,
+            run_chat_completion=run_chat_completion,
+            provider_config=provider_config,
+            base_model_name=base_model_name,
+            agent_model=agent_model,
+            tracing_disabled=tracing_disabled,
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+        )
+        return [*high_priority_results, *normal_results]
+
+    return await _run_reviewers_parallel(
+        ingestion_input=ingestion_input,
+        candidate_batch=candidate_batch,
+        reviewers=reviewers,
+        timeout_seconds=runtime_options.reviewer_timeout_seconds,
+        runtime_options=runtime_options,
+        runtime_env=runtime_env,
+        run_agent=run_agent,
+        run_chat_completion=run_chat_completion,
+        provider_config=provider_config,
+        base_model_name=base_model_name,
+        agent_model=agent_model,
+        tracing_disabled=tracing_disabled,
+        runtime_trace=runtime_trace,
+        progress_callback=progress_callback,
+    )
+
+
+async def _run_reviewers_parallel(
+    *,
+    ingestion_input: IngestionInput,
+    candidate_batch: CandidateRelationBatch,
+    reviewers: list[ReviewerModelConfig],
+    timeout_seconds: float,
+    runtime_options: LLMRuntimeOptions,
+    runtime_env: Mapping[str, str],
+    run_agent: AgentRunner | None,
+    run_chat_completion: ChatCompletionRunner | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    base_model_name: str | None,
+    agent_model: Any,
+    tracing_disabled: bool,
+    runtime_trace: list[dict[str, Any]],
+    progress_callback: ProgressCallback | None,
+) -> list[_ReviewerCallResult]:
+    results: list[_ReviewerCallResult | None] = [None] * len(reviewers)
+
+    async def run_one(index: int, reviewer_config: ReviewerModelConfig) -> None:
+        results[index] = await _run_one_reviewer(
+            ingestion_input=ingestion_input,
+            candidate_batch=candidate_batch,
+            reviewer_config=reviewer_config,
+            timeout_seconds=timeout_seconds,
+            runtime_options=runtime_options,
+            runtime_env=runtime_env,
+            run_agent=run_agent,
+            run_chat_completion=run_chat_completion,
+            provider_config=provider_config,
+            base_model_name=base_model_name,
+            agent_model=agent_model,
+            tracing_disabled=tracing_disabled,
+            runtime_trace=runtime_trace,
+            progress_callback=progress_callback,
+        )
+
+    async with anyio.create_task_group() as task_group:
+        for index, reviewer_config in enumerate(reviewers):
+            task_group.start_soon(run_one, index, reviewer_config)
+    return [result for result in results if result is not None]
+
+
+async def _run_one_reviewer(
+    *,
+    ingestion_input: IngestionInput,
+    candidate_batch: CandidateRelationBatch,
+    reviewer_config: ReviewerModelConfig,
+    timeout_seconds: float,
+    runtime_options: LLMRuntimeOptions,
+    runtime_env: Mapping[str, str],
+    run_agent: AgentRunner | None,
+    run_chat_completion: ChatCompletionRunner | None,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    base_model_name: str | None,
+    agent_model: Any,
+    tracing_disabled: bool,
+    runtime_trace: list[dict[str, Any]],
+    progress_callback: ProgressCallback | None,
+) -> _ReviewerCallResult:
+    reviewer_provider_config = reviewer_config.provider_config
+    label = _reviewer_agent_name(reviewer_config.reviewer_id)
+    try:
+        if _uses_json_object_provider(reviewer_provider_config):
+            review_batch = await _run_stage_with_trace(
+                _json_stage_runner(
+                    run_chat_completion=run_chat_completion,
+                    model=reviewer_config.model,
+                    provider_config=reviewer_provider_config,
+                    env=runtime_env,
+                    instructions=_REVIEWER_INSTRUCTIONS,
+                    prompt=_review_prompt(ingestion_input, candidate_batch),
+                    output_type=ReviewDecisionBatch,
+                    label=label,
+                    max_tokens=runtime_options.reviewer_max_tokens,
+                ),
+                stage="reviewer",
+                label=label,
+                provider=_provider_name(reviewer_provider_config),
+                model=reviewer_config.model,
+                reviewer_id=reviewer_config.reviewer_id,
+                timeout_seconds=timeout_seconds,
+                runtime_trace=runtime_trace,
+                progress_callback=progress_callback,
+            )
+        else:
+            reviewer_agent_model = (
+                agent_model
+                if (
+                    reviewer_provider_config == provider_config
+                    and reviewer_config.model == base_model_name
+                )
+                else _agent_model(reviewer_config.model, reviewer_provider_config, runtime_env)
+            )
+            reviewer = _build_agent(
+                name=label,
+                instructions=_REVIEWER_INSTRUCTIONS,
+                output_type=ReviewDecisionBatch,
+                model=reviewer_agent_model,
+            )
+            review_output = await _run_stage_with_trace(
+                lambda: _run_agent_with_optional_runner(
+                    run_agent,
+                    reviewer,
+                    _review_prompt(ingestion_input, candidate_batch),
+                    tracing_disabled=tracing_disabled,
+                ),
+                stage="reviewer",
+                label=label,
+                provider=_provider_name(reviewer_provider_config),
+                model=reviewer_config.model,
+                reviewer_id=reviewer_config.reviewer_id,
+                timeout_seconds=timeout_seconds,
+                runtime_trace=runtime_trace,
+                progress_callback=progress_callback,
+            )
+            review_batch = _coerce_review_batch(review_output)
+    except _LLMRuntimeStageError as exc:
+        return _failed_reviewer_result(reviewer_config, candidate_batch, exc)
+    return _ReviewerCallResult(
+        config=reviewer_config,
+        reviews=review_batch.reviews,
+        diagnostics=[],
+    )
+
+
+async def _run_stage_with_trace(
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    stage: str,
+    label: str,
+    provider: str,
+    model: str | None,
+    reviewer_id: str | None,
+    timeout_seconds: float,
+    runtime_trace: list[dict[str, Any]],
+    progress_callback: ProgressCallback | None,
+) -> Any:
+    started_at = _utc_now()
+    started_perf = perf_counter()
+    cancelled_exc_class = anyio.get_cancelled_exc_class()
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "started",
+            "stage": stage,
+            "label": label,
+            "provider": provider,
+            "model": model,
+            "reviewer_id": reviewer_id,
+        },
+    )
+    try:
+        with anyio.fail_after(timeout_seconds):
+            result = await operation()
+    except TimeoutError as exc:
+        duration_ms = _elapsed_ms(started_perf)
+        _record_runtime_trace(
+            runtime_trace,
+            stage=stage,
+            label=label,
+            provider=provider,
+            model=model,
+            reviewer_id=reviewer_id,
+            started_at=started_at,
+            duration_ms=duration_ms,
+            status="timeout",
+            error_code="LLM_RUNTIME_TIMEOUT",
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "event": "timeout",
+                "stage": stage,
+                "label": label,
+                "provider": provider,
+                "model": model,
+                "reviewer_id": reviewer_id,
+                "status": "timeout",
+                "duration_ms": duration_ms,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+        raise _LLMRuntimeStageError(
+            f"{label} timed out after {timeout_seconds:g}s",
+            code="LLM_RUNTIME_TIMEOUT",
+            status="timeout",
+            stage=stage,
+            label=label,
+        ) from exc
+    except cancelled_exc_class:
+        raise
+    except Exception as exc:
+        duration_ms = _elapsed_ms(started_perf)
+        _record_runtime_trace(
+            runtime_trace,
+            stage=stage,
+            label=label,
+            provider=provider,
+            model=model,
+            reviewer_id=reviewer_id,
+            started_at=started_at,
+            duration_ms=duration_ms,
+            status="error",
+            error_code=exc.__class__.__name__,
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "event": "error",
+                "stage": stage,
+                "label": label,
+                "provider": provider,
+                "model": model,
+                "reviewer_id": reviewer_id,
+                "status": "error",
+                "duration_ms": duration_ms,
+                "error_code": exc.__class__.__name__,
+            },
+        )
+        raise _LLMRuntimeStageError(
+            f"{label} failed before producing structured output",
+            code=exc.__class__.__name__,
+            status="error",
+            stage=stage,
+            label=label,
+        ) from exc
+    duration_ms = _elapsed_ms(started_perf)
+    counts = _output_counts(result)
+    candidate_count = counts.get("candidate_count")
+    review_count = counts.get("review_count")
+    _record_runtime_trace(
+        runtime_trace,
+        stage=stage,
+        label=label,
+        provider=provider,
+        model=model,
+        reviewer_id=reviewer_id,
+        started_at=started_at,
+        duration_ms=duration_ms,
+        status="ok",
+        candidate_count=candidate_count,
+        review_count=review_count,
+    )
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "done",
+            "stage": stage,
+            "label": label,
+            "provider": provider,
+            "model": model,
+            "reviewer_id": reviewer_id,
+            "status": "ok",
+            "duration_ms": duration_ms,
+            **counts,
+        },
+    )
+    return result
+
+
+def _high_priority_should_short_circuit(
+    *,
+    candidate_batch: CandidateRelationBatch,
+    high_priority_results: list[_ReviewerCallResult],
+    high_priority_models: list[str],
+) -> bool:
+    if any(result.failed for result in high_priority_results):
+        return True
+    reviews = [
+        review
+        for result in high_priority_results
+        for review in _reviews_with_model(result.reviews, result.config.reviewer_id)
+    ]
+    reviews_by_candidate_model = {
+        (review.candidate_id, review.reviewer_model): review for review in reviews
+    }
+    for candidate in candidate_batch.candidates:
+        for reviewer_model in high_priority_models:
+            review = reviews_by_candidate_model.get((candidate.id, reviewer_model))
+            if review is None:
+                return True
+            if review.decision is not ReviewDecisionValue.APPROVE:
+                return True
+            if review.normalized_implication_supported is not True:
+                return True
+    return False
+
+
+def _failed_reviewer_result(
+    reviewer_config: ReviewerModelConfig,
+    candidate_batch: CandidateRelationBatch,
+    error: _LLMRuntimeStageError,
+) -> _ReviewerCallResult:
+    return _ReviewerCallResult(
+        config=reviewer_config,
+        reviews=[
+            ReviewDecision(
+                candidate_id=candidate.id,
+                decision=ReviewDecisionValue.NEEDS_HUMAN,
+                reasons=[f"{reviewer_config.reviewer_id or 'reviewer'} runtime {error.status}"],
+                reviewer_model=reviewer_config.reviewer_id,
+                metadata={
+                    "synthetic_vote": f"reviewer_{error.status}",
+                    "error_code": error.code,
+                },
+            )
+            for candidate in candidate_batch.candidates
+        ],
+        diagnostics=[_diagnostic_from_stage_error(error)],
+        failed=True,
+    )
+
+
+def _skipped_reviewer_result(
+    reviewer_config: ReviewerModelConfig,
+    candidate_batch: CandidateRelationBatch,
+) -> _ReviewerCallResult:
+    return _ReviewerCallResult(
+        config=reviewer_config,
+        reviews=[
+            ReviewDecision(
+                candidate_id=candidate.id,
+                decision=ReviewDecisionValue.NEEDS_HUMAN,
+                reasons=["high-priority reviewer short-circuited lower-priority review"],
+                reviewer_model=reviewer_config.reviewer_id,
+                metadata={"synthetic_vote": "reviewer_skipped"},
+            )
+            for candidate in candidate_batch.candidates
+        ],
+        diagnostics=[],
+        failed=False,
+    )
+
+
+def _diagnostic_from_stage_error(error: _LLMRuntimeStageError) -> Diagnostic:
+    code = "LLM_RUNTIME_TIMEOUT" if error.status == "timeout" else "LLM_RUNTIME_ERROR"
+    return Diagnostic(
+        level="error",
+        code=code,
+        message=f"{error.stage} {error.status}: {error.label}",
+    )
+
+
+def _runtime_error_report(
+    *,
+    ingestion_input: IngestionInput,
+    auto_write: bool,
+    provider_config: OpenAICompatibleProviderConfig | None,
+    tracing_disabled: bool,
+    runtime_trace: list[dict[str, Any]],
+    diagnostic: Diagnostic,
+) -> IngestionReport:
+    return IngestionReport(
+        mode=IngestionMode.WRITE if auto_write else IngestionMode.DRY_RUN,
+        diagnostics=[diagnostic],
+        metadata={
+            "task": ingestion_input.task,
+            "question": ingestion_input.question,
+            "input_metadata": ingestion_input.metadata,
+            "evidence_count": len(ingestion_input.evidence),
+            "url_count": len(ingestion_input.urls),
+            "provider": _provider_metadata(provider_config, tracing_disabled),
+            "runtime_trace": runtime_trace,
+        },
+    )
+
+
+def _runtime_guard_reviews(candidates: list[Any]) -> list[ReviewDecision]:
+    return [
+        ReviewDecision(
+            candidate_id=candidate.id,
+            decision=ReviewDecisionValue.NEEDS_HUMAN,
+            reasons=["reviewer runtime failure blocked auto-write"],
+            reviewer_model="runtime:guard",
+            metadata={"runtime_guard": "reviewer_runtime_failure"},
+        )
+        for candidate in candidates
+    ]
+
+
+def _record_runtime_trace(
+    runtime_trace: list[dict[str, Any]],
+    *,
+    stage: str,
+    label: str,
+    provider: str,
+    model: str | None,
+    reviewer_id: str | None,
+    started_at: str,
+    duration_ms: int,
+    status: str,
+    error_code: str | None = None,
+    candidate_count: int | None = None,
+    review_count: int | None = None,
+) -> None:
+    finished_at = _utc_now()
+    item: dict[str, Any] = {
+        "stage": stage,
+        "label": label,
+        "provider": provider,
+        "model": model,
+        "reviewer_id": reviewer_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_ms": duration_ms,
+        "status": status,
+    }
+    if error_code:
+        item["error_code"] = error_code
+    if candidate_count is not None:
+        item["candidate_count"] = candidate_count
+    if review_count is not None:
+        item["review_count"] = review_count
+    runtime_trace.append(item)
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    event: dict[str, Any],
+) -> None:
+    if progress_callback is not None:
+        progress_callback({key: value for key, value in event.items() if value is not None})
+
+
+def _output_counts(output: Any) -> dict[str, int]:
+    if isinstance(output, CandidateRelationBatch):
+        return {"candidate_count": len(output.candidates)}
+    if isinstance(output, ReviewDecisionBatch):
+        return {"review_count": len(output.reviews)}
+    return {}
+
+
+def _elapsed_ms(started_perf: float) -> int:
+    return int((perf_counter() - started_perf) * 1000)
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _provider_name(provider_config: OpenAICompatibleProviderConfig | None) -> str:
+    if provider_config is None:
+        return "openai"
+    if "deepseek" in provider_config.base_url:
+        return "deepseek"
+    if "moonshot" in provider_config.base_url:
+        return "kimi"
+    if "openrouter" in provider_config.base_url:
+        return "openrouter"
+    return "openai_compatible"
+
+
+def _runtime_label(stage: str, reviewer_id: str | None, model: str | None) -> str:
+    if reviewer_id:
+        return _reviewer_agent_name(reviewer_id)
+    if model:
+        return f"{stage} ({model})"
+    return stage
 
 
 def _build_agent(
@@ -338,6 +1045,7 @@ async def _run_json_object_completion(
     prompt: str,
     output_type: type[OutputBatch],
     label: str,
+    max_tokens: int,
 ) -> OutputBatch:
     if provider_config is None:
         raise OpenAIAgentsDryRunError("provider_config is required for JSON Object mode")
@@ -356,6 +1064,7 @@ async def _run_json_object_completion(
         instructions=instructions,
         prompt=prompt,
         output_type=output_type,
+        max_tokens=max_tokens,
     )
     if run_chat_completion is not None:
         response = await run_chat_completion(
@@ -388,6 +1097,7 @@ def _json_object_request_kwargs(
     instructions: str,
     prompt: str,
     output_type: type[BaseModel],
+    max_tokens: int,
 ) -> dict[str, Any]:
     request_kwargs: dict[str, Any] = {
         "model": model,
@@ -400,6 +1110,7 @@ def _json_object_request_kwargs(
         ],
         "response_format": {"type": "json_object"},
         "stream": False,
+        "max_tokens": max_tokens,
     }
     if provider_config.reasoning_effort:
         request_kwargs["reasoning_effort"] = provider_config.reasoning_effort
@@ -557,6 +1268,9 @@ def _provider_metadata(
     }
     if provider_config.reasoning_effort:
         metadata["reasoning_effort"] = provider_config.reasoning_effort
+    reasoning = _safe_reasoning_metadata(provider_config.extra_body.get("reasoning"))
+    if reasoning:
+        metadata["reasoning"] = reasoning
     if thinking_type:
         metadata["thinking"] = {"type": thinking_type}
     return metadata
@@ -584,7 +1298,23 @@ def _reviewer_provider_metadata(
                     "header_keys": sorted(reviewer_config.provider_config.default_headers),
                 }
             )
+            reasoning = _safe_reasoning_metadata(
+                reviewer_config.provider_config.extra_body.get("reasoning")
+            )
+            if reasoning:
+                item["reasoning"] = reasoning
         metadata.append(item)
+    return metadata
+
+
+def _safe_reasoning_metadata(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    metadata: dict[str, object] = {}
+    for key in ("effort", "exclude", "enabled", "max_tokens"):
+        item = value.get(key)
+        if isinstance(item, (str, bool, int)):
+            metadata[key] = item
     return metadata
 
 

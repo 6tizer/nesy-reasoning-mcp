@@ -5,6 +5,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
+import anyio
 import pytest
 
 from nesy_reasoning_mcp.auto_ingest import (
@@ -22,6 +23,7 @@ from nesy_reasoning_mcp.auto_ingest import gate as gate_module
 from nesy_reasoning_mcp.auto_ingest.fetcher import fetch_url_evidence
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
+    LLMRuntimeOptions,
     OpenAIAgentsDryRunError,
     OpenAICompatibleProviderConfig,
     ReviewerModelConfig,
@@ -271,6 +273,152 @@ async def test_openai_agents_dry_run_runs_multiple_reviewers_and_reports_voting(
     assert report.reviews[0].metadata["reported_reviewer_model"] == "model-reported-by-agent"
 
 
+async def test_json_object_reviewers_run_in_parallel() -> None:
+    candidate = _candidate()
+    active_reviewers = 0
+    max_active_reviewers = 0
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        nonlocal active_reviewers, max_active_reviewers
+        if kwargs["model"] == "extractor-model":
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        active_reviewers += 1
+        max_active_reviewers = max(max_active_reviewers, active_reviewers)
+        await anyio.sleep(0.02)
+        active_reviewers -= 1
+        review = _approval(candidate).model_copy(
+            update={"reasons": [f"{kwargs['model']} approved"]}
+        )
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="extractor-model",
+        reviewer_models=["reviewer-a", "reviewer-b"],
+        voting_policy=openai_agents.ReviewVotingPolicy.MAJORITY,
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert max_active_reviewers == 2
+
+
+async def test_risk_tiered_high_priority_concern_skips_normal_reviewers() -> None:
+    candidate = _candidate()
+    called_models: list[str] = []
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        called_models.append(kwargs["model"])
+        if kwargs["model"] == "extractor-model":
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        if kwargs["model"] == "high-priority":
+            review = ReviewDecision(
+                candidate_id=candidate.id,
+                decision=ReviewDecisionValue.NEEDS_HUMAN,
+                reasons=["needs human"],
+            )
+            return json.dumps({"reviews": [review.model_dump(mode="json", exclude_none=True)]})
+        raise AssertionError("normal reviewer should be skipped")
+
+    report = await run_openai_agents_dry_run(
+        IngestionInput(evidence=[_evidence()]),
+        store=RelationStore(),
+        model="extractor-model",
+        reviewer_models=["high-priority", "normal-reviewer"],
+        high_priority_reviewer_models=["high-priority"],
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+    )
+
+    assert called_models == ["extractor-model", "high-priority"]
+    assert report.gate_results[0].action == "queue"
+    assert report.metadata["runtime_trace"][-1]["status"] == "skipped"
+    assert any(
+        review.metadata.get("synthetic_vote") == "reviewer_skipped" for review in report.reviews
+    )
+
+
+async def test_reviewer_timeout_queues_auto_write_without_graph_write() -> None:
+    store = RelationStore()
+    candidate = _candidate()
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        if kwargs["model"] == "extractor-model":
+            return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
+        if kwargs["model"] == "slow-reviewer":
+            await anyio.sleep(1)
+        review = _approval(candidate)
+        return json.dumps({"reviews": [review.model_dump(mode="json")]})
+
+    report = await openai_agents.run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="extractor-model",
+        reviewer_models=["fast-reviewer", "slow-reviewer"],
+        voting_policy=openai_agents.ReviewVotingPolicy.MAJORITY,
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+        runtime_options=LLMRuntimeOptions(reviewer_timeout_seconds=0.01),
+        auto_write=True,
+    )
+
+    assert report.diagnostics[0].code == "LLM_RUNTIME_TIMEOUT"
+    assert report.gate_results[0].action == "queue"
+    assert store.list_relations() == []
+
+
+async def test_extractor_timeout_returns_diagnostic_report_without_graph_write() -> None:
+    store = RelationStore()
+
+    async def fake_chat_completion(**kwargs: Any) -> str:
+        await anyio.sleep(1)
+        return "{}"
+
+    report = await openai_agents.run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="extractor-model",
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+        runtime_options=LLMRuntimeOptions(extractor_timeout_seconds=0.01),
+        auto_write=True,
+    )
+
+    assert report.diagnostics[0].code == "LLM_RUNTIME_TIMEOUT"
+    assert report.metadata["runtime_trace"][0]["stage"] == "extractor"
+    assert report.metadata["runtime_trace"][0]["status"] == "timeout"
+    assert store.list_relations() == []
+
+
 async def test_openai_compatible_provider_uses_env_key_headers_and_disables_tracing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,7 +603,8 @@ async def test_openrouter_json_object_provider_uses_chat_completions_json_mode(
         captured.append(kwargs)
         assert kwargs["response_format"] == {"type": "json_object"}
         assert "reasoning_effort" not in kwargs
-        assert "extra_body" not in kwargs
+        assert kwargs["extra_body"] == {"reasoning": {"effort": "medium", "exclude": True}}
+        assert kwargs["max_tokens"] in {4096, 2048}
         assert kwargs["provider_config"].api_key_env == "OPENROUTER_API_KEY"
         assert kwargs["provider_config"].default_headers == {
             "HTTP-Referer": "https://github.com/6tizer/nesy-reasoning-mcp",
@@ -483,6 +632,7 @@ async def test_openrouter_json_object_provider_uses_chat_completions_json_mode(
                 "X-OpenRouter-Title": "NeSy Reasoning MCP",
             },
             structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            extra_body={"reasoning": {"effort": "medium", "exclude": True}},
         ),
         run_chat_completion=fake_chat_completion,
     )
@@ -499,6 +649,7 @@ async def test_openrouter_json_object_provider_uses_chat_completions_json_mode(
         "header_keys": ["HTTP-Referer", "X-OpenRouter-Title"],
         "tracing_disabled": True,
         "structured_output_mode": "json_object",
+        "reasoning": {"effort": "medium", "exclude": True},
     }
 
 
@@ -639,23 +790,24 @@ async def test_json_object_provider_failure_happens_before_write() -> None:
     async def fake_chat_completion(**kwargs: Any) -> str:
         return ""
 
-    with pytest.raises(OpenAIAgentsDryRunError, match="empty JSON Object"):
-        await openai_agents.run_openai_agents_ingestion(
-            IngestionInput(evidence=[_evidence()]),
-            store=store,
-            model="deepseek-v4-pro",
-            env={"DEEPSEEK_API_KEY": "secret"},
-            provider_config=OpenAICompatibleProviderConfig(
-                base_url="https://api.deepseek.com",
-                api_key_env="DEEPSEEK_API_KEY",
-                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
-                reasoning_effort="high",
-                extra_body={"thinking": {"type": "enabled"}},
-            ),
-            run_chat_completion=fake_chat_completion,
-            auto_write=True,
-        )
+    report = await openai_agents.run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="deepseek-v4-pro",
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+        auto_write=True,
+    )
 
+    assert report.diagnostics[0].code == "LLM_RUNTIME_ERROR"
+    assert report.metadata["runtime_trace"][0]["status"] == "error"
     assert store.list_relations() == []
     assert store.list_review_queue() == []
 
@@ -666,23 +818,24 @@ async def test_json_object_provider_rejects_mapping_without_choices_before_write
     async def fake_chat_completion(**kwargs: Any) -> dict[str, Any]:
         return {"id": "response-id", "usage": {"total_tokens": 10}}
 
-    with pytest.raises(OpenAIAgentsDryRunError, match="did not include choices"):
-        await openai_agents.run_openai_agents_ingestion(
-            IngestionInput(evidence=[_evidence()]),
-            store=store,
-            model="deepseek-v4-pro",
-            env={"DEEPSEEK_API_KEY": "secret"},
-            provider_config=OpenAICompatibleProviderConfig(
-                base_url="https://api.deepseek.com",
-                api_key_env="DEEPSEEK_API_KEY",
-                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
-                reasoning_effort="high",
-                extra_body={"thinking": {"type": "enabled"}},
-            ),
-            run_chat_completion=fake_chat_completion,
-            auto_write=True,
-        )
+    report = await openai_agents.run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="deepseek-v4-pro",
+        env={"DEEPSEEK_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+        auto_write=True,
+    )
 
+    assert report.diagnostics[0].code == "LLM_RUNTIME_ERROR"
+    assert report.metadata["runtime_trace"][0]["error_code"] == "OpenAIAgentsDryRunError"
     assert store.list_relations() == []
     assert store.list_review_queue() == []
 
@@ -699,39 +852,40 @@ async def test_cross_provider_reviewer_failure_happens_before_write_or_queue() -
             return json.dumps({"candidates": [candidate.model_dump(mode="json")]})
         raise OpenAIAgentsDryRunError("reviewer provider failed")
 
-    with pytest.raises(OpenAIAgentsDryRunError, match="reviewer provider failed"):
-        await openai_agents.run_openai_agents_ingestion(
-            IngestionInput(evidence=[_evidence()]),
-            store=store,
-            model="deepseek-v4-pro",
-            reviewer_configs=[
-                ReviewerModelConfig(
-                    reviewer_id="kimi:kimi-k2.6",
-                    model="kimi-k2.6",
-                    provider_name="kimi",
-                    provider_config=OpenAICompatibleProviderConfig(
-                        base_url="https://api.moonshot.cn/v1",
-                        api_key_env="MOONSHOT_API_KEY",
-                        structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
-                        extra_body={"thinking": {"type": "enabled"}},
-                    ),
-                )
-            ],
-            env={"DEEPSEEK_API_KEY": "secret", "MOONSHOT_API_KEY": "secret"},
-            provider_config=OpenAICompatibleProviderConfig(
-                base_url="https://api.deepseek.com",
-                api_key_env="DEEPSEEK_API_KEY",
-                structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
-                reasoning_effort="high",
-                extra_body={"thinking": {"type": "enabled"}},
-            ),
-            run_chat_completion=fake_chat_completion,
-            auto_write=True,
-        )
+    report = await openai_agents.run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        model="deepseek-v4-pro",
+        reviewer_configs=[
+            ReviewerModelConfig(
+                reviewer_id="kimi:kimi-k2.6",
+                model="kimi-k2.6",
+                provider_name="kimi",
+                provider_config=OpenAICompatibleProviderConfig(
+                    base_url="https://api.moonshot.cn/v1",
+                    api_key_env="MOONSHOT_API_KEY",
+                    structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+                    extra_body={"thinking": {"type": "enabled"}},
+                ),
+            )
+        ],
+        env={"DEEPSEEK_API_KEY": "secret", "MOONSHOT_API_KEY": "secret"},
+        provider_config=OpenAICompatibleProviderConfig(
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        run_chat_completion=fake_chat_completion,
+        auto_write=True,
+    )
 
     assert calls == 2
+    assert report.diagnostics[0].code == "LLM_RUNTIME_ERROR"
+    assert report.gate_results[0].action == "queue"
     assert store.list_relations() == []
-    assert store.list_review_queue() == []
+    assert len(store.list_review_queue()) == 1
 
 
 async def test_custom_runner_can_receive_tracing_disabled(
@@ -809,7 +963,9 @@ def test_provider_registry_contains_static_shortcuts_without_secrets() -> None:
         is ProviderStructuredOutputMode.JSON_OBJECT
     )
     assert get_provider_entry("openrouter").reasoning_effort is None
-    assert get_provider_entry("openrouter").extra_body == {}
+    assert get_provider_entry("openrouter").extra_body == {
+        "reasoning": {"effort": "medium", "exclude": True}
+    }
     assert get_provider_entry("openrouter").notes
     rendered = ingest_cli._render_provider_list()
     assert (
@@ -1961,6 +2117,81 @@ def test_cli_list_providers_does_not_require_input_or_api_key() -> None:
     assert "secret" not in rendered.lower()
 
 
+def test_cli_progress_writes_to_stderr_without_polluting_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        progress_callback: Any = None,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert progress_callback is not None
+        progress_callback({"event": "started", "stage": "extractor", "label": "extractor"})
+        progress_callback(
+            {
+                "event": "done",
+                "stage": "extractor",
+                "label": "extractor",
+                "duration_ms": 1200,
+                "candidate_count": 1,
+            }
+        )
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    stdout = StringIO()
+    stderr = StringIO()
+    args = argparse.Namespace(
+        input=str(input_path),
+        retrieval_input=None,
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        reviewer_models=[],
+        reviewers=[],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=[],
+        high_priority_reviewers=[],
+        provider=None,
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
+        extractor_timeout_seconds=180,
+        high_priority_reviewer_timeout_seconds=180,
+        reviewer_timeout_seconds=120,
+        extractor_max_tokens=4096,
+        reviewer_max_tokens=2048,
+        progress="auto",
+        disable_tracing=False,
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=stdout, stderr=stderr)
+
+    assert exit_code == 0
+    assert json.loads(stdout.getvalue())["candidates"]
+    assert "[extractor] extractor started" in stderr.getvalue()
+    assert "[extractor] extractor done in 1.2s candidates=1" in stderr.getvalue()
+
+
 def test_parse_provider_qualified_reviewer_specs() -> None:
     assert ingest_cli._parse_provider_reviewer_spec("deepseek:deepseek-v4-pro")[1:] == (
         "deepseek-v4-pro",
@@ -2361,6 +2592,7 @@ def test_cli_openrouter_provider_accepts_headers_with_model(
             },
             disable_tracing=True,
             structured_output_mode=ProviderStructuredOutputMode.JSON_OBJECT,
+            extra_body={"reasoning": {"effort": "medium", "exclude": True}},
         )
         assert auto_write is False
         assert min_write_confidence == 0.85

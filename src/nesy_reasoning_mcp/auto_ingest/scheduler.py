@@ -212,6 +212,27 @@ class ScheduledIngestionProviderConfig(BaseModel):
         raise ValueError("must be high or max")
 
 
+class ScheduledIngestionRuntimeConfig(BaseModel):
+    """Persisted LLM runtime controls for one scheduled ingestion job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    extractor_timeout_seconds: float = Field(default=180, gt=0)
+    high_priority_reviewer_timeout_seconds: float = Field(default=180, gt=0)
+    reviewer_timeout_seconds: float = Field(default=120, gt=0)
+    extractor_max_tokens: int = Field(default=4096, gt=0)
+    reviewer_max_tokens: int = Field(default=2048, gt=0)
+    progress: str = "auto"
+
+    @field_validator("progress")
+    @classmethod
+    def validate_progress(cls, value: str) -> str:
+        """Validate scheduled ingestion progress mode."""
+        if value in {"auto", "off"}:
+            return value
+        raise ValueError("must be auto or off")
+
+
 class ScheduledIngestionWriteConfig(BaseModel):
     """Persisted write controls for one scheduled Agent SDK ingestion job."""
 
@@ -295,6 +316,9 @@ class ScheduledIngestionJob(BaseModel):
     source_config: ScheduledIngestionSourceConfig
     provider_config: ScheduledIngestionProviderConfig = Field(
         default_factory=ScheduledIngestionProviderConfig
+    )
+    runtime_config: ScheduledIngestionRuntimeConfig = Field(
+        default_factory=ScheduledIngestionRuntimeConfig
     )
     write_config: ScheduledIngestionWriteConfig = Field(
         default_factory=ScheduledIngestionWriteConfig
