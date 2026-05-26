@@ -121,6 +121,7 @@ def test_ingest_agent_dry_run_help_lists_safe_write_flags() -> None:
     )
 
     assert "--auto-write" in completed.stdout
+    assert "--canonicalize-preview" in completed.stdout
     assert "--min-write-confidence" in completed.stdout
     assert "--provider" in completed.stdout
     assert "--list-providers" in completed.stdout
@@ -213,6 +214,7 @@ def test_ingest_schedule_add_help_lists_safe_write_flags() -> None:
     assert "--reviewer-model" in completed.stdout
     assert "--reviewer" in completed.stdout
     assert "--high-priority-reviewer" in completed.stdout
+    assert "--canonicalize-preview" not in completed.stdout
     assert completed.stderr == ""
 
 

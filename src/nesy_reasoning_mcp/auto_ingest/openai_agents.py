@@ -156,6 +156,7 @@ async def run_openai_agents_dry_run(
     disable_tracing: bool = False,
     runtime_options: LLMRuntimeOptions | None = None,
     progress_callback: ProgressCallback | None = None,
+    canonicalize_preview: bool = False,
 ) -> IngestionReport:
     """Extract, review, and gate candidate relations without persistent writes."""
     return await run_openai_agents_ingestion(
@@ -173,6 +174,7 @@ async def run_openai_agents_dry_run(
         disable_tracing=disable_tracing,
         runtime_options=runtime_options,
         progress_callback=progress_callback,
+        canonicalize_preview=canonicalize_preview,
         auto_write=False,
     )
 
@@ -195,6 +197,7 @@ async def run_openai_agents_ingestion(
     disable_tracing: bool = False,
     runtime_options: LLMRuntimeOptions | None = None,
     progress_callback: ProgressCallback | None = None,
+    canonicalize_preview: bool = False,
 ) -> IngestionReport:
     """Extract, review, gate, and optionally write approved candidate relations."""
     if not 0 <= min_write_confidence <= 1:
@@ -288,7 +291,7 @@ async def run_openai_agents_ingestion(
 
     canonicalization_result: PropositionCanonicalizationResult | None = None
     run_propositions = [*ingestion_input.propositions]
-    if auto_write and candidate_batch.candidates:
+    if (auto_write or canonicalize_preview) and candidate_batch.candidates:
         try:
             canonicalization_result = await _run_auto_write_canonicalization(
                 ingestion_input=ingestion_input,
@@ -325,35 +328,36 @@ async def run_openai_agents_ingestion(
                 runtime_trace=runtime_trace,
                 canonicalization_result=canonicalization_result,
             )
-        proposition_import_diagnostics = _validate_canonical_proposition_import(
-            canonicalization_result.propositions,
-            store,
-        )
-        if proposition_import_diagnostics:
-            canonicalization_result = PropositionCanonicalizationResult(
-                candidates=canonicalization_result.candidates,
-                propositions=canonicalization_result.propositions,
-                diagnostics=[
-                    *canonicalization_result.diagnostics,
-                    *proposition_import_diagnostics,
-                ],
-                metadata={
-                    **canonicalization_result.metadata,
-                    "diagnostic_count": (
-                        canonicalization_result.metadata.get("diagnostic_count", 0)
-                        + len(proposition_import_diagnostics)
-                    ),
-                },
+        if auto_write:
+            proposition_import_diagnostics = _validate_canonical_proposition_import(
+                canonicalization_result.propositions,
+                store,
             )
-            return _canonicalization_error_report(
-                ingestion_input=ingestion_input,
-                candidate_batch=candidate_batch,
-                auto_write=auto_write,
-                provider_config=provider_config,
-                tracing_disabled=tracing_disabled,
-                runtime_trace=runtime_trace,
-                canonicalization_result=canonicalization_result,
-            )
+            if proposition_import_diagnostics:
+                canonicalization_result = PropositionCanonicalizationResult(
+                    candidates=canonicalization_result.candidates,
+                    propositions=canonicalization_result.propositions,
+                    diagnostics=[
+                        *canonicalization_result.diagnostics,
+                        *proposition_import_diagnostics,
+                    ],
+                    metadata={
+                        **canonicalization_result.metadata,
+                        "diagnostic_count": (
+                            canonicalization_result.metadata.get("diagnostic_count", 0)
+                            + len(proposition_import_diagnostics)
+                        ),
+                    },
+                )
+                return _canonicalization_error_report(
+                    ingestion_input=ingestion_input,
+                    candidate_batch=candidate_batch,
+                    auto_write=auto_write,
+                    provider_config=provider_config,
+                    tracing_disabled=tracing_disabled,
+                    runtime_trace=runtime_trace,
+                    canonicalization_result=canonicalization_result,
+                )
         candidate_batch = CandidateRelationBatch(candidates=canonicalization_result.candidates)
         run_propositions = [
             *run_propositions,

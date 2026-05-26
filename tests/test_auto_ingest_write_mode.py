@@ -159,6 +159,64 @@ async def test_dry_run_does_not_run_canonicalizer_with_existing_propositions(
     assert store.list_relations() == []
 
 
+async def test_dry_run_canonicalize_preview_runs_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(target="release is auto-deployed")
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="auto_deploy", label="auto-deploy")],
+        mode="append",
+        store_id="default",
+    )
+    calls: list[str] = []
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            calls.append("extractor")
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            calls.append("canonicalizer")
+            return {
+                "propositions": [
+                    {
+                        "endpoint_refs": [f"{candidate.id}:source"],
+                        "canonical_label": candidate.source,
+                    },
+                    {
+                        "endpoint_refs": [f"{candidate.id}:target"],
+                        "canonical_label": "auto-deploy",
+                        "canonical_id": "auto_deploy",
+                        "aliases": ["release is auto-deployed"],
+                    },
+                ]
+            }
+        calls.append("reviewer")
+        return {"reviews": [_review(candidate).model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        canonicalize_preview=True,
+    )
+
+    assert calls == ["extractor", "canonicalizer", "reviewer"]
+    assert report.mode == "dry_run"
+    assert report.candidates[0].target_id == "auto_deploy"
+    assert report.metadata["proposition_canonicalization"]["mode"] == "llm_assisted"
+    assert report.written_relation_ids == []
+    assert store.list_relations() == []
+
+
 async def test_auto_write_persists_gate_approved_relations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

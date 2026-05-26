@@ -144,7 +144,11 @@ def add_ingest_subparser(subparsers: argparse._SubParsersAction[argparse.Argumen
     add_schedule_arguments(schedule_parser)
 
 
-def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
+def add_agent_dry_run_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_canonicalize_preview: bool = True,
+) -> None:
     """Add shared arguments for the OpenAI Agents SDK dry-run command."""
     parser.add_argument("--input", default=None, help="JSON input file path.")
     parser.add_argument(
@@ -274,6 +278,15 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Persist gate-approved relations with safe write checks.",
     )
+    if include_canonicalize_preview:
+        parser.add_argument(
+            "--canonicalize-preview",
+            action="store_true",
+            help=(
+                "Run proposition canonicalization during dry-run preview without writing "
+                "graph memory."
+            ),
+        )
     parser.add_argument(
         "--min-write-confidence",
         type=float,
@@ -455,7 +468,7 @@ def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--allow-scheduled-writes", action="store_true")
     add_parser.add_argument("--allow-single-reviewer-write", action="store_true")
     add_parser.add_argument("--report-dir", default=None)
-    add_agent_dry_run_arguments(add_parser)
+    add_agent_dry_run_arguments(add_parser, include_canonicalize_preview=False)
 
     list_parser = schedule_subparsers.add_parser("list", help="List scheduled ingestion jobs.")
     list_parser.add_argument(
@@ -709,6 +722,7 @@ async def _run_agent_dry_run(
         disable_tracing=bool(getattr(args, "disable_tracing", False)),
         runtime_options=runtime_options,
         progress_callback=progress_callback,
+        canonicalize_preview=bool(getattr(args, "canonicalize_preview", False)),
     )
     metadata = dict(report.metadata)
     if external_retrieval is not None:
