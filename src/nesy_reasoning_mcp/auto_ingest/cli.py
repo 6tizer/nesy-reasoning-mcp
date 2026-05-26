@@ -1790,7 +1790,10 @@ def _validate_provider_reviewer_specs(provider_config: ScheduledIngestionProvide
 def _reviewer_configs_from_args(args: argparse.Namespace) -> list[ReviewerModelConfig]:
     configs: list[ReviewerModelConfig] = []
     seen: set[str] = set()
-    for spec in getattr(args, "reviewers", []) or []:
+    for spec in [
+        *(getattr(args, "reviewers", []) or []),
+        *(getattr(args, "high_priority_reviewers", []) or []),
+    ]:
         provider_entry, model, reviewer_id = _parse_provider_reviewer_spec(spec)
         if reviewer_id in seen:
             continue
