@@ -298,6 +298,13 @@ def test_scheduled_provider_qualified_reviewers_round_trip(tmp_path: Path) -> No
     assert round_tripped.high_priority_reviewers == ["deepseek:deepseek-v4-pro"]
     assert round_tripped.extractor_timeout_seconds == 180
     assert round_tripped.reviewer_timeout_seconds == 120
+    assert [
+        config.reviewer_id for config in ingest_cli._reviewer_configs_from_args(round_tripped)
+    ] == [
+        "kimi:kimi-k2.6",
+        "openrouter:qwen/qwen3.7-max",
+        "deepseek:deepseek-v4-pro",
+    ]
 
 
 async def test_scheduled_dry_run_writes_report_without_graph_write(

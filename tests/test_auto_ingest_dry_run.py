@@ -1370,17 +1370,23 @@ def test_cli_agent_dry_run_passes_provider_qualified_reviewers(
         assert [config.reviewer_id for config in reviewer_configs] == [
             "kimi:kimi-k2.6",
             "openrouter:qwen/qwen3.7-max",
+            "deepseek:deepseek-v4-pro",
         ]
         assert [config.model for config in reviewer_configs] == [
             "kimi-k2.6",
             "qwen/qwen3.7-max",
+            "deepseek-v4-pro",
         ]
-        assert [config.provider_name for config in reviewer_configs] == ["kimi", "openrouter"]
+        assert [config.provider_name for config in reviewer_configs] == [
+            "kimi",
+            "openrouter",
+            "deepseek",
+        ]
         assert [
             config.provider_config.api_key_env
             for config in reviewer_configs
             if config.provider_config is not None
-        ] == ["MOONSHOT_API_KEY", "OPENROUTER_API_KEY"]
+        ] == ["MOONSHOT_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"]
         assert kwargs["high_priority_reviewer_models"] == [
             "legacy-senior",
             "deepseek:deepseek-v4-pro",
@@ -1407,6 +1413,120 @@ def test_cli_agent_dry_run_passes_provider_qualified_reviewers(
         voting_policy="risk_tiered",
         high_priority_reviewer_models=["legacy-senior"],
         high_priority_reviewers=["deepseek:deepseek-v4-pro"],
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_agent_dry_run_high_priority_reviewer_registers_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        reviewer_configs = kwargs["reviewer_configs"]
+        assert [config.reviewer_id for config in reviewer_configs] == ["kimi:kimi-k2.6"]
+        assert [config.model for config in reviewer_configs] == ["kimi-k2.6"]
+        assert [config.provider_name for config in reviewer_configs] == ["kimi"]
+        assert kwargs["high_priority_reviewer_models"] == ["kimi:kimi-k2.6"]
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        provider="deepseek",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
+        disable_tracing=False,
+        reviewer_models=[],
+        reviewers=[],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=[],
+        high_priority_reviewers=["kimi:kimi-k2.6"],
+        auto_write=False,
+        min_write_confidence=0.85,
+        format="json",
+        output=None,
+        timeout_seconds=1.0,
+        max_url_bytes=1000,
+    )
+
+    exit_code = ingest_cli.run_agent_dry_run_cli(args, stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
+
+
+def test_cli_agent_dry_run_deduplicates_high_priority_reviewer_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"evidence": [_evidence().model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    async def fake_run(
+        ingestion_input: IngestionInput,
+        *,
+        store: Any,
+        **kwargs: Any,
+    ) -> IngestionReport:
+        assert ingestion_input.evidence
+        assert store.list_relations() == []
+        reviewer_configs = kwargs["reviewer_configs"]
+        assert [config.reviewer_id for config in reviewer_configs] == ["kimi:kimi-k2.6"]
+        assert kwargs["high_priority_reviewer_models"] == ["kimi:kimi-k2.6"]
+        return IngestionReport(candidates=[_candidate()])
+
+    monkeypatch.setattr(ingest_cli, "run_openai_agents_ingestion", fake_run)
+    args = argparse.Namespace(
+        input=str(input_path),
+        url=[],
+        task=None,
+        question=None,
+        model=None,
+        provider="deepseek",
+        list_providers=False,
+        base_url=None,
+        api_key_env=None,
+        provider_header=[],
+        provider_thinking=None,
+        provider_reasoning_effort=None,
+        disable_tracing=False,
+        reviewer_models=[],
+        reviewers=["kimi:kimi-k2.6"],
+        voting_policy="risk_tiered",
+        high_priority_reviewer_models=[],
+        high_priority_reviewers=["kimi:kimi-k2.6"],
         auto_write=False,
         min_write_confidence=0.85,
         format="json",
