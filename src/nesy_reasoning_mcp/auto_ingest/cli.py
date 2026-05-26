@@ -42,8 +42,10 @@ from nesy_reasoning_mcp.auto_ingest.fetcher import (
     fetch_url_evidence_many,
 )
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
+    LLMRuntimeOptions,
     OpenAIAgentsDryRunError,
     OpenAICompatibleProviderConfig,
+    ProgressCallback,
     ReviewerModelConfig,
     run_openai_agents_ingestion,
 )
@@ -67,6 +69,7 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     ScheduledIngestionRun,
     ScheduledIngestionRunFilter,
     ScheduledIngestionRunStatus,
+    ScheduledIngestionRuntimeConfig,
     ScheduledIngestionRunTrigger,
     ScheduledIngestionSourceConfig,
     ScheduledIngestionState,
@@ -224,6 +227,42 @@ def add_agent_dry_run_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["high", "max"],
         default=None,
         help="Override JSON Object provider reasoning effort, for example DeepSeek.",
+    )
+    parser.add_argument(
+        "--extractor-timeout-seconds",
+        type=float,
+        default=180,
+        help="Extractor LLM timeout in seconds.",
+    )
+    parser.add_argument(
+        "--high-priority-reviewer-timeout-seconds",
+        type=float,
+        default=180,
+        help="High-priority reviewer LLM timeout in seconds.",
+    )
+    parser.add_argument(
+        "--reviewer-timeout-seconds",
+        type=float,
+        default=120,
+        help="Reviewer LLM timeout in seconds.",
+    )
+    parser.add_argument(
+        "--extractor-max-tokens",
+        type=int,
+        default=4096,
+        help="JSON Object extractor max output tokens.",
+    )
+    parser.add_argument(
+        "--reviewer-max-tokens",
+        type=int,
+        default=2048,
+        help="JSON Object reviewer max output tokens.",
+    )
+    parser.add_argument(
+        "--progress",
+        choices=["auto", "off"],
+        default="auto",
+        help="Emit ingestion progress to stderr or disable it.",
     )
     parser.add_argument(
         "--disable-tracing",
@@ -484,6 +523,7 @@ def run_agent_dry_run_cli(
         if getattr(args, "list_providers", False):
             print(_render_provider_list(), file=stdout)
             return 0
+        args._progress_stderr = stderr
         report = anyio.run(_run_agent_dry_run, args)
     except (OSError, ValueError, ValidationError, OpenAIAgentsDryRunError) as exc:
         print(str(exc), file=stderr)
@@ -560,7 +600,10 @@ def main(argv: list[str] | None = None) -> int:
     return run_agent_dry_run_cli(args)
 
 
-async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
+async def _run_agent_dry_run(
+    args: argparse.Namespace,
+    progress_callback: ProgressCallback | None = None,
+) -> IngestionReport:
     if not 0 <= args.min_write_confidence <= 1:
         raise ValueError("--min-write-confidence must be between 0 and 1")
     provider_entry = _provider_entry_from_args(args)
@@ -568,6 +611,8 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
     model = _model_from_args(args, provider_entry)
     reviewer_configs = _reviewer_configs_from_args(args)
     high_priority_reviewers = _high_priority_reviewers_from_args(args)
+    runtime_options = _runtime_options_from_args(args)
+    progress_callback = progress_callback or _progress_callback_from_args(args)
     if provider_entry is not None and model is None and not os.environ.get("OPENAI_DEFAULT_MODEL"):
         raise ValueError(
             f"provider '{provider_entry.name}' requires --model or OPENAI_DEFAULT_MODEL"
@@ -662,6 +707,8 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
         min_write_confidence=args.min_write_confidence,
         provider_config=provider_config,
         disable_tracing=bool(getattr(args, "disable_tracing", False)),
+        runtime_options=runtime_options,
+        progress_callback=progress_callback,
     )
     metadata = dict(report.metadata)
     if external_retrieval is not None:
@@ -683,6 +730,13 @@ async def _run_agent_dry_run(args: argparse.Namespace) -> IngestionReport:
             "metadata": metadata,
         }
     )
+
+
+async def _run_agent_dry_run_with_optional_progress(
+    args: argparse.Namespace,
+    progress_callback: ProgressCallback,
+) -> IngestionReport:
+    return await _run_agent_dry_run(args, progress_callback=progress_callback)
 
 
 def _external_retrieval_from_args(args: argparse.Namespace) -> ExternalRetrievalConversion | None:
@@ -726,6 +780,66 @@ def _crawl_result_from_args(
         allow_domains=getattr(args, "crawl_allow_domains", []) or [],
     )
     return crawl_url_evidence(options)
+
+
+def _runtime_options_from_args(args: argparse.Namespace) -> LLMRuntimeOptions:
+    return LLMRuntimeOptions(
+        extractor_timeout_seconds=getattr(args, "extractor_timeout_seconds", 180),
+        high_priority_reviewer_timeout_seconds=getattr(
+            args,
+            "high_priority_reviewer_timeout_seconds",
+            180,
+        ),
+        reviewer_timeout_seconds=getattr(args, "reviewer_timeout_seconds", 120),
+        extractor_max_tokens=getattr(args, "extractor_max_tokens", 4096),
+        reviewer_max_tokens=getattr(args, "reviewer_max_tokens", 2048),
+        progress_mode=getattr(args, "progress", "auto"),
+    )
+
+
+def _progress_callback_from_args(args: argparse.Namespace) -> ProgressCallback | None:
+    if getattr(args, "progress", "auto") == "off":
+        return None
+    stream = getattr(args, "_progress_stderr", sys.stderr)
+
+    def emit(event: dict[str, Any]) -> None:
+        print(_format_progress_event(event), file=stream)
+
+    return emit
+
+
+def _format_progress_event(event: dict[str, Any]) -> str:
+    stage = str(event.get("stage", "runtime"))
+    label = str(event.get("reviewer_id") or event.get("label") or "")
+    prefix = f"[{stage}]"
+    if label:
+        prefix = f"{prefix} {label}"
+    event_name = str(event.get("event", event.get("status", "progress")))
+    if event_name == "started":
+        return f"{prefix} started"
+    duration = event.get("duration_ms")
+    duration_text = f" in {float(duration) / 1000:.1f}s" if isinstance(duration, int) else ""
+    if event_name == "done":
+        counts = []
+        if "candidate_count" in event:
+            counts.append(f"candidates={event['candidate_count']}")
+        if "review_count" in event:
+            counts.append(f"reviews={event['review_count']}")
+        if "approved_count" in event:
+            counts.append(f"approved={event['approved_count']}")
+        if "queued_count" in event:
+            counts.append(f"queued={event['queued_count']}")
+        suffix = f" {' '.join(counts)}" if counts else ""
+        return f"{prefix} done{duration_text}{suffix}"
+    if event_name == "timeout":
+        timeout = event.get("timeout_seconds")
+        timeout_text = f" after {timeout:g}s" if isinstance(timeout, (int, float)) else ""
+        return f"{prefix} timeout{timeout_text}"
+    if event_name == "error":
+        return f"{prefix} error {event.get('error_code', 'unknown')}"
+    if event_name == "skipped":
+        return f"{prefix} skipped {event.get('error_code', '')}".rstrip()
+    return f"{prefix} {event_name}"
 
 
 def _diagnostic_report_from_search(
@@ -1097,12 +1211,26 @@ async def _run_scheduled_ingestion_job(
         return finished
 
     store.append_scheduled_ingestion_run(run)
+    progress_events: list[dict[str, Any]] = []
+
+    def scheduled_progress(event: dict[str, Any]) -> None:
+        progress_events.append(dict(event))
+        metadata = {
+            **_scheduled_run_metadata(job, None, safety_diagnostics),
+            "current_stage": event.get("stage"),
+            "current_status": event.get("status") or event.get("event"),
+            "runtime_progress": progress_events[-20:],
+        }
+        store.append_scheduled_ingestion_run(run.model_copy(update={"metadata": metadata}))
 
     cancelled = False
     cancellation_error: BaseException | None = None
     cancelled_exc_class = anyio.get_cancelled_exc_class()
     try:
-        report = await _run_agent_dry_run(_scheduled_job_args(job))
+        report = await _run_agent_dry_run_with_optional_progress(
+            _scheduled_job_args(job),
+            scheduled_progress,
+        )
         diagnostics = [*safety_diagnostics, *report.diagnostics]
         report_payload = report.model_dump(mode="json", exclude_none=True)
         report_path = write_scheduled_report(job, run, report_payload)
@@ -1227,6 +1355,18 @@ def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
         high_priority_reviewers=getattr(args, "high_priority_reviewers", []) or [],
     )
     _validate_provider_reviewer_specs(provider_config)
+    runtime_config = ScheduledIngestionRuntimeConfig(
+        extractor_timeout_seconds=getattr(args, "extractor_timeout_seconds", 180),
+        high_priority_reviewer_timeout_seconds=getattr(
+            args,
+            "high_priority_reviewer_timeout_seconds",
+            180,
+        ),
+        reviewer_timeout_seconds=getattr(args, "reviewer_timeout_seconds", 120),
+        extractor_max_tokens=getattr(args, "extractor_max_tokens", 4096),
+        reviewer_max_tokens=getattr(args, "reviewer_max_tokens", 2048),
+        progress=getattr(args, "progress", "auto"),
+    )
     write_config = ScheduledIngestionWriteConfig(
         auto_write=bool(args.auto_write),
         allow_scheduled_writes=bool(args.allow_scheduled_writes),
@@ -1244,6 +1384,7 @@ def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
         timezone=args.timezone,
         source_config=source_config,
         provider_config=provider_config,
+        runtime_config=runtime_config,
         write_config=write_config,
         retry_policy=retry_policy,
         state=ScheduledIngestionState(
@@ -1260,6 +1401,7 @@ def _scheduled_job_from_args(args: argparse.Namespace) -> ScheduledIngestionJob:
 def _scheduled_job_args(job: ScheduledIngestionJob) -> argparse.Namespace:
     source = job.source_config
     provider = job.provider_config
+    runtime = job.runtime_config
     write = job.write_config
     return argparse.Namespace(
         input=source.input_path,
@@ -1281,6 +1423,12 @@ def _scheduled_job_args(job: ScheduledIngestionJob) -> argparse.Namespace:
         provider_thinking=provider.provider_thinking,
         provider_reasoning_effort=provider.provider_reasoning_effort,
         disable_tracing=provider.disable_tracing,
+        extractor_timeout_seconds=runtime.extractor_timeout_seconds,
+        high_priority_reviewer_timeout_seconds=runtime.high_priority_reviewer_timeout_seconds,
+        reviewer_timeout_seconds=runtime.reviewer_timeout_seconds,
+        extractor_max_tokens=runtime.extractor_max_tokens,
+        reviewer_max_tokens=runtime.reviewer_max_tokens,
+        progress=runtime.progress,
         auto_write=write.auto_write,
         min_write_confidence=write.min_write_confidence,
         format="json",
@@ -1362,6 +1510,12 @@ def _scheduled_run_metadata(
                 ),
             }
         )
+        report_metadata = report_payload.get("metadata")
+        if isinstance(report_metadata, dict) and isinstance(
+            report_metadata.get("runtime_trace"),
+            list,
+        ):
+            metadata["runtime_trace"] = report_metadata["runtime_trace"]
     return metadata
 
 

@@ -75,6 +75,17 @@ def test_scheduled_job_rejects_unknown_fields() -> None:
         ScheduledIngestionJob.model_validate(payload)
 
 
+def test_scheduled_job_loads_legacy_payload_without_runtime_config() -> None:
+    payload = _job(Path("/tmp")).model_dump(mode="json")
+    payload.pop("runtime_config")
+
+    job = ScheduledIngestionJob.model_validate(payload)
+
+    assert job.runtime_config.extractor_timeout_seconds == 180
+    assert job.runtime_config.reviewer_timeout_seconds == 120
+    assert job.runtime_config.progress == "auto"
+
+
 def test_scheduled_write_requires_multi_reviewer_by_default(tmp_path: Path) -> None:
     args = argparse.Namespace(
         name="write job",
@@ -281,15 +292,22 @@ def test_scheduled_provider_qualified_reviewers_round_trip(tmp_path: Path) -> No
 
     assert job.provider_config.reviewers == ["kimi:kimi-k2.6", "openrouter:qwen/qwen3.7-max"]
     assert job.provider_config.high_priority_reviewers == ["deepseek:deepseek-v4-pro"]
+    assert job.runtime_config.extractor_timeout_seconds == 180
+    assert job.runtime_config.reviewer_timeout_seconds == 120
     assert round_tripped.reviewers == ["kimi:kimi-k2.6", "openrouter:qwen/qwen3.7-max"]
     assert round_tripped.high_priority_reviewers == ["deepseek:deepseek-v4-pro"]
+    assert round_tripped.extractor_timeout_seconds == 180
+    assert round_tripped.reviewer_timeout_seconds == 120
 
 
 async def test_scheduled_dry_run_writes_report_without_graph_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         assert args.auto_write is False
         return IngestionReport(metadata={"scheduled": True})
 
@@ -346,7 +364,10 @@ async def test_scheduled_write_warning_does_not_block_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         return IngestionReport()
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
@@ -375,7 +396,10 @@ async def test_run_due_runs_only_due_active_jobs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         return IngestionReport()
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
@@ -405,7 +429,10 @@ async def test_failed_scheduled_run_records_retry_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         return IngestionReport(
             diagnostics=[Diagnostic(level="error", code="INGESTION_ERROR", message="failed")]
         )
@@ -432,7 +459,10 @@ async def test_scheduled_run_skips_when_job_claim_conflicts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         pytest.fail("stale scheduled job should not run")
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
@@ -461,7 +491,10 @@ async def test_cancelled_scheduled_run_persists_failure_state(
 ) -> None:
     cancelled_exc_class = anyio.get_cancelled_exc_class()
 
-    async def fake_run(args: argparse.Namespace) -> IngestionReport:
+    async def fake_run(
+        args: argparse.Namespace,
+        progress_callback: object | None = None,
+    ) -> IngestionReport:
         raise cancelled_exc_class()
 
     monkeypatch.setattr(ingest_cli, "_run_agent_dry_run", fake_run)
