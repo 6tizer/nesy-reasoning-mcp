@@ -138,6 +138,25 @@ async def test_commit_reviewed_relations_filters_by_explicit_ids_and_marks_commi
 
 
 @pytest.mark.asyncio
+async def test_commit_reviewed_relations_reuses_existing_duplicate_relation() -> None:
+    store = RelationStore()
+    existing, _updated = store.assert_relations(
+        [_candidate().to_relation_input()],
+        mode="append",
+    )
+    store.enqueue_review_queue([_queue_record()])
+
+    result = await call_tool(COMMIT_REVIEWED_RELATIONS, {"ids": ["queue-1"]}, store)
+
+    listed = store.list_review_queue()
+    assert result.isError is False
+    assert result.structuredContent["relation_ids"] == [existing[0].id]
+    assert len(store.list_relations()) == 1
+    assert listed[0].status == ReviewQueueStatus.COMMITTED
+    assert listed[0].committed_relation_ids == [existing[0].id]
+
+
+@pytest.mark.asyncio
 async def test_commit_reviewed_relations_revalidates_and_leaves_pending_when_blocked() -> None:
     store = RelationStore()
     store.enqueue_review_queue([_queue_record(with_review=False)])

@@ -16,8 +16,9 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
     run_openai_agents_ingestion,
 )
-from nesy_reasoning_mcp.schemas import Diagnostic
-from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
+from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord, RelationInput
+from nesy_reasoning_mcp.store import JsonRelationStore, RelationStore, SqliteRelationStore
 
 
 def _evidence() -> EvidenceRecord:
@@ -81,6 +82,28 @@ def _mock_agents(
     monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
 
 
+def _store_for_backend(tmp_path: Any, backend: str) -> Any:
+    if backend == "memory":
+        return RelationStore()
+    if backend == "json":
+        return JsonRelationStore(
+            NesyConfig(
+                storage=StorageConfig(
+                    backend="json",
+                    json_path=str(tmp_path / "relations.json"),
+                )
+            )
+        )
+    return SqliteRelationStore(
+        NesyConfig(
+            storage=StorageConfig(
+                backend="sqlite",
+                sqlite_path=str(tmp_path / "nesy.db"),
+            )
+        )
+    )
+
+
 async def test_default_dry_run_does_not_write(monkeypatch: pytest.MonkeyPatch) -> None:
     candidate = _candidate()
     _mock_agents(monkeypatch, (candidate, _review(candidate)))
@@ -96,6 +119,43 @@ async def test_default_dry_run_does_not_write(monkeypatch: pytest.MonkeyPatch) -
     assert report.written_relation_ids == []
     assert report.approved_relations[0].source == "A"
     assert store.list_review_queue() == []
+    assert store.list_relations() == []
+
+
+async def test_dry_run_does_not_run_canonicalizer_with_existing_propositions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(target="release is auto-deployed")
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="auto_deploy", label="auto-deploy")],
+        mode="append",
+        store_id="default",
+    )
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            raise AssertionError("canonicalizer should not run in ordinary dry-run")
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        return {"reviews": [_review(candidate).model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+    )
+
+    assert report.mode == "dry_run"
+    assert report.written_relation_ids == []
     assert store.list_relations() == []
 
 
@@ -122,6 +182,263 @@ async def test_auto_write_persists_gate_approved_relations(
     assert stored[0].source == "A"
     assert stored[0].provenance["candidate_id"] == candidate.id
     assert stored[0].provenance["review"]["reviewer_model"] == "gpt-test"
+    assert store.list_propositions()
+
+
+@pytest.mark.parametrize("backend", ["memory", "json", "sqlite"])
+async def test_write_approved_relations_deduplicates_existing_relations(
+    tmp_path: Any,
+    backend: str,
+) -> None:
+    store = _store_for_backend(tmp_path, backend)
+    relation = RelationInput(source="A", target="B", relation_type="sufficient")
+
+    first_ids, first_diagnostics, first_result = await writer.write_approved_relations(
+        relations=[relation],
+        store=store,
+    )
+    second_ids, second_diagnostics, second_result = await writer.write_approved_relations(
+        relations=[relation],
+        store=store,
+    )
+
+    assert first_diagnostics == []
+    assert second_diagnostics == []
+    assert first_ids == second_ids
+    assert len(store.list_relations()) == 1
+    assert first_result["deduplicated_count"] == 0
+    assert second_result["deduplicated_count"] == 1
+    assert second_result["deduplicated_relation_ids"] == first_ids
+
+
+async def test_write_approved_relations_deduplicates_batch_duplicates() -> None:
+    store = RelationStore()
+    relation = RelationInput(source="A", target="B", relation_type="sufficient")
+
+    relation_ids, diagnostics, result = await writer.write_approved_relations(
+        relations=[relation, relation],
+        store=store,
+    )
+
+    assert diagnostics == []
+    assert len(store.list_relations()) == 1
+    assert relation_ids == [store.list_relations()[0].id, store.list_relations()[0].id]
+    assert result["deduplicated_count"] == 1
+
+
+async def test_write_approved_relations_deduplicates_legacy_label_match() -> None:
+    store = RelationStore()
+    existing, _updated = store.assert_relations(
+        [RelationInput(source="A", target="B", relation_type="sufficient")],
+        mode="append",
+    )
+
+    relation_ids, diagnostics, result = await writer.write_approved_relations(
+        relations=[
+            RelationInput(
+                source="A",
+                source_id="prop_a",
+                target="B",
+                target_id="prop_b",
+                relation_type="sufficient",
+            )
+        ],
+        store=store,
+    )
+
+    assert diagnostics == []
+    assert relation_ids == [existing[0].id]
+    assert len(store.list_relations()) == 1
+    assert result["deduplicated_count"] == 1
+
+
+async def test_auto_write_canonicalizes_semantic_duplicate_to_existing_proposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    current: dict[str, CandidateRelation] = {}
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        candidate = current["candidate"]
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            propositions = {item.label: item for item in store.list_propositions()}
+            target_label = (
+                "auto-deploy"
+                if candidate.target == "release is auto-deployed"
+                else "eligible for auto-deploy"
+            )
+            target_id = propositions["auto-deploy"].id if target_label == "auto-deploy" else None
+            target_aliases = ["release is auto-deployed"] if target_label == "auto-deploy" else []
+            return {
+                "propositions": [
+                    {
+                        "endpoint_refs": [f"{candidate.id}:source"],
+                        "canonical_label": "CI passes",
+                        "canonical_id": propositions["CI passes"].id,
+                    },
+                    {
+                        "endpoint_refs": [f"{candidate.id}:target"],
+                        "canonical_label": target_label,
+                        "canonical_id": target_id,
+                        "aliases": target_aliases,
+                    },
+                ]
+            }
+        return {
+            "reviews": [
+                _review(candidate).model_dump(mode="json", exclude_none=True),
+            ]
+        }
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    current["candidate"] = _candidate(
+        candidate_id="candidate-1",
+        source="CI passes",
+        target="auto-deploy",
+    )
+    first_report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    current["candidate"] = _candidate(
+        candidate_id="candidate-2",
+        source="CI passes",
+        target="release is auto-deployed",
+    )
+    second_report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    current["candidate"] = _candidate(
+        candidate_id="candidate-3",
+        source="CI passes",
+        target="eligible for auto-deploy",
+    )
+    third_report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    target_proposition = next(
+        proposition
+        for proposition in store.list_propositions()
+        if proposition.label == "auto-deploy"
+    )
+    assert second_report.written_relation_ids == first_report.written_relation_ids
+    assert second_report.metadata["write_result"]["deduplicated_count"] == 1
+    assert "release is auto-deployed" in target_proposition.aliases
+    assert len(store.list_relations()) == 2
+    assert third_report.written_relation_ids != first_report.written_relation_ids
+    assert {relation.target for relation in store.list_relations()} == {
+        "auto-deploy",
+        "eligible for auto-deploy",
+    }
+
+
+async def test_auto_write_canonicalizer_error_does_not_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="auto_deploy", label="auto-deploy")],
+        mode="append",
+        store_id="default",
+    )
+    candidate = _candidate(source="CI passes", target="release is auto-deployed")
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            raise RuntimeError("canonicalizer failed")
+        return {"reviews": [_review(candidate).model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    assert report.diagnostics[0].code == "LLM_RUNTIME_ERROR"
+    assert report.gate_results == []
+    assert report.written_relation_ids == []
+    assert store.list_relations() == []
+
+
+async def test_auto_write_canonicalizer_import_conflict_does_not_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    store.import_records(
+        [],
+        [],
+        propositions=[PropositionRecord(id="known", label="known proposition")],
+        mode="append",
+        store_id="default",
+    )
+    candidate = _candidate()
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str, *, tracing_disabled: bool = False) -> Any:
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            return {"candidates": [candidate.model_dump(mode="json")]}
+        if agent.output_type is openai_agents.PropositionCanonicalizationBatch:
+            return {
+                "propositions": [
+                    {
+                        "endpoint_refs": [f"{candidate.id}:source"],
+                        "canonical_label": "A",
+                        "aliases": ["shared alias"],
+                    },
+                    {
+                        "endpoint_refs": [f"{candidate.id}:target"],
+                        "canonical_label": "B",
+                        "aliases": ["shared alias"],
+                    },
+                ]
+            }
+        return {"reviews": [_review(candidate).model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+    monkeypatch.setattr(openai_agents, "_run_agent", fake_run_agent)
+
+    report = await run_openai_agents_ingestion(
+        IngestionInput(evidence=[_evidence()]),
+        store=store,
+        env={"OPENAI_API_KEY": "test"},
+        auto_write=True,
+    )
+
+    assert report.diagnostics[0].code == "PROPOSITION_CANONICALIZATION_IMPORT_INVALID"
+    assert report.gate_results == []
+    assert report.written_relation_ids == []
+    assert store.list_relations() == []
 
 
 async def test_auto_write_queues_low_confidence_without_writing(
