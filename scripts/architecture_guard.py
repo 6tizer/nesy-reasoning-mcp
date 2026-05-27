@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,8 +34,30 @@ ARCHITECTURE_VIOLATION_TARGET = "ArchitectureViolation"
 def build_parser() -> argparse.ArgumentParser:
     """Build the architecture guard CLI parser."""
     parser = argparse.ArgumentParser(prog="architecture_guard.py")
-    parser.add_argument("--rules", required=True, help="Architecture guard rules JSON file.")
-    parser.add_argument("--facts", required=True, help="Observed facts JSON file.")
+    subparsers = parser.add_subparsers(dest="command")
+    collect_parser = subparsers.add_parser(
+        "collect",
+        help="Convert a GitNexus observation into architecture guard facts JSON.",
+    )
+    collect_parser.add_argument("--target", required=True, help="Observed proposition target.")
+    collect_parser.add_argument("--anchor", default=DEFAULT_ANCHOR)
+    collect_parser.add_argument("--confidence", type=float, default=1.0)
+    collect_parser.add_argument(
+        "--output", default="-", help="Output facts path, or '-' for stdout."
+    )
+    collect_parser.add_argument("--note", default=None)
+    evidence_source = collect_parser.add_mutually_exclusive_group(required=True)
+    evidence_source.add_argument(
+        "--gitnexus-query", default=None, help="GitNexus query text to run."
+    )
+    evidence_source.add_argument(
+        "--evidence-file", default=None, help="Saved GitNexus output file."
+    )
+    collect_parser.add_argument("--repo", default="nesy-reasoning-mcp")
+    collect_parser.add_argument("--limit", type=int, default=5)
+    collect_parser.add_argument("--evidence-command", default=None)
+    parser.add_argument("--rules", help="Architecture guard rules JSON file.")
+    parser.add_argument("--facts", help="Observed facts JSON file.")
     parser.add_argument("--format", choices=["text", "json"], default="text")
     return parser
 
@@ -183,6 +206,88 @@ def _load_json(path: str) -> dict[str, Any]:
     return data
 
 
+def collect_facts(args: argparse.Namespace) -> dict[str, Any]:
+    """Convert GitNexus evidence into a single observed architecture fact."""
+    anchor = _non_empty_value(args.anchor, "anchor")
+    target = _non_empty_value(args.target, "target")
+    confidence = float(args.confidence)
+    if not 0 <= confidence <= 1:
+        raise ValueError("confidence must be between 0 and 1")
+
+    command, evidence = _collect_evidence(args)
+    if not evidence.strip():
+        raise ValueError("gitnexus evidence must not be empty")
+    provenance: dict[str, Any] = {
+        "source": "gitnexus",
+        "command": command,
+        "excerpt": evidence[:4000],
+    }
+    if args.note:
+        provenance["note"] = args.note
+    return {
+        "anchor": anchor,
+        "relations": [
+            {
+                "source": anchor,
+                "target": target,
+                "relation_type": "sufficient",
+                "confidence": confidence,
+                "provenance": provenance,
+            }
+        ],
+    }
+
+
+def _collect_evidence(args: argparse.Namespace) -> tuple[str, str]:
+    if args.evidence_file:
+        evidence_path = Path(args.evidence_file)
+        command = args.evidence_command or f"read {evidence_path}"
+        return command, evidence_path.read_text(encoding="utf-8")
+
+    limit = int(args.limit)
+    if not 1 <= limit <= 50:
+        raise ValueError("limit must be between 1 and 50")
+    command_parts = [
+        "npx",
+        "gitnexus",
+        "query",
+        _non_empty_value(args.gitnexus_query, "gitnexus_query"),
+        "-r",
+        _non_empty_value(args.repo, "repo"),
+        "--limit",
+        str(limit),
+    ]
+    try:
+        completed = subprocess.run(
+            command_parts,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("gitnexus query timed out after 30 seconds") from exc
+    command = " ".join(command_parts)
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip() or "gitnexus query failed"
+        raise ValueError(message)
+    return command, completed.stdout
+
+
+def _non_empty_value(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
+def _write_json_output(data: dict[str, Any], path: str) -> None:
+    rendered = json.dumps(data, indent=2, sort_keys=True)
+    if path == "-":
+        print(rendered)
+        return
+    Path(path).write_text(f"{rendered}\n", encoding="utf-8")
+
+
 def _render_text(report: dict[str, Any]) -> str:
     lines = [
         f"status: {report['status']}",
@@ -201,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "collect":
+            _write_json_output(collect_facts(args), args.output)
+            return 0
+        if not args.rules or not args.facts:
+            raise ValueError("guard mode requires --rules and --facts")
         report = anyio.run(run_guard, _load_json(args.rules), _load_json(args.facts))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)

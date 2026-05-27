@@ -25,6 +25,33 @@ uv run python scripts/architecture_guard.py \
 Exit code `0` means pass. Exit code `1` means a violation or contradiction was
 found. Exit code `2` means invalid input.
 
+## Collect Facts
+
+Convert one GitNexus observation into facts JSON:
+
+```bash
+npx gitnexus context run_stdio_server -r nesy-reasoning-mcp > /tmp/gitnexus-context.txt
+uv run python scripts/architecture_guard.py collect \
+  --target MCPServerCallsAgentSDK \
+  --evidence-file /tmp/gitnexus-context.txt \
+  --evidence-command "npx gitnexus context run_stdio_server -r nesy-reasoning-mcp" \
+  --output /tmp/architecture-guard-facts.json
+```
+
+Or let the helper run a bounded GitNexus query:
+
+```bash
+uv run python scripts/architecture_guard.py collect \
+  --target ArchitectureGuardPass \
+  --gitnexus-query "architecture guard facts" \
+  --repo nesy-reasoning-mcp \
+  --limit 3 \
+  --output /tmp/architecture-guard-facts.json
+```
+
+The collector does not infer truth from arbitrary text. The caller still chooses
+the proposition target; GitNexus output is kept as provenance.
+
 ## Fact Shape
 
 Observed facts should use a stable anchor, normally `ObservedArchitectureFacts`.
