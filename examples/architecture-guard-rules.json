@@ -1,0 +1,64 @@
+{
+  "anchor": "ObservedArchitectureFacts",
+  "relations": [
+    {
+      "source": "MCPServerCallsAgentSDK",
+      "target": "ArchitectureViolation",
+      "relation_type": "sufficient",
+      "confidence": 1.0,
+      "provenance": {
+        "source": "architecture_guard_rule",
+        "rule_id": "no-agent-sdk-inside-mcp-server"
+      }
+    },
+    {
+      "source": "AutoWriteBypassesContradictionGate",
+      "target": "ArchitectureViolation",
+      "relation_type": "sufficient",
+      "confidence": 1.0,
+      "provenance": {
+        "source": "architecture_guard_rule",
+        "rule_id": "auto-write-requires-contradiction-gate"
+      }
+    },
+    {
+      "source": "UnprovenRelationAutoWritten",
+      "target": "ArchitectureViolation",
+      "relation_type": "sufficient",
+      "confidence": 1.0,
+      "provenance": {
+        "source": "architecture_guard_rule",
+        "rule_id": "auto-write-requires-provenance"
+      }
+    }
+  ],
+  "exclusive_groups": [
+    {
+      "group_id": "architecture_guard_result",
+      "members": [
+        "ArchitectureViolation",
+        "ArchitectureGuardPass"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "no-agent-sdk-inside-mcp-server",
+      "target": "MCPServerCallsAgentSDK",
+      "severity": "error",
+      "description": "MCP server code must not call Agent SDK orchestration directly."
+    },
+    {
+      "id": "auto-write-requires-contradiction-gate",
+      "target": "AutoWriteBypassesContradictionGate",
+      "severity": "error",
+      "description": "Durable writes must pass NeSy contradiction validation."
+    },
+    {
+      "id": "auto-write-requires-provenance",
+      "target": "UnprovenRelationAutoWritten",
+      "severity": "error",
+      "description": "Auto-written relations must have explicit evidence/provenance."
+    }
+  ]
+}
