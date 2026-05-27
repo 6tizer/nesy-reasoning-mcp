@@ -27,6 +27,7 @@ from nesy_reasoning_mcp.tool_relations import (
 )
 
 DEFAULT_ANCHOR = "ObservedArchitectureFacts"
+ARCHITECTURE_VIOLATION_TARGET = "ArchitectureViolation"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,19 +46,12 @@ async def run_guard(rules: dict[str, Any], facts: dict[str, Any]) -> dict[str, A
     await _load_facts(store, facts)
 
     anchor = str(facts.get("anchor") or rules.get("anchor") or DEFAULT_ANCHOR)
-    checks = _required_list(rules, "checks")
+    checks = _required_non_empty_list(rules, "checks")
     violations = []
     for check in checks:
         target = _required_str(check, "target")
-        result = await verify_chain(
-            {
-                "source": anchor,
-                "target": target,
-                "expected_relation": "sufficient",
-                "max_depth": int(check.get("max_depth", 8)),
-                "max_paths": 3,
-            },
-            store,
+        result = await _verify_sufficient_path(
+            store, anchor, target, int(check.get("max_depth", 8))
         )
         if result["source_to_target_reachable"]:
             violations.append(
@@ -70,6 +64,24 @@ async def run_guard(rules: dict[str, Any], facts: dict[str, Any]) -> dict[str, A
                     "trace": result["trace"],
                 }
             )
+
+    violation_result = await _verify_sufficient_path(
+        store, anchor, ARCHITECTURE_VIOLATION_TARGET, 8
+    )
+    has_error_violation = any(
+        str(item.get("severity", "error")).lower() == "error" for item in violations
+    )
+    if violation_result["source_to_target_reachable"] and not has_error_violation:
+        violations.append(
+            {
+                "id": "architecture-violation",
+                "severity": "error",
+                "target": ARCHITECTURE_VIOLATION_TARGET,
+                "description": "Observed facts imply ArchitectureViolation.",
+                "best_path": violation_result["best_path"],
+                "trace": violation_result["trace"],
+            }
+        )
 
     contradictions = await check_contradictions(
         {
@@ -91,6 +103,24 @@ async def run_guard(rules: dict[str, Any], facts: dict[str, Any]) -> dict[str, A
         "contradictions": contradictions["contradictions"],
         "graph_stats": contradictions["graph_stats"],
     }
+
+
+async def _verify_sufficient_path(
+    store: MemoryRelationStore,
+    source: str,
+    target: str,
+    max_depth: int,
+) -> dict[str, Any]:
+    return await verify_chain(
+        {
+            "source": source,
+            "target": target,
+            "expected_relation": "sufficient",
+            "max_depth": max_depth,
+            "max_paths": 3,
+        },
+        store,
+    )
 
 
 async def _load_rules(store: MemoryRelationStore, rules: dict[str, Any]) -> None:
@@ -129,6 +159,13 @@ def _required_list(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
         raise ValueError(f"{key} must be a list")
     if not all(isinstance(item, dict) for item in value):
         raise ValueError(f"{key} must contain objects")
+    return value
+
+
+def _required_non_empty_list(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = _required_list(data, key)
+    if not value:
+        raise ValueError(f"{key} must contain at least one object")
     return value
 
 
