@@ -5,6 +5,7 @@ from nesy_reasoning_mcp.auto_ingest.crawler import (
     CrawlResult,
     crawl_url_evidence,
 )
+from nesy_reasoning_mcp.auto_ingest.enqueue import EnqueueDecision, should_enqueue
 from nesy_reasoning_mcp.auto_ingest.external_retrieval import (
     ExternalRetrievalBatch,
     ExternalRetrievalConversion,
@@ -43,6 +44,9 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelation,
     CandidateRelationBatch,
     CommitReviewedRelationsInput,
+    ConversationTurnJob,
+    ConversationTurnJobFilter,
+    ConversationTurnJobStatus,
     EvidenceRecord,
     GateAction,
     GateResult,
@@ -65,9 +69,13 @@ __all__ = [
     "CandidateRelation",
     "CandidateRelationBatch",
     "CommitReviewedRelationsInput",
+    "ConversationTurnJob",
+    "ConversationTurnJobFilter",
+    "ConversationTurnJobStatus",
     "CrawlOptions",
     "CrawlResult",
     "DRY_RUN_TOOL_ALLOWLIST",
+    "EnqueueDecision",
     "EvidenceRecord",
     "ExternalRetrievalBatch",
     "ExternalRetrievalConversion",
@@ -110,4 +118,5 @@ __all__ = [
     "get_provider_entry",
     "list_provider_entries",
     "next_cron_run",
+    "should_enqueue",
 ]
