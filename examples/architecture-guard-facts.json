@@ -1,0 +1,16 @@
+{
+  "anchor": "ObservedArchitectureFacts",
+  "relations": [
+    {
+      "source": "ObservedArchitectureFacts",
+      "target": "ArchitectureGuardPass",
+      "relation_type": "sufficient",
+      "confidence": 0.9,
+      "provenance": {
+        "source": "gitnexus",
+        "command": "npx gitnexus query \"Agent SDK ingestion architecture guard\"",
+        "note": "Example clean observation; replace with concrete GitNexus-derived facts."
+      }
+    }
+  ]
+}
