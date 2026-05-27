@@ -208,3 +208,135 @@ def test_architecture_guard_rejects_rules_without_checks(tmp_path: Path) -> None
     assert completed.returncode == 2
     assert completed.stdout == ""
     assert "checks must contain at least one object" in completed.stderr
+
+
+def test_architecture_guard_collects_fact_from_evidence_file(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "gitnexus.txt"
+    evidence_path.write_text("run_stdio_server imports Agent SDK runtime", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "architecture_guard.py"),
+            "collect",
+            "--target",
+            "MCPServerCallsAgentSDK",
+            "--evidence-file",
+            str(evidence_path),
+            "--evidence-command",
+            "npx gitnexus context run_stdio_server -r nesy-reasoning-mcp",
+        ],
+        check=True,
+        capture_output=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        text=True,
+    )
+
+    facts = json.loads(completed.stdout)
+    assert facts["anchor"] == "ObservedArchitectureFacts"
+    assert facts["relations"][0]["source"] == "ObservedArchitectureFacts"
+    assert facts["relations"][0]["target"] == "MCPServerCallsAgentSDK"
+    assert facts["relations"][0]["relation_type"] == "sufficient"
+    assert facts["relations"][0]["provenance"]["source"] == "gitnexus"
+    assert (
+        "run_stdio_server imports Agent SDK runtime"
+        in facts["relations"][0]["provenance"]["excerpt"]
+    )
+    assert completed.stderr == ""
+
+
+def test_architecture_guard_collect_output_can_feed_guard(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "gitnexus.txt"
+    facts_path = tmp_path / "facts.json"
+    evidence_path.write_text("observed violation path", encoding="utf-8")
+
+    collect = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "architecture_guard.py"),
+            "collect",
+            "--target",
+            "MCPServerCallsAgentSDK",
+            "--evidence-file",
+            str(evidence_path),
+            "--output",
+            str(facts_path),
+        ],
+        check=True,
+        capture_output=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        text=True,
+    )
+    assert collect.stdout == ""
+    assert collect.stderr == ""
+
+    guard = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "architecture_guard.py"),
+            "--rules",
+            str(ROOT / "examples" / "architecture-guard-rules.json"),
+            "--facts",
+            str(facts_path),
+            "--format",
+            "json",
+        ],
+        check=False,
+        capture_output=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        text=True,
+    )
+
+    report = json.loads(guard.stdout)
+    assert guard.returncode == 1
+    assert report["status"] == "fail"
+    assert report["violations"][0]["id"] == "no-agent-sdk-inside-mcp-server"
+
+
+def test_architecture_guard_collect_rejects_empty_evidence_file(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "gitnexus.txt"
+    evidence_path.write_text("", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "architecture_guard.py"),
+            "collect",
+            "--target",
+            "MCPServerCallsAgentSDK",
+            "--evidence-file",
+            str(evidence_path),
+        ],
+        check=False,
+        capture_output=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert "gitnexus evidence must not be empty" in completed.stderr
+
+
+def test_architecture_guard_collect_rejects_invalid_limit() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "architecture_guard.py"),
+            "collect",
+            "--target",
+            "ArchitectureGuardPass",
+            "--gitnexus-query",
+            "architecture guard facts",
+            "--limit",
+            "0",
+        ],
+        check=False,
+        capture_output=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert "limit must be between 1 and 50" in completed.stderr
