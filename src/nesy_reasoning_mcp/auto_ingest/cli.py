@@ -56,6 +56,7 @@ from nesy_reasoning_mcp.auto_ingest.providers import (
     get_provider_entry,
     list_provider_entries,
 )
+from nesy_reasoning_mcp.auto_ingest.review_worker import ReviewWorkerConfig
 from nesy_reasoning_mcp.auto_ingest.scheduler import (
     DEFAULT_SCHEDULE_MAX_RETRIES,
     DEFAULT_SCHEDULE_POLL_SECONDS,
@@ -175,7 +176,10 @@ def add_agent_dry_run_arguments(
         action="append",
         default=[],
         dest="reviewer_models",
-        help="Reviewer model override. May be repeated for multi-reviewer voting.",
+        help=(
+            "Reviewer model name for the default/provider config. May be repeated for "
+            "multi-reviewer voting."
+        ),
     )
     parser.add_argument(
         "--reviewer",
@@ -195,7 +199,10 @@ def add_agent_dry_run_arguments(
         action="append",
         default=[],
         dest="high_priority_reviewer_models",
-        help="Reviewer model whose reject or needs_human/downgrade vote has priority.",
+        help=(
+            "High-priority reviewer model name for the default/provider config; reject or "
+            "needs_human/downgrade votes have priority."
+        ),
     )
     parser.add_argument(
         "--high-priority-reviewer",
@@ -455,6 +462,53 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider-reasoning-effort", choices=["high", "max"], default=None)
     parser.add_argument("--extractor-timeout-seconds", type=float, default=180)
     parser.add_argument("--extractor-max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--reviewer-model",
+        action="append",
+        default=[],
+        dest="reviewer_models",
+        help=(
+            "Reviewer model name for the default/provider config. May be repeated for "
+            "multi-reviewer voting."
+        ),
+    )
+    parser.add_argument(
+        "--reviewer",
+        action="append",
+        default=[],
+        dest="reviewers",
+        help="Provider-qualified reviewer in PROVIDER:MODEL form. May be repeated.",
+    )
+    parser.add_argument(
+        "--high-priority-reviewer-model",
+        action="append",
+        default=[],
+        dest="high_priority_reviewer_models",
+        help=(
+            "High-priority reviewer model name for the default/provider config; reject or "
+            "needs_human/downgrade votes have priority."
+        ),
+    )
+    parser.add_argument(
+        "--high-priority-reviewer",
+        action="append",
+        default=[],
+        dest="high_priority_reviewers",
+        help="Provider-qualified high-priority reviewer in PROVIDER:MODEL form.",
+    )
+    parser.add_argument(
+        "--voting-policy",
+        choices=[policy.value for policy in ReviewVotingPolicy],
+        default=ReviewVotingPolicy.RISK_TIERED.value,
+    )
+    parser.add_argument("--reviewer-timeout-seconds", type=float, default=120)
+    parser.add_argument("--high-priority-reviewer-timeout-seconds", type=float, default=180)
+    parser.add_argument("--reviewer-max-tokens", type=int, default=2048)
+    parser.add_argument("--review-poll-seconds", type=float, default=10.0)
+    parser.add_argument("--review-claim-limit", type=int, default=20)
+    parser.add_argument("--min-write-confidence", type=float, default=0.85)
+    parser.add_argument("--allow-review-queue-writes", action="store_true")
+    parser.add_argument("--allow-single-reviewer-write", action="store_true")
     parser.add_argument("--format", choices=["json", "text"], default="json")
 
 
@@ -655,8 +709,12 @@ def run_worker_cli(
         print(str(exc), file=stderr)
         return 2
     for diagnostic in result.get("diagnostics", []):
-        if isinstance(diagnostic, dict) and diagnostic.get("level") in {"warning", "error"}:
-            print(f"warning: {diagnostic.get('code')}: {diagnostic.get('message')}", file=stderr)
+        if isinstance(diagnostic, dict) and (diagnostic.get("level") or "warning") in {
+            "warning",
+            "error",
+        }:
+            level = diagnostic.get("level") or "warning"
+            print(f"{level}: {diagnostic.get('code')}: {diagnostic.get('message')}", file=stderr)
     print(_render_worker_result(result, getattr(args, "format", "json")), file=stdout)
     return 2 if result.get("status") == "error" else 0
 
@@ -1120,12 +1178,33 @@ async def _run_worker_command(args: argparse.Namespace) -> dict[str, Any]:
         max_tokens=args.extractor_max_tokens,
         timeout_seconds=args.extractor_timeout_seconds,
     )
+    reviewer_configs = _reviewer_configs_from_args(args)
+    high_priority_reviewers = _high_priority_reviewers_from_args(args)
+    review_config = ReviewWorkerConfig(
+        poll_seconds=args.review_poll_seconds,
+        claim_limit=args.review_claim_limit,
+        model=model,
+        reviewer_models=args.reviewer_models,
+        reviewer_configs=reviewer_configs,
+        high_priority_reviewer_models=[
+            *args.high_priority_reviewer_models,
+            *high_priority_reviewers,
+        ],
+        voting_policy=ReviewVotingPolicy(args.voting_policy),
+        provider_config=provider_config,
+        disable_tracing=provider_config.disable_tracing if provider_config is not None else False,
+        runtime_options=_runtime_options_from_args(args),
+        auto_write=bool(args.allow_review_queue_writes),
+        min_write_confidence=args.min_write_confidence,
+        allow_single_reviewer_write=bool(args.allow_single_reviewer_write),
+    )
     worker_config = IngestionWorkerConfig(
         poll_seconds=args.poll_seconds,
         queue_max_depth=args.max_queue_depth,
         claim_limit=args.claim_limit,
         max_merge_jobs=args.max_merge_jobs,
         extraction_config=extraction_config,
+        review_config=review_config,
     )
     store = create_relation_store(load_config())
     result = await run_ingestion_worker(
@@ -2096,6 +2175,9 @@ def _render_worker_result(result: dict[str, Any], output_format: str) -> str:
         f"claimed: {len(result.get('claimed_job_ids', []))}\n"
         f"processed: {len(result.get('processed_job_ids', []))}\n"
         f"queued: {len(result.get('queued_record_ids', []))}\n"
+        f"reviewed: {len(result.get('reviewed_record_ids', []))}\n"
+        f"committed: {len(result.get('committed_record_ids', []))}\n"
+        f"resolved: {len(result.get('resolved_record_ids', []))}\n"
         f"dropped: {len(result.get('dropped_job_ids', []))}\n"
         f"failed: {len(result.get('failed_job_ids', []))}"
     )

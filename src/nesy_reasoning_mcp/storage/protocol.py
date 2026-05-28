@@ -19,6 +19,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ConversationTurnJobStatus,
     ReviewQueueFilter,
     ReviewQueueRecord,
+    ReviewQueueStatus,
 )
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
@@ -123,6 +124,22 @@ class RelationStoreProtocol(Protocol):
         offset: int = 0,
     ) -> list[ReviewQueueRecord]:
         """List review queue records matching an optional filter."""
+
+    def claim_pending_review_queue_records(
+        self,
+        *,
+        limit: int = 1,
+        now: str | None = None,
+    ) -> list[ReviewQueueRecord]:
+        """Claim due pending review queue records by moving them to reviewing."""
+
+    def update_review_queue_records(
+        self,
+        records: Iterable[ReviewQueueRecord],
+        *,
+        expected_status: ReviewQueueStatus | None = None,
+    ) -> int:
+        """Update review queue records with an optional status compare-and-swap guard."""
 
     def mark_review_queue_committed(
         self,

@@ -27,6 +27,7 @@ from nesy_reasoning_mcp.auto_ingest.openai_agents import (
     OpenAIAgentsDryRunError,
     OpenAICompatibleProviderConfig,
     ReviewerModelConfig,
+    review_gate_and_write_candidate_batch,
     run_openai_agents_dry_run,
 )
 from nesy_reasoning_mcp.auto_ingest.providers import (
@@ -189,6 +190,37 @@ async def test_openai_agents_dry_run_maps_runner_outputs_to_report(
     assert report.written_relation_ids == []
     assert report.gate_results[0].action == "auto_write"
     assert report.gate_results[0].reasons == ["dry-run approved; no persistent write performed"]
+
+
+async def test_review_gate_and_write_candidate_batch_skips_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    review = _approval(candidate)
+    output_types: list[Any] = []
+
+    def fake_agent(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(output_type=kwargs["output_type"])
+
+    async def fake_run_agent(agent: Any, prompt: str) -> Any:
+        output_types.append(agent.output_type)
+        if agent.output_type is openai_agents.CandidateRelationBatch:
+            raise AssertionError("helper must not run extraction")
+        return {"reviews": [review.model_dump(mode="json")]}
+
+    monkeypatch.setattr(openai_agents, "_build_agent", fake_agent)
+
+    report = await review_gate_and_write_candidate_batch(
+        IngestionInput(evidence=[_evidence()], task="review queued candidates"),
+        openai_agents.CandidateRelationBatch(candidates=[candidate]),
+        store=RelationStore(),
+        env={"OPENAI_API_KEY": "test"},
+        run_agent=fake_run_agent,
+    )
+
+    assert report.candidates == [candidate]
+    assert report.gate_results[0].action == "auto_write"
+    assert output_types == [openai_agents.ReviewDecisionBatch]
 
 
 def test_reviewer_prompt_includes_normalized_implication_rules_and_preview() -> None:

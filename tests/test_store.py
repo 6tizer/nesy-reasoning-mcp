@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -974,6 +976,83 @@ def test_memory_review_queue_resolve() -> None:
     assert listed[0].resolution["reason"] == "duplicate"
 
 
+def test_memory_review_queue_claims_due_pending_records() -> None:
+    store = RelationStore()
+    store.enqueue_review_queue(
+        [
+            _queue_record("queue-now").model_copy(
+                update={
+                    "created_at": "2026-01-01T00:00:02+00:00",
+                    "next_retry_at": None,
+                }
+            ),
+            _queue_record("queue-due", candidate_id="candidate-2").model_copy(
+                update={
+                    "created_at": "2026-01-01T00:00:01+00:00",
+                    "next_retry_at": "2026-01-01T00:00:00+00:00",
+                }
+            ),
+            _queue_record("queue-later", candidate_id="candidate-3").model_copy(
+                update={"next_retry_at": "2026-01-01T01:00:00+00:00"}
+            ),
+        ]
+    )
+
+    claimed = store.claim_pending_review_queue_records(
+        limit=2,
+        now="2026-01-01T00:30:00+00:00",
+    )
+
+    assert [record.id for record in claimed] == ["queue-now", "queue-due"]
+    assert all(record.status == ReviewQueueStatus.REVIEWING for record in claimed)
+    assert all(record.attempt_count == 1 for record in claimed)
+    assert [
+        record.id
+        for record in store.list_review_queue(ReviewQueueFilter(status=ReviewQueueStatus.PENDING))
+    ] == ["queue-later"]
+
+
+def test_memory_review_queue_updates_with_expected_guard() -> None:
+    store = RelationStore()
+    store.enqueue_review_queue([_queue_record()])
+    claimed = store.claim_pending_review_queue_records()[0]
+    reviewed = claimed.model_copy(
+        deep=True,
+        update={"status": ReviewQueueStatus.PENDING, "next_retry_at": "2026-01-01T00:05:00+00:00"},
+    )
+
+    mismatch = store.update_review_queue_records(
+        [reviewed],
+        expected_status=ReviewQueueStatus.PENDING,
+    )
+    updated = store.update_review_queue_records(
+        [reviewed],
+        expected_status=ReviewQueueStatus.REVIEWING,
+    )
+
+    stored = store.list_review_queue()[0]
+    assert mismatch == 0
+    assert updated == 1
+    assert stored.status == ReviewQueueStatus.PENDING
+    assert stored.next_retry_at == "2026-01-01T00:05:00+00:00"
+
+
+def test_memory_review_queue_skips_manual_pending_after_auto_review() -> None:
+    store = RelationStore()
+    store.enqueue_review_queue(
+        [
+            _queue_record().model_copy(
+                update={
+                    "attempt_count": 1,
+                    "next_retry_at": None,
+                }
+            )
+        ]
+    )
+
+    assert store.claim_pending_review_queue_records(now="2026-01-01T00:00:00+00:00") == []
+
+
 def test_json_store_persists_review_queue(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
@@ -984,6 +1063,23 @@ def test_json_store_persists_review_queue(tmp_path) -> None:
     reloaded = JsonRelationStore(config)
 
     assert reloaded.list_review_queue()[0].candidate.id == "candidate-1"
+
+
+def test_json_store_persists_review_queue_claim_and_update(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.enqueue_review_queue([_queue_record()])
+
+    claimed = store.claim_pending_review_queue_records()
+    reviewed = claimed[0].model_copy(deep=True, update={"status": ReviewQueueStatus.FAILED})
+    store.update_review_queue_records([reviewed], expected_status=ReviewQueueStatus.REVIEWING)
+
+    reloaded = JsonRelationStore(config)
+    stored = reloaded.list_review_queue()[0]
+    assert stored.status == ReviewQueueStatus.FAILED
+    assert stored.attempt_count == 1
 
 
 def test_sqlite_store_persists_review_queue_and_filters(tmp_path) -> None:
@@ -1003,6 +1099,224 @@ def test_sqlite_store_persists_review_queue_and_filters(tmp_path) -> None:
 
     assert [record.id for record in listed] == ["queue-2"]
     assert listed[0].candidate.context_id == "ctx-b"
+
+
+def test_sqlite_review_queue_claims_and_persists_status(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_review_queue(
+        [
+            _queue_record("queue-now").model_copy(
+                update={"created_at": "2026-01-01T00:00:02+00:00"}
+            ),
+            _queue_record("queue-later", candidate_id="candidate-2").model_copy(
+                update={"next_retry_at": "2026-01-01T00:10:00+00:00"}
+            ),
+        ]
+    )
+
+    claimed = store.claim_pending_review_queue_records(
+        limit=2,
+        now="2026-01-01T00:30:00+00:00",
+    )
+    reviewed = [
+        record.model_copy(deep=True, update={"status": ReviewQueueStatus.FAILED})
+        for record in claimed
+    ]
+    mismatch = store.update_review_queue_records(
+        reviewed,
+        expected_status=ReviewQueueStatus.PENDING,
+    )
+    updated = store.update_review_queue_records(
+        reviewed,
+        expected_status=ReviewQueueStatus.REVIEWING,
+    )
+
+    reloaded = SqliteRelationStore(config)
+    stored = reloaded.list_review_queue(ReviewQueueFilter(ids=[record.id for record in claimed]))
+    assert [record.id for record in claimed] == ["queue-now", "queue-later"]
+    assert mismatch == 0
+    assert updated == 2
+    assert {record.id: record.status for record in stored} == {
+        "queue-now": ReviewQueueStatus.FAILED,
+        "queue-later": ReviewQueueStatus.FAILED,
+    }
+    assert {record.id: record.attempt_count for record in stored} == {
+        "queue-now": 1,
+        "queue-later": 1,
+    }
+
+
+def test_sqlite_review_queue_skips_manual_pending_after_auto_review(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_review_queue(
+        [
+            _queue_record().model_copy(
+                update={
+                    "attempt_count": 1,
+                    "next_retry_at": None,
+                }
+            )
+        ]
+    )
+
+    assert store.claim_pending_review_queue_records(now="2026-01-01T00:00:00+00:00") == []
+
+
+def test_sqlite_review_queue_claim_is_atomic_across_store_instances(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    seed = SqliteRelationStore(config)
+    seed.enqueue_review_queue(
+        [_queue_record("queue-1"), _queue_record("queue-2", candidate_id="candidate-2")]
+    )
+
+    def claim_one() -> list[str]:
+        store = SqliteRelationStore(config)
+        return [record.id for record in store.claim_pending_review_queue_records(limit=1)]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: claim_one(), range(2)))
+
+    claimed_ids = [record_id for result in results for record_id in result]
+    assert sorted(claimed_ids) == ["queue-1", "queue-2"]
+
+
+def test_sqlite_review_queue_migrates_legacy_payload_defaults(tmp_path) -> None:
+    db_path = tmp_path / "nesy.db"
+    record = _queue_record()
+    raw = record.model_dump(mode="json", exclude_none=True)
+    raw.pop("source_job_ids", None)
+    raw.pop("attempt_count", None)
+    raw.pop("next_retry_at", None)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE review_queue (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (status IN ('pending','committed','resolved')),
+          run_id TEXT NOT NULL,
+          candidate_id TEXT NOT NULL,
+          context_id TEXT NOT NULL,
+          store_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO review_queue (
+          id, status, run_id, candidate_id, context_id, store_id,
+          payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, json(?), ?, ?)
+        """,
+        (
+            record.id,
+            record.status.value,
+            record.run_id,
+            record.candidate.id,
+            record.candidate.context_id,
+            record.candidate.store_id,
+            json.dumps(raw, separators=(",", ":"), sort_keys=True),
+            record.created_at,
+            record.updated_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteRelationStore(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(db_path)))
+    )
+    claimed = store.claim_pending_review_queue_records()
+
+    assert claimed[0].id == "queue-1"
+    assert claimed[0].source_job_ids == []
+    assert claimed[0].attempt_count == 1
+
+
+def test_sqlite_review_queue_recovers_interrupted_legacy_migration(tmp_path) -> None:
+    db_path = tmp_path / "nesy.db"
+    record = _queue_record()
+    raw = record.model_dump(mode="json", exclude_none=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE review_queue_legacy (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (status IN ('pending','committed','resolved')),
+          run_id TEXT NOT NULL,
+          candidate_id TEXT NOT NULL,
+          context_id TEXT NOT NULL,
+          store_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE review_queue (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (
+            status IN ('pending','reviewing','committed','resolved','failed')
+          ),
+          run_id TEXT NOT NULL,
+          candidate_id TEXT NOT NULL,
+          context_id TEXT NOT NULL,
+          store_id TEXT NOT NULL,
+          next_retry_at TEXT,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO review_queue_legacy (
+          id, status, run_id, candidate_id, context_id, store_id,
+          payload_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, json(?), ?, ?)
+        """,
+        (
+            record.id,
+            record.status.value,
+            record.run_id,
+            record.candidate.id,
+            record.candidate.context_id,
+            record.candidate.store_id,
+            json.dumps(raw, separators=(",", ":"), sort_keys=True),
+            record.created_at,
+            record.updated_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteRelationStore(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(db_path)))
+    )
+    listed = store.list_review_queue()
+    check_conn = sqlite3.connect(db_path)
+    legacy_exists = check_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_queue_legacy'"
+    ).fetchone()
+    check_conn.close()
+
+    assert [item.id for item in listed] == ["queue-1"]
+    assert legacy_exists is None
 
 
 def test_sqlite_store_filters_review_queue_by_ids_and_keyset(tmp_path) -> None:

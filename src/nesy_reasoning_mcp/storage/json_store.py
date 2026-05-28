@@ -18,6 +18,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ConversationTurnJob,
     ConversationTurnJobStatus,
     ReviewQueueRecord,
+    ReviewQueueStatus,
 )
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
@@ -141,6 +142,28 @@ class JsonRelationStore(MemoryRelationStore):
         dropped = super().drop_pending_ingestion_jobs_over_depth(max_pending)
         self._persist()
         return dropped
+
+    def claim_pending_review_queue_records(
+        self,
+        *,
+        limit: int = 1,
+        now: str | None = None,
+    ) -> list[ReviewQueueRecord]:
+        """Claim due pending review queue records and persist the JSON relation set."""
+        claimed = super().claim_pending_review_queue_records(limit=limit, now=now)
+        self._persist()
+        return claimed
+
+    def update_review_queue_records(
+        self,
+        records: Iterable[ReviewQueueRecord],
+        *,
+        expected_status: ReviewQueueStatus | None = None,
+    ) -> int:
+        """Update review queue records and persist the JSON relation set."""
+        updated = super().update_review_queue_records(records, expected_status=expected_status)
+        self._persist()
+        return updated
 
     def mark_review_queue_committed(
         self,
