@@ -22,6 +22,15 @@ from nesy_reasoning_mcp.auto_ingest.canonicalization import (
     canonicalization_prompt,
     canonicalize_candidate_relations,
 )
+from nesy_reasoning_mcp.auto_ingest.extraction import (
+    EXTRACTOR_INSTRUCTIONS as _EXTRACTOR_INSTRUCTIONS,
+)
+from nesy_reasoning_mcp.auto_ingest.extraction import (
+    RELATION_DIRECTION_RULES as _RELATION_DIRECTION_RULES,
+)
+from nesy_reasoning_mcp.auto_ingest.extraction import (
+    build_extraction_prompt,
+)
 from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.providers import ProviderStructuredOutputMode
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
@@ -1844,13 +1853,7 @@ def _validate_canonical_proposition_import(
 
 
 def _extraction_prompt(ingestion_input: IngestionInput) -> str:
-    return (
-        "Extract only evidence-supported logical relations.\n"
-        f"{_RELATION_DIRECTION_RULES}\n"
-        "Return no candidate when the evidence only shows topical similarity, "
-        "correlation, weak possibility, or unsupported speculation.\n\n"
-        f"Input JSON:\n{_input_json(ingestion_input)}"
-    )
+    return build_extraction_prompt(ingestion_input)
 
 
 def _review_prompt(
@@ -1895,15 +1898,6 @@ def _input_json(ingestion_input: IngestionInput) -> str:
     )
 
 
-_EXTRACTOR_INSTRUCTIONS = """\
-You extract candidate symbolic relations for NeSy Reasoning MCP.
-Only emit sufficient, necessary, or equivalent relations directly supported by evidence.
-Relation direction rules are strict: sufficient(A, B)=A -> B; necessary(A, B)=B -> A.
-Equivalent(A, B)=A -> B and B -> A.
-Each candidate must cite at least one provided EvidenceRecord.
-Do not turn "may improve", correlation, topical similarity, or vague support into a relation.
-"""
-
 _REVIEWER_INSTRUCTIONS = """\
 You review candidate symbolic relations for NeSy Reasoning MCP.
 For approve or downgrade, provide final_relation_type and final_confidence.
@@ -1919,8 +1913,3 @@ Return one proposition group per real proposition and cover every endpoint_ref e
 Reuse known proposition ids only when the endpoint means the same proposition.
 Do not merge eligibility, possibility, permission, readiness, or capability with the actual event.
 """
-
-_RELATION_DIRECTION_RULES = (
-    "Relation direction rules: sufficient(A, B)=A -> B; "
-    "necessary(A, B)=B -> A; equivalent(A, B)=A -> B and B -> A."
-)
