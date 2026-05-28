@@ -12,6 +12,7 @@ from nesy_reasoning_mcp.schemas import (
 )
 from nesy_reasoning_mcp.store import RelationStoreProtocol, graph_stats_for
 from nesy_reasoning_mcp.tool_common import _exclusive_group_compatible_with_context_filter
+from nesy_reasoning_mcp.tool_queue_status import queue_status_snapshot
 
 
 async def summarize_graph(
@@ -37,12 +38,18 @@ async def summarize_graph(
         exclusive_groups,
         payload=payload,
     )
+    queue_snapshot = queue_status_snapshot(store)
+    summary, queue_truncated = _append_background_status(
+        summary,
+        queue_snapshot,
+        max_chars=payload.max_chars,
+    )
     edges = store.implication_edges(compatible_relations)
     return {
         "status": "ok",
         "summary": summary,
         "relation_count_included": len(selected_relations),
-        "truncated": relation_limit_truncated or char_truncated,
+        "truncated": relation_limit_truncated or char_truncated or queue_truncated,
         "diagnostics": [],
         "trace": [
             f"Selected {len(selected_relations)} relation(s) matching summary filters.",
@@ -159,3 +166,39 @@ def _normalized_focus_terms(focus_terms: list[str]) -> list[str]:
 def _text_matches_terms(values: list[str], terms: list[str]) -> bool:
     haystack = "\n".join(values).casefold()
     return any(term in haystack for term in terms)
+
+
+def _append_background_status(
+    summary: str,
+    queue_snapshot: dict[str, Any],
+    *,
+    max_chars: int,
+) -> tuple[str, bool]:
+    if queue_snapshot["in_flight_total"] == 0:
+        return summary, False
+    status_block = _background_status_block(queue_snapshot)
+    combined = f"{summary}\n{status_block}"
+    if len(combined) <= max_chars:
+        return combined, False
+
+    suffix = "\n...truncated"
+    separator = "\n"
+    cutoff = max(0, max_chars - len(status_block) - len(separator) - len(suffix))
+    truncated_summary = f"{summary[:cutoff].rstrip()}{suffix}"
+    return f"{truncated_summary}{separator}{status_block}", True
+
+
+def _background_status_block(queue_snapshot: dict[str, Any]) -> str:
+    last_write = "Last write: none."
+    if queue_snapshot["last_write_at"] is not None:
+        last_write = (
+            f"Last write: {queue_snapshot['last_write_at']} "
+            f"({queue_snapshot['last_write_relation_count']} relations added)."
+        )
+    return (
+        "Background processing: "
+        f"{queue_snapshot['pending']} turns pending extraction, "
+        f"{queue_snapshot['extracting']} extracting, "
+        f"{queue_snapshot['reviewing']} under review. "
+        f"{last_write}"
+    )

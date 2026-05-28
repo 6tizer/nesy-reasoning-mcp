@@ -232,6 +232,41 @@ def _summarize_graph_output_schema() -> dict[str, Any]:
     }
 
 
+def _queue_status_output_schema() -> dict[str, Any]:
+    props = _common_output_properties()
+    props.update(
+        {
+            "pending": {"type": "integer"},
+            "extracting": {"type": "integer"},
+            "reviewing": {"type": "integer"},
+            "done_last_24h": {"type": "integer"},
+            "failed_last_24h": {"type": "integer"},
+            "in_flight_total": {"type": "integer"},
+            "last_write_at": {"type": ["string", "null"]},
+            "last_write_relation_count": {"type": "integer"},
+        }
+    )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": [
+            "status",
+            "pending",
+            "extracting",
+            "reviewing",
+            "done_last_24h",
+            "failed_last_24h",
+            "in_flight_total",
+            "last_write_at",
+            "last_write_relation_count",
+            "diagnostics",
+            "trace",
+            "graph_stats",
+        ],
+        "additionalProperties": False,
+    }
+
+
 def _counterfactual_output_schema() -> dict[str, Any]:
     props = _common_output_properties()
     props.update(

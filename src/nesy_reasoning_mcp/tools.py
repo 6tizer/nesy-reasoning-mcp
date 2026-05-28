@@ -18,12 +18,14 @@ from nesy_reasoning_mcp.tool_names import (
     LIST_RELATIONS,
     LIST_REVIEW_QUEUE,
     LOAD_RELATIONS,
+    QUEUE_STATUS,
     REASON_OVER_RELATIONS,
     RESOLVE_REVIEW_QUEUE,
     SUMMARIZE_GRAPH,
     VALIDATE_CANDIDATE_RELATIONS,
     VERIFY_CHAIN,
 )
+from nesy_reasoning_mcp.tool_queue_status import queue_status
 from nesy_reasoning_mcp.tool_reasoning import classify, verify_chain
 from nesy_reasoning_mcp.tool_registry import call_tool, get_tools
 from nesy_reasoning_mcp.tool_relations import (
@@ -53,6 +55,7 @@ __all__ = [
     "LIST_RELATIONS",
     "LIST_REVIEW_QUEUE",
     "LOAD_RELATIONS",
+    "QUEUE_STATUS",
     "REASON_OVER_RELATIONS",
     "RESOLVE_REVIEW_QUEUE",
     "SUMMARIZE_GRAPH",
@@ -72,6 +75,7 @@ __all__ = [
     "list_review_queue",
     "load_relations",
     "make_result",
+    "queue_status",
     "reason_over_relations",
     "resolve_review_queue",
     "summarize_graph",
