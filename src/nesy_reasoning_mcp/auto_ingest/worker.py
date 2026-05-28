@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,6 +19,7 @@ from nesy_reasoning_mcp.auto_ingest.extraction import (
     extract_candidate_relations_with_context_metadata,
 )
 from nesy_reasoning_mcp.auto_ingest.nesy_facts import extract_nesy_facts
+from nesy_reasoning_mcp.auto_ingest.runner_types import AgentRunner
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelation,
     CandidateRelationBatch,
@@ -46,7 +47,6 @@ DEFAULT_INGEST_WORKER_CLAIM_LIMIT = 5
 DEFAULT_INGEST_WORKER_MAX_MERGE_JOBS = 3
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-AgentRunner = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)

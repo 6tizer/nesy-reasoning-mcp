@@ -11,13 +11,13 @@ from typing import Any
 import anyio
 
 from nesy_reasoning_mcp.auto_ingest.openai_agents import (
-    AgentRunner,
     ChatCompletionRunner,
     LLMRuntimeOptions,
     OpenAICompatibleProviderConfig,
     ReviewerModelConfig,
     review_gate_and_write_candidate_batch,
 )
+from nesy_reasoning_mcp.auto_ingest.runner_types import AgentRunner
 from nesy_reasoning_mcp.auto_ingest.scheduler import (
     DEFAULT_SCHEDULE_MAX_RETRIES,
     DEFAULT_SCHEDULE_RETRY_BACKOFF_SECONDS,
@@ -285,7 +285,7 @@ async def _process_review_group(
         )
         _raise_for_runtime_diagnostics(report.diagnostics)
         _raise_for_write_failure(report)
-        updates = _updated_records_from_report(records, report)
+        updates = _updated_records_from_report(records, report, config)
         store.update_review_queue_records(updates, expected_status=ReviewQueueStatus.REVIEWING)
         done_job_ids, failed_job_ids = _writeback_source_jobs_for_records(
             store,
@@ -349,11 +349,14 @@ async def _process_review_group(
 def _updated_records_from_report(
     records: list[ReviewQueueRecord],
     report: Any,
+    config: ReviewWorkerConfig,
 ) -> list[ReviewQueueRecord]:
     reviews_by_candidate = _reviews_by_candidate(report)
     gates_by_candidate = {gate.candidate_id: gate for gate in report.gate_results}
     relation_ids_by_candidate = _written_relation_ids_by_candidate(report)
-    timestamp = _utc_now_iso()
+    updated_at = datetime.now(UTC)
+    timestamp = updated_at.isoformat()
+    retry_at = (updated_at + timedelta(seconds=config.retry_backoff_seconds)).isoformat()
     updates: list[ReviewQueueRecord] = []
     for record in records:
         gate = gates_by_candidate.get(record.candidate.id) or record.gate_result
@@ -372,7 +375,7 @@ def _updated_records_from_report(
             status = ReviewQueueStatus.PENDING
             committed_relation_ids = []
             resolution = {}
-            next_retry_at = None
+            next_retry_at = retry_at
         updates.append(
             record.model_copy(
                 deep=True,

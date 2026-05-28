@@ -35,6 +35,7 @@ from nesy_reasoning_mcp.auto_ingest.gate import run_dry_run_gate
 from nesy_reasoning_mcp.auto_ingest.providers import ProviderStructuredOutputMode
 from nesy_reasoning_mcp.auto_ingest.review_queue import queued_records_from_report
 from nesy_reasoning_mcp.auto_ingest.review_voting import aggregate_review_decisions
+from nesy_reasoning_mcp.auto_ingest.runner_types import AgentRunner
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelation,
     CandidateRelationBatch,
@@ -52,7 +53,6 @@ from nesy_reasoning_mcp.normalization import normalized_implication_preview
 from nesy_reasoning_mcp.schemas import DEFAULT_STORE_ID, Diagnostic, PropositionRecord
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
-AgentRunner = Callable[..., Awaitable[Any]]
 ChatCompletionRunner = Callable[..., Awaitable[Any]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 OutputBatch = TypeVar("OutputBatch", bound=BaseModel)

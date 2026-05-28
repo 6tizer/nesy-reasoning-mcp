@@ -231,8 +231,8 @@ async def test_review_worker_keeps_job_reviewing_when_gate_stays_queue(
     assert result.done_job_ids == []
     assert record.status == ReviewQueueStatus.PENDING
     assert record.attempt_count == 1
-    assert record.next_retry_at is None
-    assert store.claim_pending_review_queue_records() == []
+    assert record.next_retry_at is not None
+    assert store.claim_pending_review_queue_records(now=record.updated_at) == []
     assert store.list_ingestion_jobs()[0].status == ConversationTurnJobStatus.REVIEWING
 
 
