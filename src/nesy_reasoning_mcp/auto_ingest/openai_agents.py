@@ -243,14 +243,6 @@ async def run_openai_agents_ingestion(
     runtime_trace: list[dict[str, Any]] = []
     runtime_env = env if env is not None else os.environ
     base_model_name = model or runtime_env.get("OPENAI_DEFAULT_MODEL")
-    voting_policy = ReviewVotingPolicy(voting_policy)
-    resolved_reviewers = _reviewer_model_configs(
-        reviewer_models=reviewer_models,
-        reviewer_configs=reviewer_configs,
-        default_model=base_model_name,
-        default_provider_config=provider_config,
-    )
-    high_priority_models = _dedupe_model_names(high_priority_reviewer_models or [])
     use_json_object_provider = _uses_json_object_provider(provider_config)
     tracing_disabled = disable_tracing or (
         provider_config is not None and provider_config.disable_tracing
@@ -322,6 +314,79 @@ async def run_openai_agents_ingestion(
             runtime_trace=runtime_trace,
             diagnostic=_diagnostic_from_stage_error(exc),
         )
+
+    return await review_gate_and_write_candidate_batch(
+        ingestion_input,
+        candidate_batch,
+        store=store,
+        model=model,
+        reviewer_models=reviewer_models,
+        reviewer_configs=reviewer_configs,
+        voting_policy=voting_policy,
+        high_priority_reviewer_models=high_priority_reviewer_models,
+        env=env,
+        run_agent=run_agent,
+        run_chat_completion=run_chat_completion,
+        auto_write=auto_write,
+        min_write_confidence=min_write_confidence,
+        provider_config=provider_config,
+        disable_tracing=disable_tracing,
+        runtime_options=runtime_options,
+        runtime_trace=runtime_trace,
+        progress_callback=progress_callback,
+        canonicalize_preview=canonicalize_preview,
+        agent_model=agent_model,
+    )
+
+
+async def review_gate_and_write_candidate_batch(
+    ingestion_input: IngestionInput,
+    candidate_batch: CandidateRelationBatch,
+    *,
+    store: RelationStoreProtocol,
+    model: str | None = None,
+    reviewer_models: list[str] | None = None,
+    reviewer_configs: list[ReviewerModelConfig] | None = None,
+    voting_policy: ReviewVotingPolicy = ReviewVotingPolicy.RISK_TIERED,
+    high_priority_reviewer_models: list[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    run_agent: AgentRunner | None = None,
+    run_chat_completion: ChatCompletionRunner | None = None,
+    auto_write: bool = False,
+    min_write_confidence: float = 0.85,
+    provider_config: OpenAICompatibleProviderConfig | None = None,
+    disable_tracing: bool = False,
+    runtime_options: LLMRuntimeOptions | None = None,
+    runtime_trace: list[dict[str, Any]] | None = None,
+    progress_callback: ProgressCallback | None = None,
+    canonicalize_preview: bool = False,
+    enqueue_queued_records: bool = True,
+    agent_model: Any | None = None,
+) -> IngestionReport:
+    """Review, gate, optionally write, and optionally queue an extracted candidate batch."""
+    if not 0 <= min_write_confidence <= 1:
+        raise OpenAIAgentsDryRunError("min_write_confidence must be between 0 and 1")
+    runtime_options = runtime_options or LLMRuntimeOptions()
+    effective_progress_callback = (
+        progress_callback if runtime_options.progress_mode != "off" else None
+    )
+    runtime_trace = runtime_trace if runtime_trace is not None else []
+    runtime_env = env if env is not None else os.environ
+    base_model_name = model or runtime_env.get("OPENAI_DEFAULT_MODEL")
+    voting_policy = ReviewVotingPolicy(voting_policy)
+    resolved_reviewers = _reviewer_model_configs(
+        reviewer_models=reviewer_models,
+        reviewer_configs=reviewer_configs,
+        default_model=base_model_name,
+        default_provider_config=provider_config,
+    )
+    high_priority_models = _dedupe_model_names(high_priority_reviewer_models or [])
+    use_json_object_provider = _uses_json_object_provider(provider_config)
+    tracing_disabled = disable_tracing or (
+        provider_config is not None and provider_config.disable_tracing
+    )
+    if agent_model is None and not use_json_object_provider:
+        agent_model = _agent_model(base_model_name, provider_config, runtime_env)
 
     canonicalization_result: PropositionCanonicalizationResult | None = None
     run_propositions = [*ingestion_input.propositions]
@@ -514,7 +579,7 @@ async def run_openai_agents_ingestion(
             "runtime_trace": runtime_trace,
         },
     )
-    if auto_write:
+    if auto_write and enqueue_queued_records:
         queued_records = queued_records_from_report(
             report,
             propositions=run_propositions,

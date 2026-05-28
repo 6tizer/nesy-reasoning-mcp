@@ -290,6 +290,76 @@ class MemoryRelationStore:
             return matched[:limit]
         return matched
 
+    def claim_pending_review_queue_records(
+        self,
+        *,
+        limit: int = 1,
+        now: str | None = None,
+    ) -> list[ReviewQueueRecord]:
+        """Claim due pending review queue records by moving them to reviewing."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return []
+        timestamp = _utc_now_iso()
+        due_before = now or timestamp
+        pending = [
+            record
+            for record in self._review_queue
+            if record.status == ReviewQueueStatus.PENDING
+            and (
+                (record.attempt_count == 0 and record.next_retry_at is None)
+                or (record.next_retry_at is not None and record.next_retry_at <= due_before)
+            )
+        ]
+        pending.sort(key=lambda record: (record.next_retry_at or "", record.created_at, record.id))
+        selected_ids = {record.id for record in pending[:limit]}
+        if not selected_ids:
+            return []
+        claimed: list[ReviewQueueRecord] = []
+        records: list[ReviewQueueRecord] = []
+        for record in self._review_queue:
+            if record.id not in selected_ids:
+                records.append(record)
+                continue
+            updated = record.model_copy(
+                deep=True,
+                update={
+                    "status": ReviewQueueStatus.REVIEWING,
+                    "attempt_count": record.attempt_count + 1,
+                    "updated_at": timestamp,
+                },
+            )
+            claimed.append(updated.model_copy(deep=True))
+            records.append(updated)
+        self._review_queue = records
+        claimed.sort(key=lambda record: (record.next_retry_at or "", record.created_at, record.id))
+        return claimed
+
+    def update_review_queue_records(
+        self,
+        records: Iterable[ReviewQueueRecord],
+        *,
+        expected_status: ReviewQueueStatus | None = None,
+    ) -> int:
+        """Update review queue records with an optional status compare-and-swap guard."""
+        incoming = [record.model_copy(deep=True) for record in records]
+        incoming_by_id = {record.id: record for record in incoming}
+        updated = 0
+        stored: list[ReviewQueueRecord] = []
+        for record in self._review_queue:
+            incoming_record = incoming_by_id.get(record.id)
+            if incoming_record is None:
+                stored.append(record)
+                continue
+            if expected_status is not None and record.status != expected_status:
+                stored.append(record)
+                continue
+            stored.append(incoming_record)
+            updated += 1
+        self._review_queue = stored
+        return updated
+
     def mark_review_queue_committed(
         self,
         ids: Iterable[str],

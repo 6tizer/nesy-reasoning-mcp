@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import signal
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -34,12 +34,19 @@ from nesy_reasoning_mcp.schemas import Diagnostic, PropositionRecord, RelationIn
 from nesy_reasoning_mcp.storage.common import _utc_now_iso
 from nesy_reasoning_mcp.storage.protocol import RelationStoreProtocol
 
+if TYPE_CHECKING:
+    from nesy_reasoning_mcp.auto_ingest.review_worker import (
+        ReviewWorkerConfig,
+        ReviewWorkerResult,
+    )
+
 DEFAULT_INGEST_WORKER_POLL_SECONDS = 10.0
 DEFAULT_INGEST_WORKER_QUEUE_MAX_DEPTH = 50
 DEFAULT_INGEST_WORKER_CLAIM_LIMIT = 5
 DEFAULT_INGEST_WORKER_MAX_MERGE_JOBS = 3
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+AgentRunner = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,7 @@ class IngestionWorkerConfig:
     claim_limit: int = DEFAULT_INGEST_WORKER_CLAIM_LIMIT
     max_merge_jobs: int = DEFAULT_INGEST_WORKER_MAX_MERGE_JOBS
     extraction_config: ExtractionModelConfig = field(default_factory=ExtractionModelConfig)
+    review_config: ReviewWorkerConfig | None = None
 
     def __post_init__(self) -> None:
         if self.poll_seconds <= 0:
@@ -84,6 +92,11 @@ class IngestionWorkerResult:
     claimed_job_ids: list[str] = field(default_factory=list)
     processed_job_ids: list[str] = field(default_factory=list)
     queued_record_ids: list[str] = field(default_factory=list)
+    reviewed_record_ids: list[str] = field(default_factory=list)
+    committed_record_ids: list[str] = field(default_factory=list)
+    resolved_record_ids: list[str] = field(default_factory=list)
+    pending_review_record_ids: list[str] = field(default_factory=list)
+    failed_review_record_ids: list[str] = field(default_factory=list)
     dropped_job_ids: list[str] = field(default_factory=list)
     failed_job_ids: list[str] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
@@ -96,6 +109,17 @@ class IngestionWorkerResult:
             claimed_job_ids=[*self.claimed_job_ids, *other.claimed_job_ids],
             processed_job_ids=[*self.processed_job_ids, *other.processed_job_ids],
             queued_record_ids=[*self.queued_record_ids, *other.queued_record_ids],
+            reviewed_record_ids=[*self.reviewed_record_ids, *other.reviewed_record_ids],
+            committed_record_ids=[*self.committed_record_ids, *other.committed_record_ids],
+            resolved_record_ids=[*self.resolved_record_ids, *other.resolved_record_ids],
+            pending_review_record_ids=[
+                *self.pending_review_record_ids,
+                *other.pending_review_record_ids,
+            ],
+            failed_review_record_ids=[
+                *self.failed_review_record_ids,
+                *other.failed_review_record_ids,
+            ],
             dropped_job_ids=[*self.dropped_job_ids, *other.dropped_job_ids],
             failed_job_ids=[*self.failed_job_ids, *other.failed_job_ids],
             diagnostics=[*self.diagnostics, *other.diagnostics],
@@ -110,6 +134,11 @@ class IngestionWorkerResult:
             "claimed_job_ids": self.claimed_job_ids,
             "processed_job_ids": self.processed_job_ids,
             "queued_record_ids": self.queued_record_ids,
+            "reviewed_record_ids": self.reviewed_record_ids,
+            "committed_record_ids": self.committed_record_ids,
+            "resolved_record_ids": self.resolved_record_ids,
+            "pending_review_record_ids": self.pending_review_record_ids,
+            "failed_review_record_ids": self.failed_review_record_ids,
             "dropped_job_ids": self.dropped_job_ids,
             "failed_job_ids": self.failed_job_ids,
             "diagnostics": [
@@ -119,12 +148,40 @@ class IngestionWorkerResult:
             "iterations": self.iterations,
         }
 
+    def with_review_result(self, review_result: ReviewWorkerResult) -> IngestionWorkerResult:
+        """Return this result enriched with one review worker result."""
+        return IngestionWorkerResult(
+            claimed_job_ids=self.claimed_job_ids,
+            processed_job_ids=self.processed_job_ids,
+            queued_record_ids=self.queued_record_ids,
+            reviewed_record_ids=[*self.reviewed_record_ids, *review_result.reviewed_record_ids],
+            committed_record_ids=[
+                *self.committed_record_ids,
+                *review_result.committed_record_ids,
+            ],
+            resolved_record_ids=[*self.resolved_record_ids, *review_result.resolved_record_ids],
+            pending_review_record_ids=[
+                *self.pending_review_record_ids,
+                *review_result.pending_record_ids,
+            ],
+            failed_review_record_ids=[
+                *self.failed_review_record_ids,
+                *review_result.failed_record_ids,
+            ],
+            dropped_job_ids=self.dropped_job_ids,
+            failed_job_ids=[*self.failed_job_ids, *review_result.failed_job_ids],
+            diagnostics=[*self.diagnostics, *review_result.diagnostics],
+            iterations=self.iterations,
+            interrupted=self.interrupted or review_result.interrupted,
+        )
+
 
 async def process_ingestion_queue_once(
     store: RelationStoreProtocol,
     *,
     config: IngestionWorkerConfig | None = None,
     env: Mapping[str, str] | None = None,
+    run_agent: AgentRunner | None = None,
     run_chat_completion: ChatCompletionRunner | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> IngestionWorkerResult:
@@ -169,6 +226,7 @@ async def run_ingestion_worker(
     config: IngestionWorkerConfig | None = None,
     max_jobs: int | None = None,
     env: Mapping[str, str] | None = None,
+    run_agent: AgentRunner | None = None,
     run_chat_completion: ChatCompletionRunner | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> IngestionWorkerResult:
@@ -190,14 +248,30 @@ async def run_ingestion_worker(
                     claim_limit=min(worker_config.claim_limit, remaining),
                     max_merge_jobs=worker_config.max_merge_jobs,
                     extraction_config=worker_config.extraction_config,
+                    review_config=worker_config.review_config,
                 )
             batch = await process_ingestion_queue_once(
                 store,
                 config=iteration_config,
                 env=env,
+                run_agent=run_agent,
                 run_chat_completion=run_chat_completion,
                 progress_callback=progress_callback,
             )
+            if worker_config.review_config is not None:
+                from nesy_reasoning_mcp.auto_ingest.review_worker import (
+                    process_review_queue_once,
+                )
+
+                review_batch = await process_review_queue_once(
+                    store,
+                    config=worker_config.review_config,
+                    env=env,
+                    run_agent=run_agent,
+                    run_chat_completion=run_chat_completion,
+                    progress_callback=progress_callback,
+                )
+                batch = batch.with_review_result(review_batch)
             total = total.merged(batch)
             if max_jobs is not None and len(total.processed_job_ids) >= max_jobs:
                 break
@@ -210,6 +284,11 @@ async def run_ingestion_worker(
             claimed_job_ids=total.claimed_job_ids,
             processed_job_ids=total.processed_job_ids,
             queued_record_ids=total.queued_record_ids,
+            reviewed_record_ids=total.reviewed_record_ids,
+            committed_record_ids=total.committed_record_ids,
+            resolved_record_ids=total.resolved_record_ids,
+            pending_review_record_ids=total.pending_review_record_ids,
+            failed_review_record_ids=total.failed_review_record_ids,
             dropped_job_ids=total.dropped_job_ids,
             failed_job_ids=total.failed_job_ids,
             diagnostics=total.diagnostics,
@@ -439,6 +518,7 @@ def _review_queue_records_for_candidates(
                 ],
                 propositions=propositions,
                 context_metadata=metadata,
+                source_job_ids=[job.job_id for job in jobs],
             )
         )
     return records

@@ -232,6 +232,7 @@ def _review_queue_from_row(row: sqlite3.Row) -> ReviewQueueRecord:
         "candidate_id": record.candidate.id,
         "context_id": record.candidate.context_id,
         "store_id": record.candidate.store_id,
+        "next_retry_at": record.next_retry_at,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     }
@@ -727,6 +728,90 @@ class SqliteRelationStore:
             params.append(offset)
         rows = self._conn.execute(sql, params).fetchall()
         return [_review_queue_from_row(row) for row in rows]
+
+    @_locked
+    def claim_pending_review_queue_records(
+        self,
+        *,
+        limit: int = 1,
+        now: str | None = None,
+    ) -> list[ReviewQueueRecord]:
+        """Claim due pending review queue records by moving them to reviewing."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return []
+        due_before = now or _utc_now_iso()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM review_queue
+                WHERE status = ?
+                  AND (
+                    (
+                      next_retry_at IS NULL
+                      AND COALESCE(json_extract(payload_json, '$.attempt_count'), 0) = 0
+                    )
+                    OR next_retry_at <= ?
+                  )
+                ORDER BY COALESCE(next_retry_at, ''), created_at, id
+                LIMIT ?
+                """,
+                [ReviewQueueStatus.PENDING.value, due_before, limit],
+            ).fetchall()
+            timestamp = _utc_now_iso()
+            records = [_review_queue_from_row(row) for row in rows]
+            selected = [
+                record.model_copy(
+                    deep=True,
+                    update={
+                        "status": ReviewQueueStatus.REVIEWING,
+                        "attempt_count": record.attempt_count + 1,
+                        "updated_at": timestamp,
+                    },
+                )
+                for record in records
+            ]
+            if not selected:
+                self._conn.commit()
+                return []
+            self._update_review_queue_records(
+                selected,
+                expected_status=ReviewQueueStatus.PENDING,
+            )
+            claimed = self._review_queue_records_by_ids(
+                [record.id for record in selected],
+                status=ReviewQueueStatus.REVIEWING,
+                updated_at=timestamp,
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        claimed.sort(key=lambda record: (record.next_retry_at or "", record.created_at, record.id))
+        return claimed
+
+    @_locked
+    def update_review_queue_records(
+        self,
+        records: Iterable[ReviewQueueRecord],
+        *,
+        expected_status: ReviewQueueStatus | None = None,
+    ) -> int:
+        """Update review queue records with an optional status compare-and-swap guard."""
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            updated = self._update_review_queue_records(
+                records,
+                expected_status=expected_status,
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return updated
 
     @_locked
     def mark_review_queue_committed(
@@ -1254,11 +1339,14 @@ class SqliteRelationStore:
 
             CREATE TABLE IF NOT EXISTS review_queue (
               id TEXT PRIMARY KEY,
-              status TEXT NOT NULL CHECK (status IN ('pending','committed','resolved')),
+              status TEXT NOT NULL CHECK (
+                status IN ('pending','reviewing','committed','resolved','failed')
+              ),
               run_id TEXT NOT NULL,
               candidate_id TEXT NOT NULL,
               context_id TEXT NOT NULL,
               store_id TEXT NOT NULL,
+              next_retry_at TEXT,
               payload_json TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -1332,8 +1420,84 @@ class SqliteRelationStore:
               ON scheduled_ingestion_runs (started_at);
             """
         )
+        self._ensure_review_queue_schema()
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_queue_status_retry
+              ON review_queue (status, next_retry_at, created_at, id)
+            """
+        )
         self._ensure_relation_identity_columns()
         self._conn.commit()
+
+    def _ensure_review_queue_schema(self) -> None:
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(review_queue)").fetchall()
+        }
+        row = self._conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'review_queue'
+            """
+        ).fetchone()
+        table_sql = row["sql"] if row is not None else ""
+        if "next_retry_at" in columns and "reviewing" in table_sql and "failed" in table_sql:
+            return
+        for index_name in (
+            "idx_review_queue_status",
+            "idx_review_queue_status_retry",
+            "idx_review_queue_run_id",
+            "idx_review_queue_candidate_id",
+            "idx_review_queue_context_store",
+        ):
+            self._conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        self._conn.execute("ALTER TABLE review_queue RENAME TO review_queue_legacy")
+        self._conn.execute(
+            """
+            CREATE TABLE review_queue (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL CHECK (
+                status IN ('pending','reviewing','committed','resolved','failed')
+              ),
+              run_id TEXT NOT NULL,
+              candidate_id TEXT NOT NULL,
+              context_id TEXT NOT NULL,
+              store_id TEXT NOT NULL,
+              next_retry_at TEXT,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT INTO review_queue (
+              id, status, run_id, candidate_id, context_id, store_id,
+              next_retry_at, payload_json, created_at, updated_at
+            )
+            SELECT
+              id, status, run_id, candidate_id, context_id, store_id,
+              json_extract(payload_json, '$.next_retry_at'), payload_json, created_at, updated_at
+            FROM review_queue_legacy
+            """
+        )
+        self._conn.execute("DROP TABLE review_queue_legacy")
+        self._conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_queue_status
+              ON review_queue (status);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_status_retry
+              ON review_queue (status, next_retry_at, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_run_id
+              ON review_queue (run_id);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_candidate_id
+              ON review_queue (candidate_id);
+            CREATE INDEX IF NOT EXISTS idx_review_queue_context_store
+              ON review_queue (context_id, store_id);
+            """
+        )
 
     def _ensure_relation_identity_columns(self) -> None:
         columns = {
@@ -1450,18 +1614,32 @@ class SqliteRelationStore:
             ],
         )
 
-    def _review_queue_records_by_ids(self, ids: Iterable[str]) -> list[ReviewQueueRecord]:
+    def _review_queue_records_by_ids(
+        self,
+        ids: Iterable[str],
+        *,
+        status: ReviewQueueStatus | None = None,
+        updated_at: str | None = None,
+    ) -> list[ReviewQueueRecord]:
         id_list = list(dict.fromkeys(ids))
         if not id_list:
             return []
+        params: list[Any] = [*id_list]
+        predicates = [f"id IN ({','.join('?' for _ in id_list)})"]
+        if status is not None:
+            predicates.append("status = ?")
+            params.append(status.value)
+        if updated_at is not None:
+            predicates.append("updated_at = ?")
+            params.append(updated_at)
         rows = self._conn.execute(
             f"""
             SELECT *
             FROM review_queue
-            WHERE id IN ({",".join("?" for _ in id_list)})
+            WHERE {" AND ".join(predicates)}
             ORDER BY created_at, id
             """,
-            id_list,
+            params,
         ).fetchall()
         return [_review_queue_from_row(row) for row in rows]
 
@@ -1590,6 +1768,7 @@ class SqliteRelationStore:
                     record.candidate.id,
                     record.candidate.context_id,
                     record.candidate.store_id,
+                    record.next_retry_at,
                     _dumps(record.model_dump(mode="json", exclude_none=True)),
                     record.created_at,
                     record.updated_at,
@@ -1599,21 +1778,65 @@ class SqliteRelationStore:
             """
             INSERT INTO review_queue (
                 id, status, run_id, candidate_id, context_id, store_id,
-                payload_json, created_at, updated_at
+                next_retry_at, payload_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 run_id = excluded.run_id,
                 candidate_id = excluded.candidate_id,
                 context_id = excluded.context_id,
                 store_id = excluded.store_id,
+                next_retry_at = excluded.next_retry_at,
                 payload_json = excluded.payload_json,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at
             """,
             rows,
         )
+
+    def _update_review_queue_records(
+        self,
+        records: Iterable[ReviewQueueRecord],
+        *,
+        expected_status: ReviewQueueStatus | None = None,
+    ) -> int:
+        rows = []
+        for record in records:
+            rows.append(
+                (
+                    record.status.value,
+                    record.run_id,
+                    record.candidate.id,
+                    record.candidate.context_id,
+                    record.candidate.store_id,
+                    record.next_retry_at,
+                    _dumps(record.model_dump(mode="json", exclude_none=True)),
+                    record.updated_at,
+                    record.id,
+                    *([expected_status.value] if expected_status is not None else []),
+                )
+            )
+        where_sql = "WHERE id = ?"
+        if expected_status is not None:
+            where_sql += " AND status = ?"
+        cursor = self._conn.executemany(
+            f"""
+            UPDATE review_queue
+            SET
+                status = ?,
+                run_id = ?,
+                candidate_id = ?,
+                context_id = ?,
+                store_id = ?,
+                next_retry_at = ?,
+                payload_json = ?,
+                updated_at = ?
+            {where_sql}
+            """,
+            rows,
+        )
+        return cursor.rowcount
 
     def _upsert_scheduled_ingestion_jobs(
         self,

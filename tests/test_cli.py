@@ -194,6 +194,15 @@ def test_ingest_worker_help_lists_options() -> None:
     assert "--max-queue-depth" in completed.stdout
     assert "--provider" in completed.stdout
     assert "--model" in completed.stdout
+    assert "--reviewer-model" in completed.stdout
+    assert "--reviewer" in completed.stdout
+    assert "--high-priority-reviewer-model" in completed.stdout
+    assert "--high-priority-reviewer" in completed.stdout
+    assert "--voting-policy" in completed.stdout
+    assert "--allow-review-queue-writes" in completed.stdout
+    assert "--allow-single-reviewer-write" in completed.stdout
+    assert "--review-poll-seconds" in completed.stdout
+    assert "--review-claim-limit" in completed.stdout
     assert completed.stderr == ""
 
 
@@ -221,6 +230,8 @@ def test_ingest_worker_max_jobs_outputs_json_without_stderr(tmp_path: Path) -> N
     payload = json.loads(completed.stdout)
     assert payload["status"] == "ok"
     assert payload["claimed_job_ids"] == []
+    assert payload["reviewed_record_ids"] == []
+    assert payload["committed_record_ids"] == []
     assert completed.stderr == ""
 
 

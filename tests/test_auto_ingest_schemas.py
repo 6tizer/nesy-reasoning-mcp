@@ -127,7 +127,7 @@ def test_review_queue_record_rejects_mismatched_candidate_ids() -> None:
         )
 
 
-def test_review_queue_record_requires_queue_gate_action() -> None:
+def test_review_queue_record_requires_queue_gate_action_for_active_records() -> None:
     candidate = CandidateRelation(
         id="candidate-1",
         source="A",
@@ -142,6 +142,33 @@ def test_review_queue_record_requires_queue_gate_action() -> None:
             candidate=candidate,
             gate_result=GateResult(candidate_id=candidate.id, action=GateAction.AUTO_WRITE),
         )
+
+
+def test_review_queue_record_allows_terminal_gate_actions() -> None:
+    candidate = CandidateRelation(
+        id="candidate-1",
+        source="A",
+        target="B",
+        relation_type="sufficient",
+        evidence=[_evidence()],
+    )
+
+    committed = ReviewQueueRecord(
+        status=ReviewQueueStatus.COMMITTED,
+        run_id="run-1",
+        candidate=candidate,
+        gate_result=GateResult(candidate_id=candidate.id, action=GateAction.AUTO_WRITE),
+        committed_relation_ids=["rel-1"],
+    )
+    resolved = ReviewQueueRecord(
+        status=ReviewQueueStatus.RESOLVED,
+        run_id="run-1",
+        candidate=candidate,
+        gate_result=GateResult(candidate_id=candidate.id, action=GateAction.REJECT),
+    )
+
+    assert committed.gate_result.action == GateAction.AUTO_WRITE
+    assert resolved.gate_result.action == GateAction.REJECT
 
 
 def test_queued_records_keep_candidate_diagnostics_without_repeating_all_run_diagnostics() -> None:

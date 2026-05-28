@@ -58,8 +58,10 @@ class ReviewQueueStatus(StrEnum):
     """Lifecycle status for persisted review queue records."""
 
     PENDING = "pending"
+    REVIEWING = "reviewing"
     COMMITTED = "committed"
     RESOLVED = "resolved"
+    FAILED = "failed"
 
 
 class ConversationTurnJobStatus(StrEnum):
@@ -406,6 +408,9 @@ class ReviewQueueRecord(BaseModel):
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     propositions: list[PropositionRecord] = Field(default_factory=list)
     context_metadata: dict[str, Any] = Field(default_factory=dict)
+    source_job_ids: list[str] = Field(default_factory=list)
+    attempt_count: int = Field(default=0, ge=0)
+    next_retry_at: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     committed_relation_ids: list[str] = Field(default_factory=list)
@@ -437,20 +442,35 @@ class ReviewQueueRecord(BaseModel):
             raise ValueError("must not be empty")
         return stripped
 
-    @field_validator("committed_relation_ids")
+    @field_validator("committed_relation_ids", "source_job_ids")
     @classmethod
-    def strip_relation_ids(cls, value: list[str]) -> list[str]:
-        """Strip relation IDs and reject empty provided values."""
+    def strip_id_lists(cls, value: list[str]) -> list[str]:
+        """Strip ID lists and reject empty provided values."""
         stripped = [item.strip() for item in value]
         if any(not item for item in stripped):
-            raise ValueError("committed_relation_ids must not contain empty values")
-        return stripped
+            raise ValueError("id lists must not contain empty values")
+        return list(dict.fromkeys(stripped))
 
     @model_validator(mode="after")
     def require_candidate_consistency(self) -> ReviewQueueRecord:
         """Ensure review and gate entries refer to the queued candidate."""
-        if self.gate_result.action != GateAction.QUEUE:
-            raise ValueError("gate_result action must be queue")
+        if (
+            self.status in {ReviewQueueStatus.PENDING, ReviewQueueStatus.REVIEWING}
+            and self.gate_result.action != GateAction.QUEUE
+        ):
+            raise ValueError("active review queue records must keep queue gate action")
+        if self.status == ReviewQueueStatus.FAILED and self.gate_result.action != GateAction.QUEUE:
+            raise ValueError("failed review queue records must keep queue gate action")
+        if self.status == ReviewQueueStatus.COMMITTED and self.gate_result.action not in {
+            GateAction.QUEUE,
+            GateAction.AUTO_WRITE,
+        }:
+            raise ValueError("committed review queue records must be queued or auto-written")
+        if self.status == ReviewQueueStatus.RESOLVED and self.gate_result.action not in {
+            GateAction.QUEUE,
+            GateAction.REJECT,
+        }:
+            raise ValueError("resolved review queue records must be queued or rejected")
         if self.gate_result.candidate_id != self.candidate.id:
             raise ValueError("gate_result candidate_id must match candidate id")
         if self.review is not None and self.review.candidate_id != self.candidate.id:
