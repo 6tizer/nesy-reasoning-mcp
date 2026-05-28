@@ -9,13 +9,14 @@ from nesy_reasoning_mcp.tools import (
     ASSERT_RELATIONS,
     CHECK_CONTRADICTIONS,
     LIST_REVIEW_QUEUE,
+    QUEUE_STATUS,
     REASON_OVER_RELATIONS,
     VALIDATE_CANDIDATE_RELATIONS,
 )
 
 
 @pytest.mark.asyncio
-async def test_tools_list_returns_sixteen_tools_with_schemas() -> None:
+async def test_tools_list_returns_seventeen_tools_with_schemas() -> None:
     server = create_server(RelationStore())
     handler = server.request_handlers[ListToolsRequest]
     result = await handler(ListToolsRequest(method="tools/list"))
@@ -32,6 +33,7 @@ async def test_tools_list_returns_sixteen_tools_with_schemas() -> None:
         "nesy.load_relations",
         "nesy.export_relations",
         "nesy.summarize_graph",
+        "nesy.queue_status",
         "nesy.counterfactual",
         "nesy.reason_over_relations",
         "nesy.validate_candidate_relations",
@@ -50,6 +52,8 @@ async def test_tools_list_returns_sixteen_tools_with_schemas() -> None:
     assert "candidates" in validation_tool.inputSchema["properties"]
     queue_tool = next(tool for tool in tools if tool.name == LIST_REVIEW_QUEUE)
     assert "filter" in queue_tool.inputSchema["properties"]
+    status_tool = next(tool for tool in tools if tool.name == QUEUE_STATUS)
+    assert status_tool.inputSchema["properties"] == {}
 
 
 @pytest.mark.asyncio
