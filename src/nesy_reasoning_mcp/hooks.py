@@ -13,6 +13,7 @@ from typing import Any, TextIO
 import anyio
 
 from nesy_reasoning_mcp.auto_ingest.enqueue import should_enqueue
+from nesy_reasoning_mcp.auto_ingest.nesy_facts import extract_nesy_facts
 from nesy_reasoning_mcp.auto_ingest.schemas import ConversationTurnJob
 from nesy_reasoning_mcp.config import NesyConfig, StorageBackend, load_config, parse_env_bool
 from nesy_reasoning_mcp.schemas import ContextFilter
@@ -174,7 +175,7 @@ def _stop_action(
     message = payload.get("last_assistant_message", "")
     if not isinstance(message, str):
         message = ""
-    facts_payload = _extract_nesy_facts(message)
+    facts_payload = extract_nesy_facts(message)
     context_filter = hook_context_filter(payload, config)
     arguments: dict[str, Any] = {
         "mode": "combined" if facts_payload is not None else "graph",
@@ -342,61 +343,6 @@ def _read_hook_payload(stdin: TextIO) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("hook input must be a JSON object")
     return payload
-
-
-def _extract_nesy_facts(message: str) -> dict[str, list[dict[str, Any]]] | None:
-    raw = _extract_nesy_facts_raw(message)
-    if raw is None:
-        return None
-    payload, _end = json.JSONDecoder().raw_decode(raw)
-    if isinstance(payload, list):
-        if not all(isinstance(item, dict) for item in payload):
-            raise ValueError("NESY_FACTS entries must be JSON objects")
-        return {"relations": payload, "propositions": []}
-    if isinstance(payload, dict):
-        relations = payload.get("relations")
-        propositions = payload.get("propositions", [])
-        if not isinstance(relations, list):
-            raise ValueError("NESY_FACTS relations must be a JSON array")
-        if not isinstance(propositions, list):
-            raise ValueError("NESY_FACTS propositions must be a JSON array")
-        if not all(isinstance(item, dict) for item in relations):
-            raise ValueError("NESY_FACTS relation entries must be JSON objects")
-        if not all(isinstance(item, dict) for item in propositions):
-            raise ValueError("NESY_FACTS proposition entries must be JSON objects")
-        return {"relations": relations, "propositions": propositions}
-    raise ValueError("NESY_FACTS must be a JSON array or object")
-
-
-def _extract_nesy_facts_raw(message: str) -> str | None:
-    tag_start = message.find("<NESY_FACTS>")
-    if tag_start >= 0:
-        raw_start = tag_start + len("<NESY_FACTS>")
-        tag_end = message.find("</NESY_FACTS>", raw_start)
-        if tag_end < 0:
-            raise ValueError("NESY_FACTS closing tag is missing")
-        return message[raw_start:tag_end].strip()
-
-    marker = "NESY_FACTS:"
-    marker_index = message.find(marker)
-    if marker_index < 0:
-        return None
-    raw = message[marker_index + len(marker) :].strip()
-    if raw.startswith("```"):
-        return _extract_fenced_json(raw)
-    return raw
-
-
-def _extract_fenced_json(raw: str) -> str:
-    lines = raw.splitlines()
-    if not lines:
-        return raw
-    body: list[str] = []
-    for line in lines[1:]:
-        if line.strip().startswith("```"):
-            return "\n".join(body).strip()
-        body.append(line)
-    return "\n".join(body).strip()
 
 
 def _stop_block_reason(contradiction: Mapping[str, Any]) -> str:

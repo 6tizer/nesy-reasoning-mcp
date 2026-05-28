@@ -17,6 +17,7 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     ConversationTurnJob,
     ConversationTurnJobFilter,
+    ConversationTurnJobStatus,
     ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
@@ -167,6 +168,94 @@ class MemoryRelationStore:
         if limit is not None:
             return matched[:limit]
         return matched
+
+    def claim_pending_ingestion_jobs(
+        self,
+        *,
+        limit: int = 1,
+    ) -> list[ConversationTurnJob]:
+        """Claim pending conversation turn jobs by moving them to extracting."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return []
+        pending = [
+            record
+            for record in self._ingestion_jobs
+            if record.status == ConversationTurnJobStatus.PENDING
+        ]
+        pending.sort(key=lambda record: (-record.priority, record.enqueued_at, record.job_id))
+        claimed_ids = {record.job_id for record in pending[:limit]}
+        updated_at = _utc_now_iso()
+        records: list[ConversationTurnJob] = []
+        claimed: list[ConversationTurnJob] = []
+        for record in self._ingestion_jobs:
+            if record.job_id not in claimed_ids:
+                records.append(record)
+                continue
+            updated = record.model_copy(
+                deep=True,
+                update={
+                    "status": ConversationTurnJobStatus.EXTRACTING,
+                    "updated_at": updated_at,
+                },
+            )
+            records.append(updated)
+            claimed.append(updated.model_copy(deep=True))
+        self._ingestion_jobs = records
+        claimed.sort(key=lambda record: (-record.priority, record.enqueued_at, record.job_id))
+        return claimed
+
+    def update_ingestion_job_status(
+        self,
+        job_id: str,
+        status: ConversationTurnJobStatus,
+        *,
+        expected_status: ConversationTurnJobStatus | None = None,
+    ) -> ConversationTurnJob | None:
+        """Update one conversation turn job status while preserving enqueue time."""
+        updated_at = _utc_now_iso()
+        records: list[ConversationTurnJob] = []
+        updated_record: ConversationTurnJob | None = None
+        for record in self._ingestion_jobs:
+            if record.job_id != job_id:
+                records.append(record)
+                continue
+            if expected_status is not None and record.status != expected_status:
+                records.append(record)
+                continue
+            updated_record = record.model_copy(
+                deep=True,
+                update={"status": status, "updated_at": updated_at},
+            )
+            records.append(updated_record)
+        self._ingestion_jobs = records
+        return updated_record.model_copy(deep=True) if updated_record is not None else None
+
+    def drop_pending_ingestion_jobs_over_depth(
+        self,
+        max_pending: int,
+    ) -> list[ConversationTurnJob]:
+        """Drop pending jobs beyond the configured queue depth."""
+        if max_pending < 0:
+            raise ValueError("max_pending must be non-negative")
+        pending = [
+            record
+            for record in self._ingestion_jobs
+            if record.status == ConversationTurnJobStatus.PENDING
+        ]
+        pending.sort(
+            key=lambda record: (record.priority, record.enqueued_at, record.job_id),
+            reverse=True,
+        )
+        drop_ids = {record.job_id for record in pending[max_pending:]}
+        if not drop_ids:
+            return []
+        dropped = [record.model_copy(deep=True) for record in pending[max_pending:]]
+        self._ingestion_jobs = [
+            record for record in self._ingestion_jobs if record.job_id not in drop_ids
+        ]
+        return dropped
 
     def enqueue_review_queue(
         self,

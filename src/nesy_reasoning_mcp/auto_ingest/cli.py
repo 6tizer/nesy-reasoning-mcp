@@ -36,6 +36,7 @@ from nesy_reasoning_mcp.auto_ingest.external_retrieval import (
     ExternalRetrievalConversion,
     convert_external_retrieval_batch,
 )
+from nesy_reasoning_mcp.auto_ingest.extraction import ExtractionModelConfig
 from nesy_reasoning_mcp.auto_ingest.fetcher import (
     DEFAULT_FETCH_TIMEOUT_SECONDS,
     DEFAULT_MAX_FETCH_BYTES,
@@ -101,6 +102,10 @@ from nesy_reasoning_mcp.auto_ingest.search import (
     SearchRetrievalResult,
     retrieve_search_evidence,
 )
+from nesy_reasoning_mcp.auto_ingest.worker import (
+    IngestionWorkerConfig,
+    run_ingestion_worker,
+)
 from nesy_reasoning_mcp.config import load_config
 from nesy_reasoning_mcp.schemas import Diagnostic
 from nesy_reasoning_mcp.store import create_relation_store
@@ -142,6 +147,11 @@ def add_ingest_subparser(subparsers: argparse._SubParsersAction[argparse.Argumen
         help="Manage scheduled Agent SDK ingestion jobs.",
     )
     add_schedule_arguments(schedule_parser)
+    worker_parser = ingest_subparsers.add_parser(
+        "worker",
+        help="Run the queued conversation-turn ingestion worker.",
+    )
+    add_worker_arguments(worker_parser)
 
 
 def add_agent_dry_run_arguments(
@@ -425,6 +435,29 @@ def add_review_queue_arguments(parser: argparse.ArgumentParser) -> None:
     resolve_parser.add_argument("--format", choices=["json", "text"], default="json")
 
 
+def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add foreground conversation ingestion worker arguments."""
+    parser.add_argument("--poll-seconds", type=float, default=10.0)
+    parser.add_argument("--max-jobs", type=int, default=None)
+    parser.add_argument("--claim-limit", type=int, default=5)
+    parser.add_argument("--max-merge-jobs", type=int, default=3)
+    parser.add_argument("--max-queue-depth", type=int, default=None)
+    parser.add_argument("--model", default=None, help="Extractor model override.")
+    parser.add_argument(
+        "--provider",
+        choices=[entry.name for entry in list_provider_entries()],
+        default=None,
+    )
+    parser.add_argument("--base-url", default=None)
+    parser.add_argument("--api-key-env", default=None)
+    parser.add_argument("--provider-header", action="append", default=[])
+    parser.add_argument("--provider-thinking", choices=["enabled", "disabled"], default=None)
+    parser.add_argument("--provider-reasoning-effort", choices=["high", "max"], default=None)
+    parser.add_argument("--extractor-timeout-seconds", type=float, default=180)
+    parser.add_argument("--extractor-max-tokens", type=int, default=4096)
+    parser.add_argument("--format", choices=["json", "text"], default="json")
+
+
 def add_retrieval_arguments(parser: argparse.ArgumentParser) -> None:
     """Add external retrieval CLI subcommands."""
     retrieval_subparsers = parser.add_subparsers(dest="retrieval_command")
@@ -522,6 +555,8 @@ def run_ingest_cli(args: argparse.Namespace) -> int:
         return run_retrieval_cli(args)
     if args.ingest_command == "schedule":
         return run_schedule_cli(args)
+    if args.ingest_command == "worker":
+        return run_worker_cli(args)
     raise ValueError("ingest command requires a subcommand")
 
 
@@ -602,6 +637,27 @@ def run_schedule_cli(
         return 2
 
     print(_render_schedule_result(result, getattr(args, "format", "json")), file=stdout)
+    return 2 if result.get("status") == "error" else 0
+
+
+def run_worker_cli(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    """Run the foreground conversation ingestion worker CLI."""
+    try:
+        result = anyio.run(_run_worker_command, args)
+    except KeyboardInterrupt:
+        return 130
+    except (OSError, ValueError, ValidationError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    for diagnostic in result.get("diagnostics", []):
+        if isinstance(diagnostic, dict) and diagnostic.get("level") in {"warning", "error"}:
+            print(f"warning: {diagnostic.get('code')}: {diagnostic.get('message')}", file=stderr)
+    print(_render_worker_result(result, getattr(args, "format", "json")), file=stdout)
     return 2 if result.get("status") == "error" else 0
 
 
@@ -1052,6 +1108,32 @@ async def _run_schedule_command(args: argparse.Namespace) -> dict[str, Any]:
         )
         return {"status": "ok", "job": _scheduled_job_dump(job)}
     raise ValueError("ingest schedule command requires a subcommand")
+
+
+async def _run_worker_command(args: argparse.Namespace) -> dict[str, Any]:
+    provider_entry = _provider_entry_from_args(args)
+    provider_config = _provider_config_from_args(args, provider_entry)
+    model = _model_from_args(args, provider_entry)
+    extraction_config = ExtractionModelConfig(
+        model=model,
+        provider_config=provider_config,
+        max_tokens=args.extractor_max_tokens,
+        timeout_seconds=args.extractor_timeout_seconds,
+    )
+    worker_config = IngestionWorkerConfig(
+        poll_seconds=args.poll_seconds,
+        queue_max_depth=args.max_queue_depth,
+        claim_limit=args.claim_limit,
+        max_merge_jobs=args.max_merge_jobs,
+        extraction_config=extraction_config,
+    )
+    store = create_relation_store(load_config())
+    result = await run_ingestion_worker(
+        store,
+        config=worker_config,
+        max_jobs=args.max_jobs,
+    )
+    return result.to_dict()
 
 
 async def _run_schedule_worker(args: argparse.Namespace, store: Any) -> dict[str, Any]:
@@ -2004,3 +2086,16 @@ def _render_schedule_result(result: dict[str, Any], output_format: str) -> str:
         ]
         return "\n".join(rows) if rows else "no scheduled ingestion runs"
     return f"status: {result.get('status')}"
+
+
+def _render_worker_result(result: dict[str, Any], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(result, ensure_ascii=False)
+    return (
+        f"status: {result.get('status')}\n"
+        f"claimed: {len(result.get('claimed_job_ids', []))}\n"
+        f"processed: {len(result.get('processed_job_ids', []))}\n"
+        f"queued: {len(result.get('queued_record_ids', []))}\n"
+        f"dropped: {len(result.get('dropped_job_ids', []))}\n"
+        f"failed: {len(result.get('failed_job_ids', []))}"
+    )
