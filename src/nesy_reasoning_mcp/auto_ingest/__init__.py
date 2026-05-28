@@ -75,6 +75,12 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
     ReviewVotingPolicy,
     ValidateCandidateRelationsInput,
 )
+from nesy_reasoning_mcp.auto_ingest.worker import (
+    IngestionWorkerConfig,
+    IngestionWorkerResult,
+    process_ingestion_queue_once,
+    run_ingestion_worker,
+)
 
 __all__ = [
     "CandidateRelation",
@@ -100,6 +106,8 @@ __all__ = [
     "IngestionInput",
     "IngestionMode",
     "IngestionReport",
+    "IngestionWorkerConfig",
+    "IngestionWorkerResult",
     "ListReviewQueueInput",
     "PROVIDER_REGISTRY",
     "ProviderRegistryEntry",
@@ -138,5 +146,7 @@ __all__ = [
     "get_provider_entry",
     "list_provider_entries",
     "next_cron_run",
+    "process_ingestion_queue_once",
+    "run_ingestion_worker",
     "should_enqueue",
 ]

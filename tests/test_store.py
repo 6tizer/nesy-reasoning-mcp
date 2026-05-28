@@ -1126,6 +1126,82 @@ def test_memory_ingestion_queue_dedupes_duplicate_incoming_ids() -> None:
     assert store.list_ingestion_jobs()[0].priority == 1
 
 
+def test_memory_ingestion_queue_claims_pending_by_worker_order() -> None:
+    store = RelationStore()
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-low", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _turn_job("turn-newer", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:03+00:00"}
+            ),
+            _turn_job("turn-older", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+            ),
+        ]
+    )
+
+    claimed = store.claim_pending_ingestion_jobs(limit=2)
+
+    assert [record.job_id for record in claimed] == ["turn-older", "turn-newer"]
+    assert all(record.status == ConversationTurnJobStatus.EXTRACTING for record in claimed)
+    assert [
+        record.job_id
+        for record in store.list_ingestion_jobs(
+            ConversationTurnJobFilter(status=ConversationTurnJobStatus.PENDING)
+        )
+    ] == ["turn-low"]
+
+
+def test_memory_ingestion_queue_updates_status_with_expected_guard() -> None:
+    store = RelationStore()
+    original = _turn_job("turn-1")
+    store.enqueue_ingestion_jobs([original])
+
+    mismatch = store.update_ingestion_job_status(
+        "turn-1",
+        ConversationTurnJobStatus.REVIEWING,
+        expected_status=ConversationTurnJobStatus.EXTRACTING,
+    )
+    updated = store.update_ingestion_job_status(
+        "turn-1",
+        ConversationTurnJobStatus.EXTRACTING,
+        expected_status=ConversationTurnJobStatus.PENDING,
+    )
+
+    assert mismatch is None
+    assert updated is not None
+    assert updated.status == ConversationTurnJobStatus.EXTRACTING
+    assert updated.enqueued_at == original.enqueued_at
+    assert updated.updated_at != original.updated_at
+
+
+def test_memory_ingestion_queue_backpressure_drops_oldest_lowest_priority() -> None:
+    store = RelationStore()
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-old-low", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _turn_job("turn-new-low", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:03+00:00"}
+            ),
+            _turn_job("turn-high", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+            ),
+        ]
+    )
+
+    dropped = store.drop_pending_ingestion_jobs_over_depth(2)
+
+    assert [record.job_id for record in dropped] == ["turn-old-low"]
+    assert {record.job_id for record in store.list_ingestion_jobs()} == {
+        "turn-new-low",
+        "turn-high",
+    }
+
+
 def test_json_store_persists_ingestion_queue(tmp_path) -> None:
     config = NesyConfig(
         storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
@@ -1136,6 +1212,48 @@ def test_json_store_persists_ingestion_queue(tmp_path) -> None:
     reloaded = JsonRelationStore(config)
 
     assert reloaded.list_ingestion_jobs()[0].job_id == "turn-1"
+
+
+def test_json_store_persists_ingestion_queue_status_updates(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    original = _turn_job("turn-1")
+    store.enqueue_ingestion_jobs([original])
+    store.update_ingestion_job_status("turn-1", ConversationTurnJobStatus.REVIEWING)
+
+    reloaded = JsonRelationStore(config)
+    stored = reloaded.list_ingestion_jobs()[0]
+
+    assert stored.status == ConversationTurnJobStatus.REVIEWING
+    assert stored.enqueued_at == original.enqueued_at
+
+
+def test_json_store_persists_ingestion_queue_claim_and_drop(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-old", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _turn_job("turn-new", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+            ),
+        ]
+    )
+    store.claim_pending_ingestion_jobs(limit=1)
+    store.drop_pending_ingestion_jobs_over_depth(0)
+
+    reloaded = JsonRelationStore(config)
+    stored = reloaded.list_ingestion_jobs()
+
+    assert len(stored) == 1
+    assert stored[0].job_id == "turn-old"
+    assert stored[0].status == ConversationTurnJobStatus.EXTRACTING
 
 
 def test_sqlite_store_persists_ingestion_queue_and_filters(tmp_path) -> None:
@@ -1155,6 +1273,109 @@ def test_sqlite_store_persists_ingestion_queue_and_filters(tmp_path) -> None:
 
     assert [record.job_id for record in listed] == ["turn-2"]
     assert listed[0].session_id == "session-b"
+
+
+def test_sqlite_ingestion_queue_claims_and_persists_status(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    original = _turn_job("turn-1").model_copy(update={"enqueued_at": "2026-01-01T00:00:01+00:00"})
+    high_priority = _turn_job("turn-2", priority=1).model_copy(
+        update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+    )
+    store.enqueue_ingestion_jobs([original, high_priority])
+
+    claimed = store.claim_pending_ingestion_jobs(limit=1)
+    mismatch = store.update_ingestion_job_status(
+        claimed[0].job_id,
+        ConversationTurnJobStatus.REVIEWING,
+        expected_status=ConversationTurnJobStatus.PENDING,
+    )
+    updated = store.update_ingestion_job_status(
+        claimed[0].job_id,
+        ConversationTurnJobStatus.REVIEWING,
+        expected_status=ConversationTurnJobStatus.EXTRACTING,
+    )
+
+    reloaded = SqliteRelationStore(config)
+    stored = reloaded.list_ingestion_jobs(ConversationTurnJobFilter(ids=[claimed[0].job_id]))[0]
+
+    assert [record.job_id for record in claimed] == ["turn-2"]
+    assert mismatch is None
+    assert updated is not None
+    assert stored.status == ConversationTurnJobStatus.REVIEWING
+    assert stored.enqueued_at == high_priority.enqueued_at
+
+
+def test_sqlite_ingestion_queue_claim_is_atomic_across_store_instances(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    seed = SqliteRelationStore(config)
+    seed.enqueue_ingestion_jobs([_turn_job("turn-1"), _turn_job("turn-2")])
+
+    def claim_one() -> list[str]:
+        store = SqliteRelationStore(config)
+        return [record.job_id for record in store.claim_pending_ingestion_jobs(limit=1)]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: claim_one(), range(2)))
+
+    claimed_ids = [job_id for result in results for job_id in result]
+    assert sorted(claimed_ids) == ["turn-1", "turn-2"]
+
+
+def test_sqlite_ingestion_queue_backpressure_persists_drop(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-old-low", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _turn_job("turn-new-low", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:03+00:00"}
+            ),
+            _turn_job("turn-high", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+            ),
+        ]
+    )
+
+    dropped = store.drop_pending_ingestion_jobs_over_depth(2)
+
+    reloaded = SqliteRelationStore(config)
+    assert [record.job_id for record in dropped] == ["turn-old-low"]
+    assert {record.job_id for record in reloaded.list_ingestion_jobs()} == {
+        "turn-new-low",
+        "turn-high",
+    }
+
+
+def test_sqlite_ingestion_queue_backpressure_preserves_claimed_jobs(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-claimed"),
+            _turn_job("turn-pending"),
+        ]
+    )
+
+    claimed = store.claim_pending_ingestion_jobs(limit=1)
+    dropped = store.drop_pending_ingestion_jobs_over_depth(0)
+    remaining = store.list_ingestion_jobs()
+
+    assert [record.job_id for record in claimed] == ["turn-claimed"]
+    assert [record.job_id for record in dropped] == ["turn-pending"]
+    assert [(record.job_id, record.status) for record in remaining] == [
+        ("turn-claimed", ConversationTurnJobStatus.EXTRACTING)
+    ]
 
 
 def test_sqlite_ingestion_queue_limit_offset_and_priority_order(tmp_path) -> None:

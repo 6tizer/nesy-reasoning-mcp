@@ -14,7 +14,11 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     ScheduledIngestionRun,
     ScheduledIngestionState,
 )
-from nesy_reasoning_mcp.auto_ingest.schemas import ConversationTurnJob, ReviewQueueRecord
+from nesy_reasoning_mcp.auto_ingest.schemas import (
+    ConversationTurnJob,
+    ConversationTurnJobStatus,
+    ReviewQueueRecord,
+)
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
@@ -102,6 +106,41 @@ class JsonRelationStore(MemoryRelationStore):
         queued, updated = super().enqueue_ingestion_jobs(records)
         self._persist()
         return queued, updated
+
+    def claim_pending_ingestion_jobs(
+        self,
+        *,
+        limit: int = 1,
+    ) -> list[ConversationTurnJob]:
+        """Claim pending conversation turn jobs and persist the JSON relation set."""
+        claimed = super().claim_pending_ingestion_jobs(limit=limit)
+        self._persist()
+        return claimed
+
+    def update_ingestion_job_status(
+        self,
+        job_id: str,
+        status: ConversationTurnJobStatus,
+        *,
+        expected_status: ConversationTurnJobStatus | None = None,
+    ) -> ConversationTurnJob | None:
+        """Update one conversation turn job status and persist the JSON relation set."""
+        updated = super().update_ingestion_job_status(
+            job_id,
+            status,
+            expected_status=expected_status,
+        )
+        self._persist()
+        return updated
+
+    def drop_pending_ingestion_jobs_over_depth(
+        self,
+        max_pending: int,
+    ) -> list[ConversationTurnJob]:
+        """Drop excess pending conversation turn jobs and persist the JSON relation set."""
+        dropped = super().drop_pending_ingestion_jobs_over_depth(max_pending)
+        self._persist()
+        return dropped
 
     def mark_review_queue_committed(
         self,

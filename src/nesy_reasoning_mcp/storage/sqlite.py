@@ -22,6 +22,7 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     ConversationTurnJob,
     ConversationTurnJobFilter,
+    ConversationTurnJobStatus,
     ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
@@ -544,6 +545,136 @@ class SqliteRelationStore:
             params.append(offset)
         rows = self._conn.execute(sql, params).fetchall()
         return [_ingestion_job_from_row(row) for row in rows]
+
+    @_locked
+    def claim_pending_ingestion_jobs(
+        self,
+        *,
+        limit: int = 1,
+    ) -> list[ConversationTurnJob]:
+        """Claim pending conversation turn jobs by moving them to extracting."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return []
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM ingestion_queue
+                WHERE status = ?
+                ORDER BY priority DESC, enqueued_at, job_id
+                LIMIT ?
+                """,
+                [ConversationTurnJobStatus.PENDING.value, limit],
+            ).fetchall()
+            timestamp = _utc_now_iso()
+            selected = [
+                _ingestion_job_from_row(row).model_copy(
+                    deep=True,
+                    update={
+                        "status": ConversationTurnJobStatus.EXTRACTING,
+                        "updated_at": timestamp,
+                    },
+                )
+                for row in rows
+            ]
+            if not selected:
+                self._conn.commit()
+                return []
+            self._update_ingestion_jobs(
+                selected,
+                expected_status=ConversationTurnJobStatus.PENDING,
+            )
+            claimed = self._ingestion_jobs_by_ids(
+                [record.job_id for record in selected],
+                status=ConversationTurnJobStatus.EXTRACTING,
+                updated_at=timestamp,
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        claimed.sort(key=lambda record: (-record.priority, record.enqueued_at, record.job_id))
+        return claimed
+
+    @_locked
+    def update_ingestion_job_status(
+        self,
+        job_id: str,
+        status: ConversationTurnJobStatus,
+        *,
+        expected_status: ConversationTurnJobStatus | None = None,
+    ) -> ConversationTurnJob | None:
+        """Update one conversation turn job status while preserving enqueue time."""
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM ingestion_queue
+                WHERE job_id = ?
+                """,
+                [job_id],
+            ).fetchall()
+            if not rows:
+                self._conn.commit()
+                return None
+            record = _ingestion_job_from_row(rows[0])
+            if expected_status is not None and record.status != expected_status:
+                self._conn.commit()
+                return None
+            updated = record.model_copy(
+                deep=True,
+                update={"status": status, "updated_at": _utc_now_iso()},
+            )
+            changed = self._update_ingestion_jobs([updated], expected_status=expected_status)
+            if changed == 0:
+                self._conn.commit()
+                return None
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return updated
+
+    @_locked
+    def drop_pending_ingestion_jobs_over_depth(
+        self,
+        max_pending: int,
+    ) -> list[ConversationTurnJob]:
+        """Drop pending jobs beyond the configured queue depth."""
+        if max_pending < 0:
+            raise ValueError("max_pending must be non-negative")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM ingestion_queue
+                WHERE status = ?
+                ORDER BY priority DESC, enqueued_at DESC, job_id DESC
+                """,
+                [ConversationTurnJobStatus.PENDING.value],
+            ).fetchall()
+            pending = [_ingestion_job_from_row(row) for row in rows]
+            dropped = pending[max_pending:]
+            if not dropped:
+                self._conn.commit()
+                return []
+            self._conn.executemany(
+                """
+                DELETE FROM ingestion_queue
+                WHERE job_id = ? AND status = ?
+                """,
+                [(record.job_id, ConversationTurnJobStatus.PENDING.value) for record in dropped],
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return dropped
 
     @_locked
     def enqueue_review_queue(
@@ -1373,6 +1504,80 @@ class SqliteRelationStore:
             """,
             rows,
         )
+
+    def _ingestion_jobs_by_ids(
+        self,
+        ids: Iterable[str],
+        *,
+        status: ConversationTurnJobStatus | None = None,
+        updated_at: str | None = None,
+    ) -> list[ConversationTurnJob]:
+        id_list = list(dict.fromkeys(ids))
+        if not id_list:
+            return []
+        params: list[Any] = [*id_list]
+        predicates = [f"job_id IN ({','.join('?' for _ in id_list)})"]
+        if status is not None:
+            predicates.append("status = ?")
+            params.append(status.value)
+        if updated_at is not None:
+            predicates.append("updated_at = ?")
+            params.append(updated_at)
+        rows = self._conn.execute(
+            f"""
+            SELECT *
+            FROM ingestion_queue
+            WHERE {" AND ".join(predicates)}
+            ORDER BY priority DESC, enqueued_at, job_id
+            """,
+            params,
+        ).fetchall()
+        return [_ingestion_job_from_row(row) for row in rows]
+
+    def _update_ingestion_jobs(
+        self,
+        records: Iterable[ConversationTurnJob],
+        *,
+        expected_status: ConversationTurnJobStatus | None = None,
+    ) -> int:
+        rows = []
+        for record in records:
+            rows.append(
+                (
+                    record.session_id,
+                    record.transcript_path,
+                    record.turn_index,
+                    record.priority,
+                    record.status.value,
+                    record.agent_type,
+                    1 if record.skip_extraction else 0,
+                    _dumps(record.model_dump(mode="json", exclude_none=True)),
+                    record.updated_at,
+                    record.job_id,
+                    *([expected_status.value] if expected_status is not None else []),
+                )
+            )
+        where_sql = "WHERE job_id = ?"
+        if expected_status is not None:
+            where_sql += " AND status = ?"
+        cursor = self._conn.executemany(
+            f"""
+            UPDATE ingestion_queue
+            SET
+                session_id = ?,
+                transcript_path = ?,
+                turn_index = ?,
+                priority = ?,
+                status = ?,
+                agent_type = ?,
+                skip_extraction = ?,
+                payload_json = ?,
+                updated_at = ?
+            {where_sql}
+            """,
+            rows,
+        )
+        return cursor.rowcount
 
     def _upsert_review_queue_records(self, records: Iterable[ReviewQueueRecord]) -> None:
         rows = []

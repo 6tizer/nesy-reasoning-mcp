@@ -16,6 +16,7 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     ConversationTurnJob,
     ConversationTurnJobFilter,
+    ConversationTurnJobStatus,
     ReviewQueueFilter,
     ReviewQueueRecord,
 )
@@ -85,6 +86,28 @@ class RelationStoreProtocol(Protocol):
         offset: int = 0,
     ) -> list[ConversationTurnJob]:
         """List conversation turn ingestion jobs matching an optional filter."""
+
+    def claim_pending_ingestion_jobs(
+        self,
+        *,
+        limit: int = 1,
+    ) -> list[ConversationTurnJob]:
+        """Claim pending conversation turn jobs by moving them to extracting."""
+
+    def update_ingestion_job_status(
+        self,
+        job_id: str,
+        status: ConversationTurnJobStatus,
+        *,
+        expected_status: ConversationTurnJobStatus | None = None,
+    ) -> ConversationTurnJob | None:
+        """Update one conversation turn job status while preserving enqueue time."""
+
+    def drop_pending_ingestion_jobs_over_depth(
+        self,
+        max_pending: int,
+    ) -> list[ConversationTurnJob]:
+        """Drop pending jobs beyond the configured queue depth."""
 
     def enqueue_review_queue(
         self,

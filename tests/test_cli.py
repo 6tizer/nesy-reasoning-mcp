@@ -108,6 +108,7 @@ def test_ingest_help_lists_agent_dry_run_subcommand() -> None:
     assert "queue" in completed.stdout
     assert "retrieval" in completed.stdout
     assert "schedule" in completed.stdout
+    assert "worker" in completed.stdout
     assert completed.stderr == ""
 
 
@@ -174,6 +175,52 @@ def test_ingest_retrieval_validate_help_lists_options() -> None:
     assert "--min-write-confidence" in completed.stdout
     assert "--voting-policy" in completed.stdout
     assert "--high-priority-reviewer-model" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_worker_help_lists_options() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "nesy_reasoning_mcp", "ingest", "worker", "--help"],
+        check=True,
+        capture_output=True,
+        env=_cli_env(),
+        text=True,
+    )
+
+    assert "--poll-seconds" in completed.stdout
+    assert "--max-jobs" in completed.stdout
+    assert "--claim-limit" in completed.stdout
+    assert "--max-merge-jobs" in completed.stdout
+    assert "--max-queue-depth" in completed.stdout
+    assert "--provider" in completed.stdout
+    assert "--model" in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_ingest_worker_max_jobs_outputs_json_without_stderr(tmp_path: Path) -> None:
+    config_path, _sqlite_path = _write_sqlite_config(tmp_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nesy_reasoning_mcp",
+            "ingest",
+            "worker",
+            "--max-jobs",
+            "1",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        env=_cli_env({"NESY_CONFIG": str(config_path)}),
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "ok"
+    assert payload["claimed_job_ids"] == []
     assert completed.stderr == ""
 
 
