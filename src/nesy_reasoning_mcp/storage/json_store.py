@@ -14,7 +14,7 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     ScheduledIngestionRun,
     ScheduledIngestionState,
 )
-from nesy_reasoning_mcp.auto_ingest.schemas import ReviewQueueRecord
+from nesy_reasoning_mcp.auto_ingest.schemas import ConversationTurnJob, ReviewQueueRecord
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
     ExclusiveGroupInput,
@@ -91,6 +91,15 @@ class JsonRelationStore(MemoryRelationStore):
     ) -> tuple[list[ReviewQueueRecord], int]:
         """Add review queue records and persist the JSON relation set."""
         queued, updated = super().enqueue_review_queue(records)
+        self._persist()
+        return queued, updated
+
+    def enqueue_ingestion_jobs(
+        self,
+        records: Iterable[ConversationTurnJob],
+    ) -> tuple[list[ConversationTurnJob], int]:
+        """Add conversation turn ingestion jobs and persist the JSON relation set."""
+        queued, updated = super().enqueue_ingestion_jobs(records)
         self._persist()
         return queued, updated
 
@@ -219,6 +228,9 @@ class JsonRelationStore(MemoryRelationStore):
         self._review_queue = [
             ReviewQueueRecord.model_validate(item) for item in data.get("review_queue", [])
         ]
+        self._ingestion_jobs = [
+            ConversationTurnJob.model_validate(item) for item in data.get("ingestion_jobs", [])
+        ]
         self._scheduled_ingestion_jobs = [
             ScheduledIngestionJob.model_validate(item)
             for item in data.get("scheduled_ingestion_jobs", [])
@@ -246,6 +258,9 @@ class JsonRelationStore(MemoryRelationStore):
             ],
             "review_queue": [
                 record.model_dump(mode="json", exclude_none=True) for record in self._review_queue
+            ],
+            "ingestion_jobs": [
+                record.model_dump(mode="json", exclude_none=True) for record in self._ingestion_jobs
             ],
             "scheduled_ingestion_jobs": [
                 job.model_dump(mode="json", exclude_none=True)

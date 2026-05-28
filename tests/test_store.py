@@ -4,6 +4,9 @@ import pytest
 
 from nesy_reasoning_mcp.auto_ingest import (
     CandidateRelation,
+    ConversationTurnJob,
+    ConversationTurnJobFilter,
+    ConversationTurnJobStatus,
     EvidenceRecord,
     GateAction,
     GateResult,
@@ -91,6 +94,27 @@ def _scheduled_run(
         job_id=job_id,
         trigger=ScheduledIngestionRunTrigger.MANUAL,
         status=status,
+    )
+
+
+def _turn_job(
+    job_id: str = "turn-1",
+    *,
+    session_id: str = "session-1",
+    transcript_path: str = "/tmp/transcript.jsonl",
+    turn_index: int | None = 1,
+    priority: int = 0,
+    status: ConversationTurnJobStatus = ConversationTurnJobStatus.PENDING,
+    agent_type: str | None = "codex",
+) -> ConversationTurnJob:
+    return ConversationTurnJob(
+        job_id=job_id,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        turn_index=turn_index,
+        priority=priority,
+        status=status,
+        agent_type=agent_type,
     )
 
 
@@ -1052,6 +1076,163 @@ def test_sqlite_review_queue_threaded_enqueue_and_list(tmp_path) -> None:
 
     assert results == [1] * 12
     assert len(store.list_review_queue()) == 12
+
+
+def test_memory_ingestion_queue_filters_and_orders_by_priority() -> None:
+    store = RelationStore()
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-low", session_id="session-a", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _turn_job("turn-high", session_id="session-b", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+            ),
+            _turn_job("turn-next", session_id="session-b", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:03+00:00"}
+            ),
+        ]
+    )
+
+    listed = store.list_ingestion_jobs(ConversationTurnJobFilter(session_id="session-b"))
+    by_ids = store.list_ingestion_jobs(
+        ConversationTurnJobFilter(ids=["turn-high", "turn-next", "turn-missing"])
+    )
+
+    assert [record.job_id for record in listed] == ["turn-high", "turn-next"]
+    assert [record.job_id for record in by_ids] == ["turn-high", "turn-next"]
+
+
+def test_memory_ingestion_queue_upserts_by_job_id() -> None:
+    store = RelationStore()
+    store.enqueue_ingestion_jobs([_turn_job("turn-1", priority=0)])
+
+    queued, updated = store.enqueue_ingestion_jobs([_turn_job("turn-1", priority=1)])
+
+    assert updated == 1
+    assert queued[0].priority == 1
+    assert store.list_ingestion_jobs()[0].priority == 1
+
+
+def test_memory_ingestion_queue_dedupes_duplicate_incoming_ids() -> None:
+    store = RelationStore()
+
+    queued, updated = store.enqueue_ingestion_jobs(
+        [_turn_job("turn-1", priority=0), _turn_job("turn-1", priority=1)]
+    )
+
+    assert updated == 0
+    assert len(queued) == 1
+    assert store.list_ingestion_jobs()[0].priority == 1
+
+
+def test_json_store_persists_ingestion_queue(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="json", json_path=str(tmp_path / "relations.json"))
+    )
+    store = JsonRelationStore(config)
+    store.enqueue_ingestion_jobs([_turn_job()])
+
+    reloaded = JsonRelationStore(config)
+
+    assert reloaded.list_ingestion_jobs()[0].job_id == "turn-1"
+
+
+def test_sqlite_store_persists_ingestion_queue_and_filters(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-1", session_id="session-a", agent_type="codex"),
+            _turn_job("turn-2", session_id="session-b", agent_type="claude", priority=1),
+        ]
+    )
+
+    reloaded = SqliteRelationStore(config)
+    listed = reloaded.list_ingestion_jobs(ConversationTurnJobFilter(agent_type="claude"))
+
+    assert [record.job_id for record in listed] == ["turn-2"]
+    assert listed[0].session_id == "session-b"
+
+
+def test_sqlite_ingestion_queue_limit_offset_and_priority_order(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_ingestion_jobs(
+        [
+            _turn_job("turn-1", priority=0).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:01+00:00"}
+            ),
+            _turn_job("turn-2", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:02+00:00"}
+            ),
+            _turn_job("turn-3", priority=1).model_copy(
+                update={"enqueued_at": "2026-01-01T00:00:03+00:00"}
+            ),
+        ]
+    )
+
+    listed = store.list_ingestion_jobs(limit=1, offset=1)
+
+    assert [record.job_id for record in store.list_ingestion_jobs()] == [
+        "turn-2",
+        "turn-3",
+        "turn-1",
+    ]
+    assert [record.job_id for record in listed] == ["turn-3"]
+
+
+def test_sqlite_ingestion_queue_dedupes_duplicate_incoming_ids(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    queued, updated = store.enqueue_ingestion_jobs(
+        [_turn_job("turn-1", priority=0), _turn_job("turn-1", priority=1)]
+    )
+
+    assert updated == 0
+    assert len(queued) == 1
+    assert store.list_ingestion_jobs()[0].priority == 1
+
+
+def test_sqlite_ingestion_queue_rejects_index_payload_mismatch(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+    store.enqueue_ingestion_jobs([_turn_job()])
+    store._conn.execute(  # noqa: SLF001
+        "UPDATE ingestion_queue SET session_id = ? WHERE job_id = ?",
+        ("session-other", "turn-1"),
+    )
+    store._conn.commit()  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="indexed columns"):
+        store.list_ingestion_jobs(ConversationTurnJobFilter(ids=["turn-1"]))
+
+
+def test_sqlite_ingestion_queue_threaded_enqueue_and_list(tmp_path) -> None:
+    config = NesyConfig(
+        storage=StorageConfig(backend="sqlite", sqlite_path=str(tmp_path / "nesy.db"))
+    )
+    store = SqliteRelationStore(config)
+
+    def enqueue_and_read(index: int) -> int:
+        job_id = f"turn-{index}"
+        store.enqueue_ingestion_jobs([_turn_job(job_id, session_id=f"session-{index}")])
+        return len(store.list_ingestion_jobs(ConversationTurnJobFilter(ids=[job_id])))
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(enqueue_and_read, range(12)))
+
+    assert results == [1] * 12
+    assert len(store.list_ingestion_jobs()) == 12
 
 
 def test_memory_scheduled_ingestion_job_and_run_lifecycle() -> None:

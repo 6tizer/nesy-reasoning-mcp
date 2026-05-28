@@ -15,6 +15,8 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     ScheduledIngestionState,
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import (
+    ConversationTurnJob,
+    ConversationTurnJobFilter,
     ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
@@ -59,6 +61,7 @@ class MemoryRelationStore:
         self._exclusive_groups: list[ExclusiveGroupRecord] = []
         self._independence_records: list[IndependenceRecord] = []
         self._propositions: list[PropositionRecord] = []
+        self._ingestion_jobs: list[ConversationTurnJob] = []
         self._review_queue: list[ReviewQueueRecord] = []
         self._scheduled_ingestion_jobs: list[ScheduledIngestionJob] = []
         self._scheduled_ingestion_runs: list[ScheduledIngestionRun] = []
@@ -130,6 +133,40 @@ class MemoryRelationStore:
     def list_propositions(self) -> list[PropositionRecord]:
         """List all stored proposition records."""
         return [proposition.model_copy(deep=True) for proposition in self._propositions]
+
+    def enqueue_ingestion_jobs(
+        self,
+        records: Iterable[ConversationTurnJob],
+    ) -> tuple[list[ConversationTurnJob], int]:
+        """Add conversation turn ingestion jobs and return stored records plus update count."""
+        incoming = [record.model_copy(deep=True) for record in records]
+        incoming_by_id = {record.job_id: record for record in incoming}
+        updated = sum(1 for record in self._ingestion_jobs if record.job_id in incoming_by_id)
+        self._ingestion_jobs = [
+            record for record in self._ingestion_jobs if record.job_id not in incoming_by_id
+        ]
+        unique_incoming = list(incoming_by_id.values())
+        self._ingestion_jobs.extend(unique_incoming)
+        return [record.model_copy(deep=True) for record in unique_incoming], updated
+
+    def list_ingestion_jobs(
+        self,
+        job_filter: ConversationTurnJobFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ConversationTurnJob]:
+        """List conversation turn ingestion jobs matching an optional filter."""
+        matched = [
+            record.model_copy(deep=True)
+            for record in self._ingestion_jobs
+            if job_filter is None or _ingestion_job_matches_filter(record, job_filter)
+        ]
+        matched.sort(key=lambda record: (-record.priority, record.enqueued_at, record.job_id))
+        matched = matched[offset:]
+        if limit is not None:
+            return matched[:limit]
+        return matched
 
     def enqueue_review_queue(
         self,
@@ -518,6 +555,19 @@ def _review_queue_matches_filter(
             queue_filter.after_id,
         )
     return True
+
+
+def _ingestion_job_matches_filter(
+    record: ConversationTurnJob,
+    job_filter: ConversationTurnJobFilter,
+) -> bool:
+    if job_filter.ids and record.job_id not in job_filter.ids:
+        return False
+    if job_filter.status is not None and record.status != job_filter.status:
+        return False
+    if job_filter.session_id is not None and record.session_id != job_filter.session_id:
+        return False
+    return not (job_filter.agent_type is not None and record.agent_type != job_filter.agent_type)
 
 
 def _scheduled_job_matches_filter(

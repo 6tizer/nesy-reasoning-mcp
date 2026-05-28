@@ -20,6 +20,8 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     ScheduledIngestionState,
 )
 from nesy_reasoning_mcp.auto_ingest.schemas import (
+    ConversationTurnJob,
+    ConversationTurnJobFilter,
     ReviewQueueFilter,
     ReviewQueueRecord,
     ReviewQueueStatus,
@@ -149,6 +151,28 @@ def _review_queue_filter_sql(queue_filter: ReviewQueueFilter | None) -> tuple[st
     return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
 
 
+def _ingestion_job_filter_sql(
+    job_filter: ConversationTurnJobFilter | None,
+) -> tuple[str, list[Any]]:
+    if job_filter is None:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if job_filter.ids:
+        clauses.append(f"job_id IN ({','.join('?' for _ in job_filter.ids)})")
+        params.extend(job_filter.ids)
+    if job_filter.status is not None:
+        clauses.append("status = ?")
+        params.append(job_filter.status.value)
+    if job_filter.session_id is not None:
+        clauses.append("session_id = ?")
+        params.append(job_filter.session_id)
+    if job_filter.agent_type is not None:
+        clauses.append("agent_type = ?")
+        params.append(job_filter.agent_type)
+    return (f"WHERE {' AND '.join(clauses)}", params) if clauses else ("", params)
+
+
 def _scheduled_job_filter_sql(
     job_filter: ScheduledIngestionJobFilter | None,
 ) -> tuple[str, list[Any]]:
@@ -216,6 +240,30 @@ def _review_queue_from_row(row: sqlite3.Row) -> ReviewQueueRecord:
     if mismatched:
         raise ValueError(
             "review_queue indexed columns do not match payload: " + ", ".join(mismatched)
+        )
+    return record
+
+
+def _ingestion_job_from_row(row: sqlite3.Row) -> ConversationTurnJob:
+    record = ConversationTurnJob.model_validate(_loads(row["payload_json"], {}))
+    expected_columns = {
+        "job_id": record.job_id,
+        "session_id": record.session_id,
+        "transcript_path": record.transcript_path,
+        "turn_index": record.turn_index,
+        "priority": record.priority,
+        "status": record.status.value,
+        "agent_type": record.agent_type,
+        "skip_extraction": 1 if record.skip_extraction else 0,
+        "enqueued_at": record.enqueued_at,
+        "updated_at": record.updated_at,
+    }
+    mismatched = [
+        column for column, expected in expected_columns.items() if row[column] != expected
+    ]
+    if mismatched:
+        raise ValueError(
+            "ingestion_queue indexed columns do not match payload: " + ", ".join(mismatched)
         )
     return record
 
@@ -443,6 +491,59 @@ class SqliteRelationStore:
             )
             for row in rows
         ]
+
+    @_locked
+    def enqueue_ingestion_jobs(
+        self,
+        records: Iterable[ConversationTurnJob],
+    ) -> tuple[list[ConversationTurnJob], int]:
+        """Add conversation turn ingestion jobs and return stored records plus update count."""
+        incoming = [record.model_copy(deep=True) for record in records]
+        queued = list({record.job_id: record for record in incoming}.values())
+        if not queued:
+            return [], 0
+        existing_ids = {
+            row["job_id"]
+            for row in self._conn.execute(
+                f"""
+                SELECT job_id FROM ingestion_queue
+                WHERE job_id IN ({",".join("?" for _ in queued)})
+                """,
+                [record.job_id for record in queued],
+            ).fetchall()
+        }
+        try:
+            self._upsert_ingestion_jobs(queued)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return queued, len(existing_ids)
+
+    @_locked
+    def list_ingestion_jobs(
+        self,
+        job_filter: ConversationTurnJobFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ConversationTurnJob]:
+        """List conversation turn ingestion jobs matching an optional filter."""
+        where_sql, params = _ingestion_job_filter_sql(job_filter)
+        sql = f"""
+            SELECT *
+            FROM ingestion_queue
+            {where_sql}
+            ORDER BY priority DESC, enqueued_at, job_id
+            """
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_ingestion_job_from_row(row) for row in rows]
 
     @_locked
     def enqueue_review_queue(
@@ -1032,6 +1133,22 @@ class SqliteRelationStore:
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS ingestion_queue (
+              job_id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              transcript_path TEXT NOT NULL,
+              turn_index INTEGER,
+              priority INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL CHECK (
+                status IN ('pending','extracting','reviewing','done','failed')
+              ),
+              agent_type TEXT,
+              skip_extraction INTEGER NOT NULL DEFAULT 0 CHECK (skip_extraction IN (0, 1)),
+              payload_json TEXT NOT NULL,
+              enqueued_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS scheduled_ingestion_jobs (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -1068,6 +1185,12 @@ class SqliteRelationStore:
               ON review_queue (candidate_id);
             CREATE INDEX IF NOT EXISTS idx_review_queue_context_store
               ON review_queue (context_id, store_id);
+            CREATE INDEX IF NOT EXISTS idx_ingestion_queue_status_priority
+              ON ingestion_queue (status, priority DESC, enqueued_at, job_id);
+            CREATE INDEX IF NOT EXISTS idx_ingestion_queue_session
+              ON ingestion_queue (session_id);
+            CREATE INDEX IF NOT EXISTS idx_ingestion_queue_agent_type
+              ON ingestion_queue (agent_type);
             CREATE INDEX IF NOT EXISTS idx_scheduled_ingestion_jobs_status
               ON scheduled_ingestion_jobs (status);
             CREATE INDEX IF NOT EXISTS idx_scheduled_ingestion_jobs_next_run
@@ -1210,6 +1333,46 @@ class SqliteRelationStore:
             id_list,
         ).fetchall()
         return [_review_queue_from_row(row) for row in rows]
+
+    def _upsert_ingestion_jobs(self, records: Iterable[ConversationTurnJob]) -> None:
+        rows = []
+        for record in records:
+            rows.append(
+                (
+                    record.job_id,
+                    record.session_id,
+                    record.transcript_path,
+                    record.turn_index,
+                    record.priority,
+                    record.status.value,
+                    record.agent_type,
+                    1 if record.skip_extraction else 0,
+                    _dumps(record.model_dump(mode="json", exclude_none=True)),
+                    record.enqueued_at,
+                    record.updated_at,
+                )
+            )
+        self._conn.executemany(
+            """
+            INSERT INTO ingestion_queue (
+                job_id, session_id, transcript_path, turn_index, priority, status,
+                agent_type, skip_extraction, payload_json, enqueued_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                transcript_path = excluded.transcript_path,
+                turn_index = excluded.turn_index,
+                priority = excluded.priority,
+                status = excluded.status,
+                agent_type = excluded.agent_type,
+                skip_extraction = excluded.skip_extraction,
+                payload_json = excluded.payload_json,
+                enqueued_at = excluded.enqueued_at,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
 
     def _upsert_review_queue_records(self, records: Iterable[ReviewQueueRecord]) -> None:
         rows = []

@@ -13,7 +13,12 @@ from nesy_reasoning_mcp.auto_ingest.scheduler import (
     ScheduledIngestionRunFilter,
     ScheduledIngestionState,
 )
-from nesy_reasoning_mcp.auto_ingest.schemas import ReviewQueueFilter, ReviewQueueRecord
+from nesy_reasoning_mcp.auto_ingest.schemas import (
+    ConversationTurnJob,
+    ConversationTurnJobFilter,
+    ReviewQueueFilter,
+    ReviewQueueRecord,
+)
 from nesy_reasoning_mcp.config import NesyConfig
 from nesy_reasoning_mcp.schemas import (
     CanonicalImplicationEdge,
@@ -65,6 +70,21 @@ class RelationStoreProtocol(Protocol):
 
     def list_propositions(self) -> list[PropositionRecord]:
         """List all stored proposition records."""
+
+    def enqueue_ingestion_jobs(
+        self,
+        records: Iterable[ConversationTurnJob],
+    ) -> tuple[list[ConversationTurnJob], int]:
+        """Add conversation turn ingestion jobs and return stored records plus update count."""
+
+    def list_ingestion_jobs(
+        self,
+        job_filter: ConversationTurnJobFilter | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ConversationTurnJob]:
+        """List conversation turn ingestion jobs matching an optional filter."""
 
     def enqueue_review_queue(
         self,

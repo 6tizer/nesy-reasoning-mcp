@@ -62,6 +62,101 @@ class ReviewQueueStatus(StrEnum):
     RESOLVED = "resolved"
 
 
+class ConversationTurnJobStatus(StrEnum):
+    """Lifecycle status for queued conversation turn ingestion jobs."""
+
+    PENDING = "pending"
+    EXTRACTING = "extracting"
+    REVIEWING = "reviewing"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class ConversationTurnJob(BaseModel):
+    """A queued conversation turn captured by a Stop hook."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(default_factory=lambda: f"turn_{uuid4().hex}", min_length=1)
+    session_id: str = Field(min_length=1)
+    transcript_path: str = Field(min_length=1)
+    turn_index: int | None = Field(default=None, ge=0)
+    enqueued_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    priority: int = Field(default=0, ge=0)
+    status: ConversationTurnJobStatus = ConversationTurnJobStatus.PENDING
+    agent_type: str | None = Field(default=None, min_length=1)
+    skip_extraction: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_timestamps(cls, value: Any) -> Any:
+        """Use one timestamp for both generated creation/update defaults."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if data.get("enqueued_at") is None and data.get("updated_at") is None:
+            timestamp = datetime.now(UTC).isoformat()
+            data["enqueued_at"] = timestamp
+            data["updated_at"] = timestamp
+        elif data.get("enqueued_at") is None:
+            data["enqueued_at"] = data["updated_at"]
+        elif data.get("updated_at") is None:
+            data["updated_at"] = data["enqueued_at"]
+        return data
+
+    @field_validator("job_id", "session_id", "transcript_path", "enqueued_at", "updated_at")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        """Strip required text fields and reject empty values."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+    @field_validator("agent_type")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        """Strip optional text fields and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+
+class ConversationTurnJobFilter(BaseModel):
+    """Filter for listing queued conversation turn ingestion jobs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: ConversationTurnJobStatus | None = None
+    ids: list[str] = Field(default_factory=list)
+    session_id: str | None = None
+    agent_type: str | None = None
+
+    @field_validator("ids")
+    @classmethod
+    def strip_ids(cls, value: list[str]) -> list[str]:
+        """Strip IDs, reject empties, and de-duplicate in input order."""
+        stripped = [item.strip() for item in value]
+        if any(not item for item in stripped):
+            raise ValueError("ids must not contain empty values")
+        return list(dict.fromkeys(stripped))
+
+    @field_validator("session_id", "agent_type")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        """Strip optional filter values and reject empty provided values."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be empty")
+        return stripped
+
+
 class EvidenceRecord(BaseModel):
     """A source excerpt supporting a candidate relation."""
 

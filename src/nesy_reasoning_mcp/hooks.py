@@ -12,6 +12,8 @@ from typing import Any, TextIO
 
 import anyio
 
+from nesy_reasoning_mcp.auto_ingest.enqueue import should_enqueue
+from nesy_reasoning_mcp.auto_ingest.schemas import ConversationTurnJob
 from nesy_reasoning_mcp.config import NesyConfig, StorageBackend, load_config, parse_env_bool
 from nesy_reasoning_mcp.schemas import ContextFilter
 from nesy_reasoning_mcp.store import RelationStoreProtocol, create_relation_store
@@ -202,7 +204,54 @@ def _stop_action(
             },
         )
         return
+    _enqueue_conversation_turn(payload, message, store, stderr)
     _write_hook_json(stdout, {})
+
+
+def _enqueue_conversation_turn(
+    payload: Mapping[str, Any],
+    message: str,
+    store: RelationStoreProtocol,
+    stderr: TextIO,
+) -> None:
+    decision = should_enqueue(message)
+    for diagnostic in decision.diagnostics:
+        print(f"warning: {diagnostic}", file=stderr)
+    if not decision.enqueue:
+        return
+
+    session_id = payload.get("session_id")
+    transcript_path = payload.get("transcript_path")
+    if not isinstance(session_id, str) or not session_id.strip():
+        print("warning: Stop hook enqueue skipped: missing session_id", file=stderr)
+        return
+    if not isinstance(transcript_path, str) or not transcript_path.strip():
+        print("warning: Stop hook enqueue skipped: missing transcript_path", file=stderr)
+        return
+
+    turn_index = payload.get("turn_index")
+    if not isinstance(turn_index, int) or isinstance(turn_index, bool):
+        turn_index = None
+    agent_type = payload.get("agent_type")
+    if not isinstance(agent_type, str) or not agent_type.strip():
+        agent_type = None
+
+    try:
+        store.enqueue_ingestion_jobs(
+            [
+                ConversationTurnJob(
+                    session_id=session_id,
+                    transcript_path=transcript_path,
+                    turn_index=turn_index,
+                    priority=decision.priority,
+                    agent_type=agent_type,
+                    skip_extraction=decision.skip_extraction,
+                )
+            ]
+        )
+    except Exception:
+        # Avoid echoing storage exception details; hook logs may include local transcript paths.
+        print("warning: Stop hook enqueue skipped: storage write failed", file=stderr)
 
 
 def _run_hook_with_timeout(

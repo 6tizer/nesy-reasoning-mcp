@@ -20,6 +20,14 @@ from nesy_reasoning_mcp.schemas import (
     RelationInput,
     RelationType,
 )
+from nesy_reasoning_mcp.store import RelationStore
+
+
+def _structural_enqueue_message() -> str:
+    return (
+        "The Stop hook requires a persisted queue because the later extraction worker depends "
+        "on the session id and transcript path being available after process restart. " * 3
+    )
 
 
 def test_hook_context_filter_defaults_and_env_choices() -> None:
@@ -424,6 +432,253 @@ def test_stop_hook_stop_hook_active_allows_without_checking(tmp_path: Path) -> N
     )
 
     assert json.loads(stdout.getvalue()) == {}
+
+
+def test_stop_hook_enqueues_structural_message(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    message = _structural_enqueue_message()
+    stdout = StringIO()
+
+    code = run_stop_hook(
+        stdin=StringIO(
+            json.dumps(
+                {
+                    "last_assistant_message": message,
+                    "session_id": "session-1",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                    "turn_index": 7,
+                    "agent_type": "codex",
+                }
+            )
+        ),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    reader = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    jobs = reader.list_ingestion_jobs()
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == {}
+    assert len(jobs) == 1
+    assert jobs[0].session_id == "session-1"
+    assert jobs[0].turn_index == 7
+    assert jobs[0].agent_type == "codex"
+    assert jobs[0].priority == 0
+    assert jobs[0].skip_extraction is False
+
+
+def test_stop_hook_nesy_facts_enqueues_priority_after_clean_check(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    message = 'Done.\nNESY_FACTS:\n[{"source":"A","target":"B","relation_type":"sufficient"}]'
+    stdout = StringIO()
+
+    code = run_stop_hook(
+        stdin=StringIO(
+            json.dumps(
+                {
+                    "last_assistant_message": message,
+                    "session_id": "session-1",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                }
+            )
+        ),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    reader = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    jobs = reader.list_ingestion_jobs()
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == {}
+    assert len(jobs) == 1
+    assert jobs[0].priority == 1
+    assert jobs[0].skip_extraction is True
+
+
+def test_stop_hook_xml_nesy_facts_enqueues_priority_after_clean_check(
+    tmp_path: Path,
+) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    message = (
+        'Done.\n<NESY_FACTS>[{"source":"A","target":"B","relation_type":"sufficient"}]</NESY_FACTS>'
+    )
+    stdout = StringIO()
+
+    code = run_stop_hook(
+        stdin=StringIO(
+            json.dumps(
+                {
+                    "last_assistant_message": message,
+                    "session_id": "session-1",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                }
+            )
+        ),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    reader = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    jobs = reader.list_ingestion_jobs()
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == {}
+    assert len(jobs) == 1
+    assert jobs[0].priority == 1
+    assert jobs[0].skip_extraction is True
+
+
+def test_stop_hook_missing_enqueue_payload_does_not_fail(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    message = _structural_enqueue_message()
+    stdout = StringIO()
+    stderr = StringIO()
+
+    code = run_stop_hook(
+        stdin=StringIO(json.dumps({"last_assistant_message": message})),
+        stdout=stdout,
+        stderr=stderr,
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    reader = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == {}
+    assert reader.list_ingestion_jobs() == []
+    assert "missing session_id" in stderr.getvalue()
+
+
+def test_enqueue_conversation_turn_skips_missing_session_id() -> None:
+    store = RelationStore()
+    stderr = StringIO()
+
+    hooks._enqueue_conversation_turn(  # noqa: SLF001
+        {"transcript_path": "/tmp/transcript.jsonl"},
+        _structural_enqueue_message(),
+        store,
+        stderr,
+    )
+
+    assert store.list_ingestion_jobs() == []
+    assert "missing session_id" in stderr.getvalue()
+
+
+def test_enqueue_conversation_turn_skips_missing_transcript_path() -> None:
+    store = RelationStore()
+    stderr = StringIO()
+
+    hooks._enqueue_conversation_turn(  # noqa: SLF001
+        {"session_id": "session-1"},
+        _structural_enqueue_message(),
+        store,
+        stderr,
+    )
+
+    assert store.list_ingestion_jobs() == []
+    assert "missing transcript_path" in stderr.getvalue()
+
+
+def test_enqueue_conversation_turn_storage_failure_warns_without_exception_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RelationStore()
+    stderr = StringIO()
+
+    def fail_enqueue(_records: object) -> None:
+        raise RuntimeError("secret transcript path")
+
+    monkeypatch.setattr(store, "enqueue_ingestion_jobs", fail_enqueue)
+
+    hooks._enqueue_conversation_turn(  # noqa: SLF001
+        {"session_id": "session-1", "transcript_path": "/tmp/transcript.jsonl"},
+        _structural_enqueue_message(),
+        store,
+        stderr,
+    )
+
+    assert "storage write failed" in stderr.getvalue()
+    assert "secret transcript path" not in stderr.getvalue()
+
+
+def test_stop_hook_active_does_not_enqueue(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    stdout = StringIO()
+
+    run_stop_hook(
+        stdin=StringIO(
+            json.dumps(
+                {
+                    "stop_hook_active": True,
+                    "last_assistant_message": "NESY_FACTS:\n[]",
+                    "session_id": "session-1",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                }
+            )
+        ),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    reader = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    assert json.loads(stdout.getvalue()) == {}
+    assert reader.list_ingestion_jobs() == []
+
+
+def test_stop_hook_contradiction_block_does_not_enqueue(tmp_path: Path) -> None:
+    config_path, sqlite_path = _write_sqlite_config(tmp_path)
+    writer = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    writer.assert_exclusive([ExclusiveGroupInput(group_id="state", members=["B", "C"])])
+    message = (
+        "Done.\nNESY_FACTS:\n"
+        "["
+        '{"source":"A","target":"B","relation_type":"sufficient"},'
+        '{"source":"A","target":"C","relation_type":"sufficient"}'
+        "]"
+    )
+    stdout = StringIO()
+
+    run_stop_hook(
+        stdin=StringIO(
+            json.dumps(
+                {
+                    "last_assistant_message": message,
+                    "session_id": "session-1",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                }
+            )
+        ),
+        stdout=stdout,
+        stderr=StringIO(),
+        env={"NESY_CONFIG": str(config_path)},
+    )
+
+    reader = create_hook_store(
+        NesyConfig(storage=StorageConfig(backend="sqlite", sqlite_path=str(sqlite_path))),
+        stderr=StringIO(),
+    )
+    assert json.loads(stdout.getvalue())["decision"] == "block"
+    assert reader.list_ingestion_jobs() == []
 
 
 def test_stop_hook_context_separated_conflict_does_not_block(tmp_path: Path) -> None:
