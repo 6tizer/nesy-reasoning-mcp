@@ -2,7 +2,9 @@ import json
 import os
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 
@@ -16,6 +18,7 @@ from nesy_reasoning_mcp.auto_ingest import (
     ReviewQueueRecord,
     ReviewQueueStatus,
 )
+from nesy_reasoning_mcp.auto_ingest import cli as ingest_cli
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.store import create_relation_store
 from nesy_reasoning_mcp.tools import ASSERT_RELATIONS, call_tool
@@ -233,6 +236,32 @@ def test_ingest_worker_max_jobs_outputs_json_without_stderr(tmp_path: Path) -> N
     assert payload["reviewed_record_ids"] == []
     assert payload["committed_record_ids"] == []
     assert completed.stderr == ""
+
+
+def test_ingest_worker_cli_defaults_missing_diagnostic_level_to_warning(monkeypatch) -> None:
+    async def fake_run_worker_command(_args):
+        return {
+            "status": "ok",
+            "claimed_job_ids": [],
+            "reviewed_record_ids": [],
+            "committed_record_ids": [],
+            "diagnostics": [{"code": "DIAG", "message": "worker warning"}],
+        }
+
+    monkeypatch.setattr(ingest_cli, "_run_worker_command", fake_run_worker_command)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = ingest_cli.run_worker_cli(
+        SimpleNamespace(format="json"),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert stderr.getvalue() == "warning: DIAG: worker warning\n"
 
 
 def test_ingest_schedule_help_lists_subcommands() -> None:

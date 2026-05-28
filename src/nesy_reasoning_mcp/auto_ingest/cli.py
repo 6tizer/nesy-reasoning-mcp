@@ -176,7 +176,10 @@ def add_agent_dry_run_arguments(
         action="append",
         default=[],
         dest="reviewer_models",
-        help="Reviewer model override. May be repeated for multi-reviewer voting.",
+        help=(
+            "Reviewer model name for the default/provider config. May be repeated for "
+            "multi-reviewer voting."
+        ),
     )
     parser.add_argument(
         "--reviewer",
@@ -196,7 +199,10 @@ def add_agent_dry_run_arguments(
         action="append",
         default=[],
         dest="high_priority_reviewer_models",
-        help="Reviewer model whose reject or needs_human/downgrade vote has priority.",
+        help=(
+            "High-priority reviewer model name for the default/provider config; reject or "
+            "needs_human/downgrade votes have priority."
+        ),
     )
     parser.add_argument(
         "--high-priority-reviewer",
@@ -461,7 +467,10 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         dest="reviewer_models",
-        help="Reviewer model override. May be repeated for multi-reviewer voting.",
+        help=(
+            "Reviewer model name for the default/provider config. May be repeated for "
+            "multi-reviewer voting."
+        ),
     )
     parser.add_argument(
         "--reviewer",
@@ -475,7 +484,10 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         dest="high_priority_reviewer_models",
-        help="Reviewer model whose reject or needs_human/downgrade vote has priority.",
+        help=(
+            "High-priority reviewer model name for the default/provider config; reject or "
+            "needs_human/downgrade votes have priority."
+        ),
     )
     parser.add_argument(
         "--high-priority-reviewer",
@@ -697,8 +709,11 @@ def run_worker_cli(
         print(str(exc), file=stderr)
         return 2
     for diagnostic in result.get("diagnostics", []):
-        if isinstance(diagnostic, dict) and diagnostic.get("level") in {"warning", "error"}:
-            level = diagnostic.get("level")
+        if isinstance(diagnostic, dict) and (diagnostic.get("level") or "warning") in {
+            "warning",
+            "error",
+        }:
+            level = diagnostic.get("level") or "warning"
             print(f"{level}: {diagnostic.get('code')}: {diagnostic.get('message')}", file=stderr)
     print(_render_worker_result(result, getattr(args, "format", "json")), file=stdout)
     return 2 if result.get("status") == "error" else 0

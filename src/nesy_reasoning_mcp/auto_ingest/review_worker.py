@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import signal
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -52,7 +52,7 @@ class ReviewWorkerConfig:
 
     poll_seconds: float = DEFAULT_REVIEW_WORKER_POLL_SECONDS
     claim_limit: int = DEFAULT_REVIEW_WORKER_CLAIM_LIMIT
-    max_retries: int = DEFAULT_SCHEDULE_MAX_RETRIES
+    max_retries: int = DEFAULT_SCHEDULE_MAX_RETRIES  # Extra retries after the first failed attempt.
     retry_backoff_seconds: int = DEFAULT_SCHEDULE_RETRY_BACKOFF_SECONDS
     model: str | None = None
     reviewer_models: list[str] | None = None
@@ -195,22 +195,9 @@ async def run_review_worker(
             iteration_config = review_config
             if max_records is not None:
                 remaining = max_records - len(total.reviewed_record_ids)
-                iteration_config = ReviewWorkerConfig(
-                    poll_seconds=review_config.poll_seconds,
+                iteration_config = replace(
+                    review_config,
                     claim_limit=min(review_config.claim_limit, remaining),
-                    max_retries=review_config.max_retries,
-                    retry_backoff_seconds=review_config.retry_backoff_seconds,
-                    model=review_config.model,
-                    reviewer_models=review_config.reviewer_models,
-                    reviewer_configs=review_config.reviewer_configs,
-                    high_priority_reviewer_models=review_config.high_priority_reviewer_models,
-                    voting_policy=review_config.voting_policy,
-                    provider_config=review_config.provider_config,
-                    disable_tracing=review_config.disable_tracing,
-                    runtime_options=review_config.runtime_options,
-                    auto_write=review_config.auto_write,
-                    min_write_confidence=review_config.min_write_confidence,
-                    allow_single_reviewer_write=review_config.allow_single_reviewer_write,
                 )
             batch = await process_review_queue_once(
                 store,
@@ -465,7 +452,16 @@ def _writeback_source_jobs_for_records(
 ) -> tuple[list[str], list[str]]:
     done_job_ids: list[str] = []
     failed_job_ids: list[str] = []
-    for job_id in _source_job_ids(records):
+    source_job_ids = _source_job_ids(records)
+    related_by_job_id: dict[str, list[ReviewQueueRecord]] = {
+        job_id: [] for job_id in source_job_ids
+    }
+    if not failed:
+        pending_job_ids = set(source_job_ids)
+        for record in store.list_review_queue():
+            for job_id in pending_job_ids.intersection(record.source_job_ids):
+                related_by_job_id[job_id].append(record)
+    for job_id in source_job_ids:
         if failed:
             updated = store.update_ingestion_job_status(
                 job_id,
@@ -475,9 +471,7 @@ def _writeback_source_jobs_for_records(
             if updated is not None:
                 failed_job_ids.append(job_id)
             continue
-        related = [
-            record for record in store.list_review_queue() if job_id in record.source_job_ids
-        ]
+        related = related_by_job_id[job_id]
         if related and all(
             record.status in {ReviewQueueStatus.COMMITTED, ReviewQueueStatus.RESOLVED}
             for record in related

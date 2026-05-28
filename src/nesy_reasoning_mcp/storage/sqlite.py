@@ -1431,73 +1431,132 @@ class SqliteRelationStore:
         self._conn.commit()
 
     def _ensure_review_queue_schema(self) -> None:
-        columns = {
-            row["name"] for row in self._conn.execute("PRAGMA table_info(review_queue)").fetchall()
-        }
-        row = self._conn.execute(
-            """
-            SELECT sql
-            FROM sqlite_master
-            WHERE type = 'table' AND name = 'review_queue'
-            """
-        ).fetchone()
-        table_sql = row["sql"] if row is not None else ""
-        if "next_retry_at" in columns and "reviewing" in table_sql and "failed" in table_sql:
+        def table_exists(name: str) -> bool:
+            return (
+                self._conn.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = ?
+                    """,
+                    (name,),
+                ).fetchone()
+                is not None
+            )
+
+        def schema_ready(name: str) -> bool:
+            columns = {
+                row["name"] for row in self._conn.execute(f"PRAGMA table_info({name})").fetchall()
+            }
+            row = self._conn.execute(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                """,
+                (name,),
+            ).fetchone()
+            table_sql = row["sql"] if row is not None else ""
+            return "next_retry_at" in columns and "reviewing" in table_sql and "failed" in table_sql
+
+        def drop_indexes() -> None:
+            for index_name in (
+                "idx_review_queue_status",
+                "idx_review_queue_status_retry",
+                "idx_review_queue_run_id",
+                "idx_review_queue_candidate_id",
+                "idx_review_queue_context_store",
+            ):
+                self._conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+        def create_review_queue() -> None:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_queue (
+                  id TEXT PRIMARY KEY,
+                  status TEXT NOT NULL CHECK (
+                    status IN ('pending','reviewing','committed','resolved','failed')
+                  ),
+                  run_id TEXT NOT NULL,
+                  candidate_id TEXT NOT NULL,
+                  context_id TEXT NOT NULL,
+                  store_id TEXT NOT NULL,
+                  next_retry_at TEXT,
+                  payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+        def copy_legacy_rows() -> None:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO review_queue (
+                  id, status, run_id, candidate_id, context_id, store_id,
+                  next_retry_at, payload_json, created_at, updated_at
+                )
+                SELECT
+                  id, status, run_id, candidate_id, context_id, store_id,
+                  json_extract(payload_json, '$.next_retry_at'), payload_json, created_at,
+                  updated_at
+                FROM review_queue_legacy
+                """
+            )
+
+        def create_indexes() -> None:
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_queue_status
+                  ON review_queue (status)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_queue_status_retry
+                  ON review_queue (status, next_retry_at, created_at, id)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_queue_run_id
+                  ON review_queue (run_id)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_queue_candidate_id
+                  ON review_queue (candidate_id)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_queue_context_store
+                  ON review_queue (context_id, store_id)
+                """
+            )
+
+        legacy_exists = table_exists("review_queue_legacy")
+        if not legacy_exists and schema_ready("review_queue"):
             return
-        for index_name in (
-            "idx_review_queue_status",
-            "idx_review_queue_status_retry",
-            "idx_review_queue_run_id",
-            "idx_review_queue_candidate_id",
-            "idx_review_queue_context_store",
-        ):
-            self._conn.execute(f"DROP INDEX IF EXISTS {index_name}")
-        self._conn.execute("ALTER TABLE review_queue RENAME TO review_queue_legacy")
-        self._conn.execute(
-            """
-            CREATE TABLE review_queue (
-              id TEXT PRIMARY KEY,
-              status TEXT NOT NULL CHECK (
-                status IN ('pending','reviewing','committed','resolved','failed')
-              ),
-              run_id TEXT NOT NULL,
-              candidate_id TEXT NOT NULL,
-              context_id TEXT NOT NULL,
-              store_id TEXT NOT NULL,
-              next_retry_at TEXT,
-              payload_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            )
-            """
-        )
-        self._conn.execute(
-            """
-            INSERT INTO review_queue (
-              id, status, run_id, candidate_id, context_id, store_id,
-              next_retry_at, payload_json, created_at, updated_at
-            )
-            SELECT
-              id, status, run_id, candidate_id, context_id, store_id,
-              json_extract(payload_json, '$.next_retry_at'), payload_json, created_at, updated_at
-            FROM review_queue_legacy
-            """
-        )
-        self._conn.execute("DROP TABLE review_queue_legacy")
-        self._conn.executescript(
-            """
-            CREATE INDEX IF NOT EXISTS idx_review_queue_status
-              ON review_queue (status);
-            CREATE INDEX IF NOT EXISTS idx_review_queue_status_retry
-              ON review_queue (status, next_retry_at, created_at, id);
-            CREATE INDEX IF NOT EXISTS idx_review_queue_run_id
-              ON review_queue (run_id);
-            CREATE INDEX IF NOT EXISTS idx_review_queue_candidate_id
-              ON review_queue (candidate_id);
-            CREATE INDEX IF NOT EXISTS idx_review_queue_context_store
-              ON review_queue (context_id, store_id);
-            """
-        )
+        self._conn.execute("SAVEPOINT review_queue_schema_migration")
+        try:
+            drop_indexes()
+            if legacy_exists:
+                if not schema_ready("review_queue"):
+                    self._conn.execute("DROP TABLE IF EXISTS review_queue")
+                    create_review_queue()
+            else:
+                self._conn.execute("ALTER TABLE review_queue RENAME TO review_queue_legacy")
+                create_review_queue()
+            copy_legacy_rows()
+            self._conn.execute("DROP TABLE review_queue_legacy")
+            create_indexes()
+            self._conn.execute("RELEASE SAVEPOINT review_queue_schema_migration")
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT review_queue_schema_migration")
+            self._conn.execute("RELEASE SAVEPOINT review_queue_schema_migration")
+            raise
 
     def _ensure_relation_identity_columns(self) -> None:
         columns = {
@@ -1820,23 +1879,20 @@ class SqliteRelationStore:
         where_sql = "WHERE id = ?"
         if expected_status is not None:
             where_sql += " AND status = ?"
-        cursor = self._conn.executemany(
-            f"""
-            UPDATE review_queue
-            SET
-                status = ?,
-                run_id = ?,
-                candidate_id = ?,
-                context_id = ?,
-                store_id = ?,
-                next_retry_at = ?,
-                payload_json = ?,
-                updated_at = ?
-            {where_sql}
-            """,
-            rows,
-        )
-        return cursor.rowcount
+        sql = f"""
+        UPDATE review_queue
+        SET
+            status = ?,
+            run_id = ?,
+            candidate_id = ?,
+            context_id = ?,
+            store_id = ?,
+            next_retry_at = ?,
+            payload_json = ?,
+            updated_at = ?
+        {where_sql}
+        """
+        return sum(self._conn.execute(sql, row).rowcount for row in rows)
 
     def _upsert_scheduled_ingestion_jobs(
         self,
