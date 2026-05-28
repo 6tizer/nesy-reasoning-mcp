@@ -10,6 +10,15 @@ def test_should_enqueue_nesy_facts_priority_and_skip_extraction() -> None:
     assert decision.reason == "nesy_facts"
 
 
+def test_should_enqueue_xml_nesy_facts_priority_and_skip_extraction() -> None:
+    decision = should_enqueue('final\n<NESY_FACTS>[{"source":"A","target":"B"}]</NESY_FACTS>')
+
+    assert decision.enqueue is True
+    assert decision.priority == 1
+    assert decision.skip_extraction is True
+    assert decision.reason == "nesy_facts"
+
+
 def test_should_enqueue_skips_short_messages() -> None:
     decision = should_enqueue("A requires B.")
 
@@ -63,5 +72,6 @@ def test_should_enqueue_classifier_flag_only_adds_diagnostic() -> None:
     assert decision.enqueue is True
     assert decision.reason == "structural_keyword"
     assert decision.diagnostics == [
-        "NESY_ENQUEUE_CLASSIFIER is set, but PR1 uses deterministic heuristics only."
+        "NESY_ENQUEUE_CLASSIFIER is set; classifier support is not yet active "
+        "and will be enabled in a later phase."
     ]

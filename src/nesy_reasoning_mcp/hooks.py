@@ -249,7 +249,8 @@ def _enqueue_conversation_turn(
                 )
             ]
         )
-    except Exception:  # pragma: no cover - defensive hook boundary
+    except Exception:
+        # Avoid echoing storage exception details; hook logs may include local transcript paths.
         print("warning: Stop hook enqueue skipped: storage write failed", file=stderr)
 
 

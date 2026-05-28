@@ -12,6 +12,7 @@ from nesy_reasoning_mcp.config import parse_env_bool
 MIN_MESSAGE_CHARS = 200
 MAX_CODE_BLOCK_RATIO = 0.8
 NESY_FACTS_TAG = "NESY_FACTS:"
+NESY_FACTS_XML_TAG = "<NESY_FACTS>"
 
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 _STRUCTURAL_KEYWORD_RE = re.compile(
@@ -41,7 +42,7 @@ def should_enqueue(
 ) -> EnqueueDecision:
     """Return whether a Stop-hook message should become a conversation turn job."""
     normalized = message.strip()
-    if NESY_FACTS_TAG in normalized:
+    if NESY_FACTS_TAG in normalized or NESY_FACTS_XML_TAG in normalized:
         return EnqueueDecision(
             enqueue=True,
             priority=1,
@@ -52,7 +53,8 @@ def should_enqueue(
     diagnostics: list[str] = []
     if _classifier_enabled(env):
         diagnostics.append(
-            "NESY_ENQUEUE_CLASSIFIER is set, but PR1 uses deterministic heuristics only."
+            "NESY_ENQUEUE_CLASSIFIER is set; classifier support is not yet active "
+            "and will be enabled in a later phase."
         )
 
     if len(normalized) < MIN_MESSAGE_CHARS:
