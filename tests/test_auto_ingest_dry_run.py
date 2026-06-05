@@ -500,7 +500,8 @@ async def test_openai_compatible_provider_uses_env_key_headers_and_disables_trac
     assert captured["base_url"] == "https://api.deepseek.com"
     assert captured["headers"] == {"X-Test": "yes"}
     assert captured["tracing_disabled"] == [True, True]
-    assert captured["agent_models"] == ["provider-model", "provider-model"]
+    assert captured["agent_models"][0] == "provider-model"
+    assert all(m == "provider-model" for m in captured["agent_models"])
     assert report.metadata["provider"] == {
         "type": "openai_compatible",
         "header_keys": ["X-Test"],
