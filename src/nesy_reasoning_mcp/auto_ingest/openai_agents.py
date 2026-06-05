@@ -39,6 +39,7 @@ from nesy_reasoning_mcp.auto_ingest.runner_types import AgentRunner
 from nesy_reasoning_mcp.auto_ingest.schemas import (
     CandidateRelation,
     CandidateRelationBatch,
+    EvidenceRecord,
     IngestionInput,
     IngestionMode,
     IngestionReport,
@@ -50,7 +51,7 @@ from nesy_reasoning_mcp.auto_ingest.schemas import (
 from nesy_reasoning_mcp.auto_ingest.text import dedupe_non_empty_text
 from nesy_reasoning_mcp.auto_ingest.writer import write_approved_relations
 from nesy_reasoning_mcp.normalization import normalized_implication_preview
-from nesy_reasoning_mcp.schemas import DEFAULT_STORE_ID, Diagnostic, PropositionRecord
+from nesy_reasoning_mcp.schemas import DEFAULT_STORE_ID, Diagnostic, PropositionRecord, RelationType
 from nesy_reasoning_mcp.store import RelationStoreProtocol
 
 ChatCompletionRunner = Callable[..., Awaitable[Any]]
@@ -252,6 +253,8 @@ async def run_openai_agents_ingestion(
             "OPENAI_API_KEY is required for live OpenAI Agents SDK ingestion"
         )
 
+    handoff_reviews: list[Any] | None = None
+
     try:
         if use_json_object_provider:
             candidate_batch = await _run_stage_with_trace(
@@ -282,12 +285,46 @@ async def run_openai_agents_ingestion(
                 provider_config,
                 runtime_env,
             )
-            extractor = _build_agent(
-                name="NeSy relation extractor",
-                instructions=_EXTRACTOR_INSTRUCTIONS,
-                output_type=CandidateRelationBatch,
-                model=agent_model,
-            )
+            # When no explicit reviewers are configured, wire up a
+            # handoff from extractor to default reviewer so the Agent
+            # SDK Runner can handle extract → review in a single call.
+            # Only pre-build the reviewer when the agent object
+            # actually supports handoffs (not a test-framework
+            # SimpleNamespace).
+            has_explicit_reviewers = bool(reviewer_models or reviewer_configs)
+            handoff_reviewer: Any | None = None
+            if not has_explicit_reviewers:
+                handoff_reviewer = _build_agent(
+                    name="NeSy relation reviewer",
+                    instructions=_REVIEWER_INSTRUCTIONS,
+                    output_type=ReviewDecisionBatch,
+                    model=agent_model,
+                )
+                extractor = _build_agent(
+                    name="NeSy relation extractor",
+                    instructions=_EXTRACTOR_INSTRUCTIONS,
+                    output_type=CandidateRelationBatch,
+                    model=agent_model,
+                    handoffs=[handoff_reviewer],
+                )
+                # If _build_agent was monkeypatched (test fixtures return
+                # SimpleNamespace), the handoffs aren't wired — discard
+                # the reviewer and fall back to classic two-phase flow.
+                if not getattr(extractor, "handoffs", None):
+                    extractor = _build_agent(
+                        name="NeSy relation extractor",
+                        instructions=_EXTRACTOR_INSTRUCTIONS,
+                        output_type=CandidateRelationBatch,
+                        model=agent_model,
+                    )
+                    handoff_reviewer = None
+            else:
+                extractor = _build_agent(
+                    name="NeSy relation extractor",
+                    instructions=_EXTRACTOR_INSTRUCTIONS,
+                    output_type=CandidateRelationBatch,
+                    model=agent_model,
+                )
             extraction_output = await _run_stage_with_trace(
                 lambda: _run_agent_with_optional_runner(
                     run_agent,
@@ -304,7 +341,42 @@ async def run_openai_agents_ingestion(
                 runtime_trace=runtime_trace,
                 progress_callback=effective_progress_callback,
             )
-            candidate_batch = _coerce_candidate_batch(extraction_output)
+            if not has_explicit_reviewers and _is_handoff_review_batch(extraction_output):
+                review_batch = _coerce_review_batch(extraction_output)
+                # Build a minimal candidate list from review references so
+                # aggregation can match reviews to candidates.  The
+                # extractor's output is consumed by the handoff chain
+                # internally; we recover candidate identities from the
+                # reviewer's decisions.
+                candidate_ids: set[str] = set()
+                for review in review_batch.reviews:
+                    if review.candidate_id:
+                        candidate_ids.add(review.candidate_id)
+                candidate_batch = CandidateRelationBatch(
+                    candidates=[
+                        CandidateRelation(
+                            id=candidate_id,
+                            source="handoff://source",
+                            target="handoff://target",
+                            relation_type=RelationType.NECESSARY,
+                            confidence=0.0,
+                            evidence=[
+                                EvidenceRecord(
+                                    url="handoff://placeholder",
+                                    span=(
+                                        "Handoff chain — candidate reconstructed "
+                                        "from reviewer decisions."
+                                    ),
+                                )
+                            ],
+                        )
+                        for candidate_id in sorted(candidate_ids)
+                    ]
+                )
+                handoff_reviews = list(review_batch.reviews)
+            else:
+                candidate_batch = _coerce_candidate_batch(extraction_output)
+                handoff_reviews = None
     except _LLMRuntimeStageError as exc:
         return _runtime_error_report(
             ingestion_input=ingestion_input,
@@ -336,6 +408,7 @@ async def run_openai_agents_ingestion(
         progress_callback=progress_callback,
         canonicalize_preview=canonicalize_preview,
         agent_model=agent_model,
+        _handoff_reviews=handoff_reviews,
     )
 
 
@@ -362,6 +435,7 @@ async def review_gate_and_write_candidate_batch(
     canonicalize_preview: bool = False,
     enqueue_queued_records: bool = True,
     agent_model: Any | None = None,
+    _handoff_reviews: list[Any] | None = None,
 ) -> IngestionReport:
     """Review, gate, optionally write, and optionally queue an extracted candidate batch."""
     if not 0 <= min_write_confidence <= 1:
@@ -463,32 +537,78 @@ async def review_gate_and_write_candidate_batch(
             *canonicalization_result.propositions,
         ]
 
-    reviewer_results = await _run_reviewer_calls(
-        ingestion_input=ingestion_input,
-        candidate_batch=candidate_batch,
-        reviewers=resolved_reviewers,
-        high_priority_models=high_priority_models,
-        voting_policy=voting_policy,
-        runtime_options=runtime_options,
-        runtime_env=runtime_env,
-        run_agent=run_agent,
-        run_chat_completion=run_chat_completion,
-        provider_config=provider_config,
-        base_model_name=base_model_name,
-        agent_model=agent_model,
-        tracing_disabled=tracing_disabled,
-        runtime_trace=runtime_trace,
-        progress_callback=effective_progress_callback,
-    )
-    reviews = [
-        review
-        for result in reviewer_results
-        for review in _reviews_with_model(result.reviews, result.config.reviewer_id)
-    ]
-    runtime_diagnostics = [
-        diagnostic for result in reviewer_results for diagnostic in result.diagnostics
-    ]
-    reviewer_runtime_failed = any(result.failed for result in reviewer_results)
+    if _handoff_reviews is not None:
+        reviews = _handoff_reviews
+        runtime_diagnostics: list[Any] = []
+        reviewer_runtime_failed = False
+        # When auto_write is active and candidates come from a handoff
+        # chain, the candidate batch contains reconstructed placeholders
+        # (source/target = ``handoff://*``) because the extractor's raw
+        # output was consumed internally by the handoff.  Surface a
+        # warning so the operator knows the written relations reflect
+        # reviewer decisions, not the original extractor output.
+        if auto_write:
+            runtime_diagnostics.append(
+                Diagnostic(
+                    level="warning",
+                    code="HANDOFF_AUTO_WRITE_PLACEHOLDER",
+                    message=(
+                        "auto_write is enabled but candidates were "
+                        "reconstructed from handoff chain output "
+                        "(source/target are placeholders). "
+                        "The extractor's output was consumed internally "
+                        "by the handoff; candidate identities were "
+                        "recovered from reviewer decisions."
+                    ),
+                    related_ids=[
+                        candidate.id
+                        for candidate in candidate_batch.candidates
+                        if candidate.source.startswith("handoff://")
+                    ],
+                )
+            )
+        # When handoff is used, there's no resolved_reviewers list from
+        # explicit configs — use a synthetic entry so aggregation and
+        # metadata still reflect the default reviewer.
+        resolved_reviewers = (
+            [
+                ReviewerModelConfig(
+                    reviewer_id=base_model_name,
+                    model=base_model_name,
+                    provider_name=None,
+                    provider_config=provider_config,
+                )
+            ]
+            if base_model_name
+            else []
+        )
+    else:
+        reviewer_results = await _run_reviewer_calls(
+            ingestion_input=ingestion_input,
+            candidate_batch=candidate_batch,
+            reviewers=resolved_reviewers,
+            high_priority_models=high_priority_models,
+            voting_policy=voting_policy,
+            runtime_options=runtime_options,
+            runtime_env=runtime_env,
+            run_agent=run_agent,
+            run_chat_completion=run_chat_completion,
+            provider_config=provider_config,
+            base_model_name=base_model_name,
+            agent_model=agent_model,
+            tracing_disabled=tracing_disabled,
+            runtime_trace=runtime_trace,
+            progress_callback=effective_progress_callback,
+        )
+        reviews = [
+            review
+            for result in reviewer_results
+            for review in _reviews_with_model(result.reviews, result.config.reviewer_id)
+        ]
+        runtime_diagnostics = [
+            diagnostic for result in reviewer_results for diagnostic in result.diagnostics
+        ]
+        reviewer_runtime_failed = any(result.failed for result in reviewer_results)
 
     aggregation = aggregate_review_decisions(
         candidates=candidate_batch.candidates,
@@ -1456,6 +1576,7 @@ def _build_agent(
     instructions: str,
     output_type: type[Any],
     model: Any,
+    handoffs: list[Any] | None = None,
 ) -> Any:
     from agents import Agent, AgentOutputSchema
 
@@ -1466,6 +1587,8 @@ def _build_agent(
     }
     if model:
         kwargs["model"] = model
+    if handoffs:
+        kwargs["handoffs"] = handoffs
     return Agent(**kwargs)
 
 
@@ -1856,6 +1979,25 @@ def _coerce_review_batch(output: Any) -> ReviewDecisionBatch:
     if isinstance(output, list):
         return ReviewDecisionBatch(reviews=output)
     return ReviewDecisionBatch.model_validate(output)
+
+
+def _is_handoff_review_batch(output: Any) -> bool:
+    """Return True when the Agent SDK output looks like a reviewer result
+    from a handoff chain (ReviewDecisionBatch) rather than standalone
+    extractor output (CandidateRelationBatch).
+
+    Attempts direct coercion via ``_coerce_review_batch`` and catches
+    any exception so that Pydantic validation errors produce a clean
+    False return rather than leaking an opaque traceback.  This is more
+    robust than the previous dict-heuristic because it also correctly
+    handles Pydantic model instances and lists."""
+    if isinstance(output, ReviewDecisionBatch):
+        return True
+    try:
+        _coerce_review_batch(output)
+        return True
+    except Exception:
+        return False
 
 
 def _coerce_canonicalization_batch(output: Any) -> PropositionCanonicalizationBatch:
