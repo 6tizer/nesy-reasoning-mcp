@@ -150,7 +150,8 @@ jobs:
                       await session.initialize()
                       tools = await session.list_tools()
                       tool_names = [tool.name for tool in tools.tools]
-                      assert len(tool_names) == 16
+                      assert len(tool_names) == 17
+                      assert "nesy.queue_status" in tool_names
                       assert "nesy.summarize_graph" in tool_names
                       assert "nesy.counterfactual" in tool_names
                       assert "nesy.reason_over_relations" in tool_names

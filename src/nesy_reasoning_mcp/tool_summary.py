@@ -183,22 +183,46 @@ def _append_background_status(
 
     suffix = "\n...truncated"
     separator = "\n"
-    cutoff = max(0, max_chars - len(status_block) - len(separator) - len(suffix))
+    status_overhead = len(separator) + len(status_block)
+    # If the status block alone exceeds max_chars, truncate it.
+    if status_overhead >= max_chars:
+        cutoff = max(0, max_chars - len(suffix))
+        truncated_summary = f"{summary[:cutoff].rstrip()}{suffix}"
+        return truncated_summary, True
+    cutoff = max(0, max_chars - status_overhead - len(suffix))
     truncated_summary = f"{summary[:cutoff].rstrip()}{suffix}"
     return f"{truncated_summary}{separator}{status_block}", True
 
 
 def _background_status_block(queue_snapshot: dict[str, Any]) -> str:
+    pending = queue_snapshot["pending"]
+    parts: list[str] = [
+        "Background processing: "
+        f"{pending} turn{'s' if pending != 1 else ''} pending extraction, "
+        f"{queue_snapshot['extracting']} extracting, "
+        f"{queue_snapshot['reviewing']} under review.",
+    ]
+    done_total = queue_snapshot.get("done_last_24h", 0)
+    failed_total = queue_snapshot.get("failed_last_24h", 0)
+    throughput = _format_throughput(done_total, failed_total)
+    if throughput:
+        parts.append(throughput)
     last_write = "Last write: none."
     if queue_snapshot["last_write_at"] is not None:
         last_write = (
             f"Last write: {queue_snapshot['last_write_at']} "
             f"({queue_snapshot['last_write_relation_count']} relations added)."
         )
-    return (
-        "Background processing: "
-        f"{queue_snapshot['pending']} turns pending extraction, "
-        f"{queue_snapshot['extracting']} extracting, "
-        f"{queue_snapshot['reviewing']} under review. "
-        f"{last_write}"
-    )
+    parts.append(last_write)
+    return " ".join(parts)
+
+
+def _format_throughput(done: int, failed: int) -> str:
+    if done == 0 and failed == 0:
+        return ""
+    pieces: list[str] = []
+    if done:
+        pieces.append(f"{done} completed")
+    if failed:
+        pieces.append(f"{failed} failed")
+    return f"Last 24h: {', '.join(pieces)}."

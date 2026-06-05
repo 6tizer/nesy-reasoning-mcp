@@ -4,6 +4,7 @@ import pytest
 
 from nesy_reasoning_mcp.auto_ingest import ConversationTurnJob, ConversationTurnJobStatus
 from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.tool_summary import _append_background_status
 from nesy_reasoning_mcp.tools import (
     ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
@@ -163,7 +164,7 @@ async def test_summarize_graph_appends_background_status_when_queue_in_flight() 
     summary = result.structuredContent["summary"]
     assert result.isError is False
     assert "Background processing" in summary
-    assert "1 turns pending extraction" in summary
+    assert "1 turn pending extraction" in summary
     assert "1 extracting" in summary
     assert "1 under review" in summary
     assert "Last write:" in summary
@@ -209,3 +210,25 @@ async def test_summarize_graph_keeps_background_status_when_truncated() -> None:
     assert len(summary) <= 500
     assert "...truncated" in summary
     assert "Background processing" in summary
+
+
+def test_append_background_status_truncates_when_status_block_exceeds_max_chars() -> None:
+    """When the status block itself is longer than max_chars, return truncated summary only."""
+    snapshot = {
+        "in_flight_total": 1,
+        "pending": 3,
+        "extracting": 2,
+        "reviewing": 1,
+        "done_last_24h": 0,
+        "failed_last_24h": 0,
+        "last_write_at": None,
+        "last_write_relation_count": 0,
+    }
+    summary = "Short summary"
+    max_chars = 50  # Deliberately smaller than the status block
+
+    result, truncated = _append_background_status(summary, snapshot, max_chars=max_chars)
+
+    assert truncated is True
+    assert len(result) <= max_chars
+    assert "...truncated" in result

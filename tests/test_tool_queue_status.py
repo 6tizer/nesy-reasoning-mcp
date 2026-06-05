@@ -7,7 +7,12 @@ from nesy_reasoning_mcp.auto_ingest import ConversationTurnJob, ConversationTurn
 from nesy_reasoning_mcp.config import NesyConfig, StorageConfig
 from nesy_reasoning_mcp.schemas import RelationRecord, RelationType
 from nesy_reasoning_mcp.store import RelationStore, SqliteRelationStore
-from nesy_reasoning_mcp.tool_queue_status import queue_status_snapshot
+from nesy_reasoning_mcp.tool_queue_status import (
+    _last_write_summary,
+    _parse_timestamp,
+    _updated_within,
+    queue_status_snapshot,
+)
 from nesy_reasoning_mcp.tools import QUEUE_STATUS, call_tool
 
 
@@ -127,3 +132,51 @@ async def test_queue_status_reads_live_sqlite_state(tmp_path) -> None:
     assert result.structuredContent["pending"] == 1
     assert result.structuredContent["reviewing"] == 1
     assert result.structuredContent["in_flight_total"] == 2
+
+
+# ── P1-6 boundary tests ──────────────────────────────────────────────
+
+
+def test_updated_within_at_exact_threshold_edge() -> None:
+    """_updated_within(x, threshold) uses >= semantics."""
+    threshold = datetime(2026, 1, 2, tzinfo=UTC)
+    exactly = threshold.isoformat()
+
+    assert _updated_within(exactly, threshold) is True
+    assert _updated_within((threshold + timedelta(seconds=1)).isoformat(), threshold) is True
+    assert _updated_within((threshold - timedelta(seconds=1)).isoformat(), threshold) is False
+
+
+def test_updated_within_unparseable_timestamp() -> None:
+    """_updated_within returns False for unparseable timestamps."""
+    assert _updated_within("not-a-date", datetime(2026, 1, 1, tzinfo=UTC)) is False
+
+
+def test_last_write_summary_empty_relations() -> None:
+    """_last_write_summary returns (None, 0) for empty input."""
+    at_str, count = _last_write_summary([])
+    assert at_str is None
+    assert count == 0
+
+
+def test_last_write_summary_unparseable_timestamps() -> None:
+    """_last_write_summary returns (None, 0) when all timestamps are unparseable."""
+    relations = [
+        RelationRecord(
+            id=f"rel-{i}",
+            source="A",
+            target="B",
+            relation_type=RelationType.SUFFICIENT,
+            created_at=f"garbage-{i}",
+        )
+        for i in range(3)
+    ]
+    at_str, count = _last_write_summary(relations)
+    assert at_str is None
+    assert count == 0
+
+
+def test_parse_timestamp_returns_none_for_malformed() -> None:
+    """_parse_timestamp returns None for malformed ISO strings."""
+    assert _parse_timestamp("not-a-date") is None
+    assert _parse_timestamp("") is None
