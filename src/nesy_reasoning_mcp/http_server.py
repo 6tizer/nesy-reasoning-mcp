@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
@@ -23,6 +25,8 @@ from nesy_reasoning_mcp import __version__
 from nesy_reasoning_mcp.config import NesyConfig, load_config
 from nesy_reasoning_mcp.server import create_server
 from nesy_reasoning_mcp.store import RelationStoreProtocol, create_relation_store
+
+logger = logging.getLogger(__name__)
 
 
 class BodyTooLargeError(Exception):
@@ -126,8 +130,14 @@ async def healthz(_request: Request) -> JSONResponse:
 def create_http_app(
     config: NesyConfig | None = None,
     store: RelationStoreProtocol | None = None,
+    *,
+    with_worker: bool = False,
 ) -> ASGIApp:
-    """Create the authenticated Streamable HTTP ASGI application."""
+    """Create the authenticated Streamable HTTP ASGI application.
+
+    When ``with_worker=True``, a background ingestion worker task is started
+    during the application lifespan and drained on shutdown.
+    """
     resolved = config or load_config()
     if not resolved.http.local_token:
         raise ValueError("NESY_LOCAL_TOKEN is required when --transport http is used")
@@ -145,10 +155,31 @@ def create_http_app(
     )
     mcp_app = StreamableHTTPASGIApp(session_manager)
 
+    worker_shutdown_event: asyncio.Event | None = None
+    worker_task: asyncio.Task[Any] | None = None
+
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> Any:
+        nonlocal worker_shutdown_event, worker_task
         async with session_manager.run():
+            if with_worker:
+                from nesy_reasoning_mcp.worker import run_worker_loop
+
+                worker_shutdown_event = asyncio.Event()
+                worker_task = asyncio.create_task(
+                    run_worker_loop(
+                        active_store,
+                        config=resolved.worker,
+                        shutdown_event=worker_shutdown_event,
+                    )
+                )
+                logger.info("background ingestion worker started")
             yield
+            if with_worker and worker_shutdown_event is not None:
+                worker_shutdown_event.set()
+                if worker_task is not None:
+                    await worker_task
+                logger.info("background ingestion worker shutdown complete")
 
     app = Starlette(
         routes=[
@@ -160,10 +191,18 @@ def create_http_app(
     return HttpGuardMiddleware(app, resolved)
 
 
-async def run_http_server(config: NesyConfig | None = None) -> None:
-    """Run the MCP Streamable HTTP daemon."""
+async def run_http_server(
+    config: NesyConfig | None = None,
+    *,
+    with_worker: bool = True,
+) -> None:
+    """Run the MCP Streamable HTTP daemon.
+
+    By default, starts the background ingestion worker so extraction runs
+    automatically.  Pass ``with_worker=False`` to disable.
+    """
     resolved = config or load_config()
-    app = create_http_app(resolved)
+    app = create_http_app(resolved, with_worker=with_worker)
     uvicorn_config = uvicorn.Config(
         app,
         host=resolved.http.host,

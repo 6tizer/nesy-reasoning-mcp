@@ -18,6 +18,7 @@ from nesy_reasoning_mcp.evaluation import (
 from nesy_reasoning_mcp.hooks import run_pretooluse_hook, run_stop_hook
 from nesy_reasoning_mcp.http_server import run_http_server
 from nesy_reasoning_mcp.server import run_stdio_server
+from nesy_reasoning_mcp.worker import run_nesy_worker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nesy-reasoning-mcp")
     subparsers = parser.add_subparsers(dest="command")
     add_ingest_subparser(subparsers)
+    subparsers.add_parser("worker", help="Run standalone ingestion worker daemon.")
     hook_parser = subparsers.add_parser("hook", help="Run a Claude Code hook helper.")
     hook_parser.add_argument("hook_name", choices=["pretooluse", "stop"])
     audit_parser = subparsers.add_parser("audit", help="Inspect local audit logs.")
@@ -168,6 +170,14 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(run_ingest_cli(args))
         except ValueError as exc:
             parser.error(str(exc))
+    if args.command == "worker":
+        try:
+            anyio.run(run_nesy_worker)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
+        except KeyboardInterrupt:
+            sys.exit(130)
     if args.command == "eval":
         if args.eval_command == "run":
             sys.exit(run_eval_cli(args))
