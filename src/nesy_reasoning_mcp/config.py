@@ -95,6 +95,16 @@ class HttpConfig(BaseModel):
     rate_limit_per_minute: int = Field(default=120, ge=1)
 
 
+class WorkerConfig(BaseModel):
+    """Background ingestion worker settings for HTTP mode and nesy-worker daemon."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    poll_seconds: float = Field(default=5.0, gt=0, le=3600)
+    claim_limit: int = Field(default=5, ge=1, le=100)
+    health_port: int = Field(default=8766, ge=1, le=65535)
+
+
 class NesyConfig(BaseModel):
     """Complete runtime configuration."""
 
@@ -105,6 +115,7 @@ class NesyConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     hook: HookConfig = Field(default_factory=HookConfig)
     http: HttpConfig = Field(default_factory=HttpConfig)
+    worker: WorkerConfig = Field(default_factory=WorkerConfig)
 
 
 def load_config(
@@ -166,6 +177,12 @@ def load_config(
         data.setdefault("http", {})["request_timeout_seconds"] = float(http_timeout)
     if rate_limit := env_map.get("NESY_HTTP_RATE_LIMIT_PER_MINUTE"):
         data.setdefault("http", {})["rate_limit_per_minute"] = int(rate_limit)
+    if worker_poll := env_map.get("NESY_WORKER_POLL_SECONDS"):
+        data.setdefault("worker", {})["poll_seconds"] = float(worker_poll)
+    if worker_claim := env_map.get("NESY_WORKER_CLAIM_LIMIT"):
+        data.setdefault("worker", {})["claim_limit"] = int(worker_claim)
+    if worker_health_port := env_map.get("NESY_WORKER_HEALTH_PORT"):
+        data.setdefault("worker", {})["health_port"] = int(worker_health_port)
 
     return NesyConfig.model_validate(data)
 
@@ -202,6 +219,11 @@ def _default_config_data(cwd: Path) -> dict[str, Any]:
             "max_body_bytes": 1_000_000,
             "request_timeout_seconds": 30,
             "rate_limit_per_minute": 120,
+        },
+        "worker": {
+            "poll_seconds": 5.0,
+            "claim_limit": 5,
+            "health_port": 8766,
         },
     }
 

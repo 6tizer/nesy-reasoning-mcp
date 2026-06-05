@@ -685,7 +685,8 @@ def test_audit_list_reads_json_backend(tmp_path: Path) -> None:
     payload = json.loads(completed.stdout)
     assert payload["count"] == 1
     assert payload["entries"][0]["tool_name"] == "nesy.load_relations"
-    assert completed.stderr == ""
+    # JSON backend may emit a multi-worker safety warning to stderr.
+    assert completed.stderr == "" or "JSON backend has no file locking" in completed.stderr
 
 
 def test_audit_list_default_memory_backend_is_empty() -> None:
