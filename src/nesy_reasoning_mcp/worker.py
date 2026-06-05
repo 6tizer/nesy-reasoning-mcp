@@ -35,7 +35,7 @@ async def run_ingestion_task(
     """Run one ingestion extraction cycle: claim a job, extract, and enqueue review."""
     worker_config = IngestionWorkerConfig(
         poll_seconds=config.poll_seconds,
-        claim_limit=1,
+        claim_limit=config.claim_limit,
     )
     return await process_ingestion_queue_once(
         store,
@@ -51,56 +51,76 @@ async def run_worker_loop(
     env: Mapping[str, str] | None = None,
     shutdown_event: asyncio.Event | None = None,
 ) -> IngestionWorkerResult:
-    """Run the background ingestion worker loop until shutdown is signaled."""
+    """Run the background ingestion worker loop until shutdown is signaled.
+
+    Cycles run sequentially — each ``_do_cycle()`` completes before the next
+    poll interval begins, preventing unbounded task accumulation.
+    """
     worker_config = config or WorkerConfig()
     total = IngestionWorkerResult(iterations=0)
-    in_flight: set[asyncio.Task[Any]] = set()
 
     if shutdown_event is None:
         shutdown_event = asyncio.Event()
+
+    current_cycle: asyncio.Task[IngestionWorkerResult] | None = None
 
     async def _do_cycle() -> IngestionWorkerResult:
         return await run_ingestion_task(store, config=worker_config, env=env)
 
     try:
         while not shutdown_event.is_set():
-            task = asyncio.create_task(_do_cycle())
-            in_flight.add(task)
+            # Run one cycle sequentially — no concurrent accumulation.
+            current_cycle = asyncio.create_task(_do_cycle())
+            try:
+                result = await current_cycle
+                total = total.merged(result)
+            except Exception:
+                logger.exception("worker cycle raised unhandled exception")
+            finally:
+                current_cycle = None
 
+            # Wait for next poll interval or shutdown signal, whichever comes first.
             with suppress(TimeoutError):
-                await asyncio.wait_for(shutdown_event.wait(), timeout=worker_config.poll_seconds)
-
-            # Merge results from completed tasks
-            done = {t for t in in_flight if t.done() and not t.cancelled()}
-            for t in done:
-                try:
-                    result = t.result()
-                    total = total.merged(result)
-                except Exception:
-                    logger.exception("worker cycle task raised unhandled exception")
-            in_flight -= done
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=worker_config.poll_seconds,
+                )
     except asyncio.CancelledError:
-        logger.info("ingestion worker loop cancelled, draining in-flight tasks")
+        logger.info("ingestion worker loop cancelled, draining current cycle")
     finally:
-        if in_flight:
-            logger.info("draining %d in-flight ingestion tasks", len(in_flight))
-            results = await asyncio.gather(*in_flight, return_exceptions=True)
-            for result in results:
-                if isinstance(result, IngestionWorkerResult):
-                    total = total.merged(result)
+        if current_cycle is not None and not current_cycle.done():
+            logger.info("draining in-flight ingestion cycle")
+            try:
+                result = await current_cycle
+                total = total.merged(result)
+            except Exception:
+                logger.exception("in-flight cycle raised unhandled exception")
 
     return total
 
 
-async def _healthz(_request: Request) -> JSONResponse:
-    """Return daemon health information."""
-    return JSONResponse(
-        {
-            "status": "ok",
-            "name": "nesy-worker",
-            "version": __version__,
-        }
-    )
+def _create_health_response(
+    *,
+    worker_running: bool = True,
+    worker_error: str | None = None,
+) -> JSONResponse:
+    """Build health endpoint response reflecting daemon state."""
+    if worker_running:
+        return JSONResponse(
+            {
+                "status": "ok",
+                "name": "nesy-worker",
+                "version": __version__,
+            }
+        )
+    body: dict[str, Any] = {
+        "status": "unhealthy",
+        "name": "nesy-worker",
+        "version": __version__,
+    }
+    if worker_error:
+        body["error"] = worker_error
+    return JSONResponse(body, status_code=503)
 
 
 async def run_nesy_worker(config: NesyConfig | None = None) -> None:
@@ -108,6 +128,9 @@ async def run_nesy_worker(config: NesyConfig | None = None) -> None:
 
     Connects to the same store as the MCP server and processes the ingestion
     queue independently.  Exposes a /healthz HTTP endpoint for monitoring.
+
+    The health endpoint requires bearer-token auth when ``NESY_LOCAL_TOKEN``
+    is configured; otherwise it's openly reachable on the configured host.
     """
     resolved = config or load_config()
     store = create_relation_store(resolved)
@@ -115,9 +138,31 @@ async def run_nesy_worker(config: NesyConfig | None = None) -> None:
     shutdown_event = asyncio.Event()
     worker_task: asyncio.Task[Any] | None = None
 
+    # Shared mutable health state visible to the lifespan and health endpoint.
+    health: dict[str, Any] = {"running": False, "error": None}
+
+    async def healthz(request: Request) -> JSONResponse:
+        """Return daemon health information with optional auth."""
+        token = resolved.http.local_token
+        if token:
+            from hmac import compare_digest
+
+            auth = request.headers.get("authorization", "")
+            if not compare_digest(auth, f"Bearer {token}"):
+                return JSONResponse(
+                    {"error": "missing_or_invalid_token"},
+                    status_code=401,
+                )
+        return _create_health_response(
+            worker_running=health["running"],
+            worker_error=health["error"],
+        )
+
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> Any:  # noqa: ANN401
         nonlocal worker_task
+        health["running"] = True
+        health["error"] = None
         worker_task = asyncio.create_task(
             run_worker_loop(
                 store,
@@ -125,14 +170,23 @@ async def run_nesy_worker(config: NesyConfig | None = None) -> None:
                 shutdown_event=shutdown_event,
             )
         )
-        yield
-        shutdown_event.set()
-        if worker_task is not None:
-            await worker_task
-        logger.info("nesy-worker shutdown complete")
+        try:
+            yield
+        finally:
+            shutdown_event.set()
+            if worker_task is not None:
+                try:
+                    await worker_task
+                except Exception:
+                    logger.exception("worker task crashed during shutdown")
+                    health["running"] = False
+                    health["error"] = "worker crashed"
+                else:
+                    health["running"] = False
+            logger.info("nesy-worker shutdown complete")
 
     app = Starlette(
-        routes=[Route("/healthz", endpoint=_healthz, methods=["GET"])],
+        routes=[Route("/healthz", endpoint=healthz, methods=["GET"])],
         lifespan=lifespan,
     )
 

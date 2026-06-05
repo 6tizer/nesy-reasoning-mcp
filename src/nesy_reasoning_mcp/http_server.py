@@ -194,14 +194,25 @@ def create_http_app(
 async def run_http_server(
     config: NesyConfig | None = None,
     *,
-    with_worker: bool = True,
+    with_worker: bool = False,
 ) -> None:
     """Run the MCP Streamable HTTP daemon.
 
-    By default, starts the background ingestion worker so extraction runs
-    automatically.  Pass ``with_worker=False`` to disable.
+    By default, the ingestion worker is NOT started to avoid unexpected API
+    credit consumption on upgrade.  Enable with ``with_worker=True`` or by
+    setting ``NESY_WORKER_ENABLED=true``.
     """
+    import os as _os
+
     resolved = config or load_config()
+    # Allow opt-in via environment variable.
+    if not with_worker:
+        with_worker = _os.environ.get("NESY_WORKER_ENABLED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
     app = create_http_app(resolved, with_worker=with_worker)
     uvicorn_config = uvicorn.Config(
         app,
