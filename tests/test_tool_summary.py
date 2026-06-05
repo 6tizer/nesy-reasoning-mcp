@@ -2,7 +2,9 @@ import json
 
 import pytest
 
+from nesy_reasoning_mcp.auto_ingest import ConversationTurnJob, ConversationTurnJobStatus
 from nesy_reasoning_mcp.store import RelationStore
+from nesy_reasoning_mcp.tool_summary import _append_background_status
 from nesy_reasoning_mcp.tools import (
     ASSERT_EXCLUSIVE,
     ASSERT_RELATIONS,
@@ -77,6 +79,7 @@ async def test_summarize_graph_filters_sorts_and_mirrors_content() -> None:
     assert "profit_state" in result.structuredContent["summary"]
     assert "现金回收" not in result.structuredContent["summary"]
     assert "利润增加" in result.structuredContent["summary"]
+    assert "Background processing" not in result.structuredContent["summary"]
 
 
 @pytest.mark.asyncio
@@ -120,3 +123,112 @@ async def test_summarize_graph_truncates_by_relation_and_char_limits() -> None:
     assert relation_limited.structuredContent["relation_count_included"] == 1
     assert char_limited.structuredContent["truncated"] is False
     assert invalid.isError is True
+
+
+@pytest.mark.asyncio
+async def test_summarize_graph_appends_background_status_when_queue_in_flight() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [{"source": "A", "target": "B", "relation_type": "sufficient"}],
+            "check_contradictions": False,
+        },
+        store,
+    )
+    store.enqueue_ingestion_jobs(
+        [
+            ConversationTurnJob(
+                job_id="turn-pending",
+                session_id="session-1",
+                transcript_path="/tmp/transcript.jsonl",
+                status=ConversationTurnJobStatus.PENDING,
+            ),
+            ConversationTurnJob(
+                job_id="turn-extracting",
+                session_id="session-1",
+                transcript_path="/tmp/transcript.jsonl",
+                status=ConversationTurnJobStatus.EXTRACTING,
+            ),
+            ConversationTurnJob(
+                job_id="turn-reviewing",
+                session_id="session-1",
+                transcript_path="/tmp/transcript.jsonl",
+                status=ConversationTurnJobStatus.REVIEWING,
+            ),
+        ]
+    )
+
+    result = await call_tool(SUMMARIZE_GRAPH, {"include_exclusives": False}, store)
+
+    summary = result.structuredContent["summary"]
+    assert result.isError is False
+    assert "Background processing" in summary
+    assert "1 turn pending extraction" in summary
+    assert "1 extracting" in summary
+    assert "1 under review" in summary
+    assert "Last write:" in summary
+    assert "relations added" in summary
+
+
+@pytest.mark.asyncio
+async def test_summarize_graph_keeps_background_status_when_truncated() -> None:
+    store = RelationStore()
+    await call_tool(
+        ASSERT_RELATIONS,
+        {
+            "relations": [
+                {
+                    "source": f"VeryLongSource{i:02d}" * 6,
+                    "target": f"VeryLongTarget{i:02d}" * 6,
+                    "relation_type": "sufficient",
+                }
+                for i in range(20)
+            ],
+            "check_contradictions": False,
+        },
+        store,
+    )
+    store.enqueue_ingestion_jobs(
+        [
+            ConversationTurnJob(
+                job_id="turn-pending",
+                session_id="session-1",
+                transcript_path="/tmp/transcript.jsonl",
+            )
+        ]
+    )
+
+    result = await call_tool(
+        SUMMARIZE_GRAPH,
+        {"max_chars": 500, "include_exclusives": False},
+        store,
+    )
+
+    summary = result.structuredContent["summary"]
+    assert result.structuredContent["truncated"] is True
+    assert len(summary) <= 500
+    assert "...truncated" in summary
+    assert "Background processing" in summary
+
+
+def test_append_background_status_truncates_when_status_block_exceeds_max_chars() -> None:
+    """When the status block itself is longer than max_chars, return truncated summary only."""
+    snapshot = {
+        "in_flight_total": 1,
+        "pending": 3,
+        "extracting": 2,
+        "reviewing": 1,
+        "done_last_24h": 0,
+        "failed_last_24h": 0,
+        "last_write_at": None,
+        "last_write_relation_count": 0,
+    }
+    summary = "Short summary"
+    max_chars = 50  # Deliberately smaller than the status block
+
+    result, truncated = _append_background_status(summary, snapshot, max_chars=max_chars)
+
+    assert truncated is True
+    assert len(result) <= max_chars
+    assert "...truncated" in result

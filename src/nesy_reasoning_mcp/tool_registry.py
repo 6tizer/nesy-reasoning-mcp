@@ -24,6 +24,7 @@ from nesy_reasoning_mcp.schemas import (
     ExportRelationsInput,
     ListRelationsInput,
     LoadRelationsInput,
+    QueueStatusInput,
     ReasonOverRelationsInput,
     SummarizeGraphInput,
     VerifyChainInput,
@@ -45,6 +46,7 @@ from nesy_reasoning_mcp.tool_names import (
     LIST_RELATIONS,
     LIST_REVIEW_QUEUE,
     LOAD_RELATIONS,
+    QUEUE_STATUS,
     REASON_OVER_RELATIONS,
     RESOLVE_REVIEW_QUEUE,
     SUMMARIZE_GRAPH,
@@ -63,12 +65,14 @@ from nesy_reasoning_mcp.tool_output_schemas import (
     _list_relations_output_schema,
     _list_review_queue_output_schema,
     _load_relations_output_schema,
+    _queue_status_output_schema,
     _reason_over_relations_output_schema,
     _resolve_review_queue_output_schema,
     _summarize_graph_output_schema,
     _validate_candidate_relations_output_schema,
     _verify_chain_output_schema,
 )
+from nesy_reasoning_mcp.tool_queue_status import queue_status
 from nesy_reasoning_mcp.tool_reasoning import classify, verify_chain
 from nesy_reasoning_mcp.tool_relations import (
     assert_exclusive,
@@ -197,6 +201,13 @@ def get_tools() -> list[Tool]:
             outputSchema=_summarize_graph_output_schema(),
         ),
         Tool(
+            name=QUEUE_STATUS,
+            title="Queue Status",
+            description=("Return a read-only snapshot of Auto-Ingest background queue state."),
+            inputSchema=QueueStatusInput.model_json_schema(),
+            outputSchema=_queue_status_output_schema(),
+        ),
+        Tool(
             name=COUNTERFACTUAL,
             title="Counterfactual Reasoning",
             description=(
@@ -275,6 +286,7 @@ async def call_tool(
         LOAD_RELATIONS: load_relations,
         EXPORT_RELATIONS: export_relations,
         SUMMARIZE_GRAPH: summarize_graph,
+        QUEUE_STATUS: queue_status,
         COUNTERFACTUAL: counterfactual,
         REASON_OVER_RELATIONS: reason_over_relations,
         VALIDATE_CANDIDATE_RELATIONS: _validate_candidate_relations_handler,

@@ -618,6 +618,12 @@ class SummarizeGraphInput(BaseModel):
         return [item for item in (term.strip() for term in value) if item]
 
 
+class QueueStatusInput(BaseModel):
+    """Input for `nesy.queue_status`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class CounterfactualInput(BaseModel):
     """Input for `nesy.counterfactual`."""
 
