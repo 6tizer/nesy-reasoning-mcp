@@ -541,6 +541,32 @@ async def review_gate_and_write_candidate_batch(
         reviews = _handoff_reviews
         runtime_diagnostics: list[Any] = []
         reviewer_runtime_failed = False
+        # When auto_write is active and candidates come from a handoff
+        # chain, the candidate batch contains reconstructed placeholders
+        # (source/target = ``handoff://*``) because the extractor's raw
+        # output was consumed internally by the handoff.  Surface a
+        # warning so the operator knows the written relations reflect
+        # reviewer decisions, not the original extractor output.
+        if auto_write:
+            runtime_diagnostics.append(
+                Diagnostic(
+                    level="warning",
+                    code="HANDOFF_AUTO_WRITE_PLACEHOLDER",
+                    message=(
+                        "auto_write is enabled but candidates were "
+                        "reconstructed from handoff chain output "
+                        "(source/target are placeholders). "
+                        "The extractor's output was consumed internally "
+                        "by the handoff; candidate identities were "
+                        "recovered from reviewer decisions."
+                    ),
+                    related_ids=[
+                        candidate.id
+                        for candidate in candidate_batch.candidates
+                        if candidate.source.startswith("handoff://")
+                    ],
+                )
+            )
         # When handoff is used, there's no resolved_reviewers list from
         # explicit configs — use a synthetic entry so aggregation and
         # metadata still reflect the default reviewer.
@@ -1958,12 +1984,20 @@ def _coerce_review_batch(output: Any) -> ReviewDecisionBatch:
 def _is_handoff_review_batch(output: Any) -> bool:
     """Return True when the Agent SDK output looks like a reviewer result
     from a handoff chain (ReviewDecisionBatch) rather than standalone
-    extractor output (CandidateRelationBatch)."""
+    extractor output (CandidateRelationBatch).
+
+    Attempts direct coercion via ``_coerce_review_batch`` and catches
+    any exception so that Pydantic validation errors produce a clean
+    False return rather than leaking an opaque traceback.  This is more
+    robust than the previous dict-heuristic because it also correctly
+    handles Pydantic model instances and lists."""
     if isinstance(output, ReviewDecisionBatch):
         return True
-    if isinstance(output, dict):
-        return "reviews" in output and "candidates" not in output
-    return False
+    try:
+        _coerce_review_batch(output)
+        return True
+    except Exception:
+        return False
 
 
 def _coerce_canonicalization_batch(output: Any) -> PropositionCanonicalizationBatch:
